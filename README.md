@@ -14,8 +14,24 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 
 [docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md](docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md)
 
+## 빌드/실행 순서 (인터넷 가능한 Mac)
+
+```bash
+./scripts/00-check-prereqs.sh    # 도구 점검
+./scripts/01-download-data.sh    # OSM/글리프/MapLibre/Maputnik
+./scripts/02-gen-vector.sh       # 벡터 타일 (korea.mbtiles)
+./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
+./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
+./scripts/package.sh             # 폐쇄망 반입 번들 (dist/)
+```
+
+폐쇄망 서버: 번들 해제 후 `./scripts/deploy.sh /path/to/images.tar`
+
+> `style/style.json` 은 생성물이라 git에 없다. `git clone` 직후 바로 `docker compose up` 하면
+> 스타일 404가 나므로 반드시 `build-style.sh` 를 먼저 실행할 것 (`package.sh` 는 자동 수행).
+
 ## 브랜치
 
-- `main` — 토대(타일 생성·서버·스타일·데모·패키징)
+- `main` — 토대(타일 생성·서버·스타일·데모·패키징) + 3D 건물/지형 병합 완료
 - `feature/3d-building` — 3D 건물(`Building 3D` fill-extrusion)
 - `feature/3d-terrain` — 3D 지형(DEM 파이프라인 + setTerrain 토글)

@@ -148,9 +148,9 @@ maptiler/
 │   ├── docker-compose.yml           # tileserver-gl (+ 정적 서빙)
 │   └── tileserver-config.json
 ├── style/
-│   ├── style.json                   # 조립된 최종 스타일 (커밋 or 빌드 산출)
+│   ├── style.json                   # 조립된 최종 스타일 (빌드 산출물, gitignore)
+│   ├── base.json                    # 베이스 스타일 (layers/ 밖 — 조각 아님)
 │   ├── layers/
-│   │   ├── base.json
 │   │   ├── buildings-3d.json        # [3d-building] "Building 3D" 레이어
 │   │   └── terrain.json             # [3d-terrain]
 │   ├── glyphs/                      # 폰트 PBF

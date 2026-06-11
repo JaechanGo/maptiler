@@ -11,7 +11,9 @@
   btn.textContent = '지형 OFF';
   let on = false;
   btn.onclick = () => {
-    if (!map.isStyleLoaded()) return; // 스타일 로드 전 클릭은 무시 (terrain 소스 파싱 전 호출 방지)
+    // terrain 소스가 아직 파싱되지 않았으면 무시.
+    // (isStyleLoaded()는 타일 로딩 중에도 false라 토글을 영구 차단하는 회귀가 있었음 — 소스 존재로 판정)
+    if (!map.getSource('terrain')) return;
     on = !on;
     map.setTerrain(on ? { source: 'terrain', exaggeration: 1.3 } : null);
     btn.textContent = on ? '지형 ON' : '지형 OFF';

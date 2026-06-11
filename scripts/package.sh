@@ -8,6 +8,15 @@ mkdir -p "$DIST"
 echo "[1/3] 스타일 조립(최신화)"
 "$ROOT/scripts/build-style.sh"
 
+# tileserver-config.json 이 두 mbtiles 를 모두 참조 — 하나라도 빠진 번들은
+# 폐쇄망에서 TileServer-GL 기동 실패로 이어지므로 패키징 단계에서 차단한다.
+for mb in korea.mbtiles terrain.mbtiles; do
+  if [ ! -f "$ROOT/tiles/$mb" ]; then
+    echo "오류: tiles/$mb 가 없습니다 — 02/03 생성 스크립트를 먼저 실행하세요." >&2
+    exit 1
+  fi
+done
+
 echo "[2/3] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 # compose 파일에 고정된 태그를 그대로 사용해 드리프트를 방지한다.
 # ※ ROOT 에 공백이 포함될 수 있으므로 while read 로 라인 단위 파싱 (bash 3.2 호환)

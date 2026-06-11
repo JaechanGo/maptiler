@@ -45,7 +45,8 @@ fi
 echo "[3/4] Terrain-RGB 인코딩 (z5~z12)"
 # WORKAROUND: rio-rgbify 0.4.0 + rasterio 1.5 + GDAL 3.13 에서 EPSG:3857 입력 시
 #   transform_bounds(densify_pts=0) 버그 발생 → EPSG:4326 VRT 를 직접 입력.
-#   gdalwarp 결과(korea-3857.tif)는 타 용도 참조용으로 보존.
+#   gdalwarp 결과(korea-3857.tif)는 현재 파이프라인에서 미사용 — QGIS 검수/향후
+#   힐셰이드 등 참조용으로만 보존(멱등 가드로 1회만 생성).
 rm -f "$ROOT/tiles/terrain.mbtiles.tmp"
 rio rgbify -b -10000 -i 0.1 --min-z 5 --max-z 12 \
   -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)" --format png \
