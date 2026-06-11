@@ -1,0 +1,9 @@
+{
+  "sources": {
+    "terrain": {
+      "type": "raster-dem",
+      "url": "mbtiles://{terrain}",
+      "encoding": "mapbox"
+    }
+  }
+}
