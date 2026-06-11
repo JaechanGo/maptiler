@@ -1,0 +1,23 @@
+services:
+  tileserver:
+    image: maptiler/tileserver-gl:latest
+    platform: linux/amd64        # 폐쇄망 x86_64와 동일 아키텍처 강제 (Apple Silicon에서도 에뮬레이션 구동)
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../tiles:/data/tiles:ro
+      - ../style/glyphs:/data/glyphs:ro
+      - ../style:/data/styles/cuvia:ro
+      - ./tileserver-config.json:/data/config.json:ro
+    command: ["--config", "/data/config.json"]
+
+  demo:
+    image: nginx:alpine
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    volumes:
+      - ../demo:/usr/share/nginx/html/demo:ro
+      - ../vendor:/usr/share/nginx/html/vendor:ro
