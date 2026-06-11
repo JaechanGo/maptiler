@@ -14,6 +14,7 @@
     }
   },
   "data": {
-    "korea": { "mbtiles": "korea.mbtiles" }
+    "korea": { "mbtiles": "korea.mbtiles" },
+    "terrain": { "mbtiles": "terrain.mbtiles" }
   }
 }
