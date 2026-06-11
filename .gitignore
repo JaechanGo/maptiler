@@ -9,6 +9,9 @@ tiles/
 planetiler/*.jar
 vendor/
 
+# 글리프 폰트 PBF (다운로드 산출물, 수만 개 소파일)
+style/glyphs/
+
 # Docker 산출 tar 번들
 *.tar
 dist/
