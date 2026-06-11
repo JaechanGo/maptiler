@@ -1,6 +1,8 @@
 services:
   tileserver:
-    image: maptiler/tileserver-gl:latest
+    # 버전 태그 고정 — digest 핀은 docker save/load 시 레지스트리 메타데이터가 유실되므로
+    # 에어갭 번들 호환을 위해 명시적 버전 태그를 사용한다.
+    image: maptiler/tileserver-gl:v5.6.0
     platform: linux/amd64        # 폐쇄망 x86_64와 동일 아키텍처 강제 (Apple Silicon에서도 에뮬레이션 구동)
     restart: unless-stopped
     ports:
@@ -11,9 +13,18 @@ services:
       - ../style:/data/styles/cuvia:ro
       - ./tileserver-config.json:/data/config.json:ro
     command: ["--config", "/data/config.json"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - cuvia
 
   demo:
-    image: nginx:alpine
+    # 버전 태그 고정 — digest 핀은 docker save/load 시 레지스트리 메타데이터가 유실되므로
+    # 에어갭 번들 호환을 위해 명시적 버전 태그를 사용한다.
+    image: nginx:1.31.1-alpine
     platform: linux/amd64
     restart: unless-stopped
     ports:
@@ -21,3 +32,9 @@ services:
     volumes:
       - ../demo:/usr/share/nginx/html/demo:ro
       - ../vendor:/usr/share/nginx/html/vendor:ro
+    networks:
+      - cuvia
+
+networks:
+  cuvia:
+    driver: bridge
