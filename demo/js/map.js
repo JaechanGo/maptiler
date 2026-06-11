@@ -1,6 +1,7 @@
 // 베이스 지도 초기화. 타일서버 주소는 데모를 띄운 호스트의 8080 포트로 가정한다.
 // 다른 서버를 쓰려면 ?server=http://host:port 쿼리로 재지정.
 const params = new URLSearchParams(location.search);
+// 주의: ?server= 값은 검증 없이 URL로 사용된다. 공개망에서 재사용 시 allowlist 검증 필요.
 const TILESERVER = params.get('server') || `http://${location.hostname}:8080`;
 
 const map = new maplibregl.Map({
