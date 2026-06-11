@@ -32,7 +32,7 @@ _waited=0
 until curl -sf http://localhost:8080/health >/dev/null 2>&1; do
   if [ "$_waited" -ge 60 ]; then
     echo "오류: tileserver 가 60초 내에 응답하지 않습니다." >&2
-    echo "  로그 확인: docker compose logs tileserver" >&2
+    echo "  로그 확인: $COMPOSE_CMD logs tileserver" >&2
     exit 1
   fi
   sleep 5
