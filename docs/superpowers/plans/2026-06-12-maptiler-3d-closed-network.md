@@ -328,7 +328,7 @@ jq '.layers | length' style/style.json
 jq -r '.. | strings | select(test("^https?://"))' style/style.json
 ```
 
-Expected: `OK: ... (layers=15)`, 레이어 수 `15`, 마지막 명령 **출력 없음**(외부 URL 0건 — 폐쇄망 적합성).
+Expected: `OK: ... (layers=14)`, 레이어 수 `14`, 마지막 명령 **출력 없음**(외부 URL 0건 — 폐쇄망 적합성).
 
 - [ ] **Step 6: 커밋**
 
