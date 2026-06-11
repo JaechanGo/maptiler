@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CUVIA 폐쇄망 지도 데모</title>
+<link rel="stylesheet" href="../vendor/maplibre/maplibre-gl.css">
+<style>
+  html, body, #map { margin: 0; height: 100%; }
+  #controls { position: fixed; top: 10px; left: 10px; z-index: 10; display: flex; gap: 8px; }
+  .ctl { padding: 8px 12px; background: #1a2029; color: #cdd6e3;
+         border: 1px solid #2c3542; border-radius: 6px; cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="controls"></div>
+<script src="../vendor/maplibre/maplibre-gl.js"></script>
+<script src="js/map.js"></script>
+<script src="js/buildings.js"></script>
+<script src="js/terrain.js"></script>
+<script src="js/markers-example.js"></script>
+</body>
+</html>
