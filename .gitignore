@@ -1,0 +1,19 @@
+# 대용량 원본/생성 데이터 (빌드 시 생성, 저장소에 넣지 않음)
+data/
+tiles/
+*.mbtiles
+*.osm.pbf
+*.tif
+
+# Planetiler / vendor 바이너리
+planetiler/*.jar
+vendor/
+
+# Docker 산출 tar 번들
+*.tar
+dist/
+
+# OS / 에디터
+.DS_Store
+*.log
+node_modules/
