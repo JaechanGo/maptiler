@@ -6,6 +6,7 @@
       "source": "openmaptiles",
       "source-layer": "building",
       "minzoom": 13,
+      "filter": ["!=", ["get", "hide_3d"], true],
       "paint": {
         "fill-extrusion-color": "#222b38",
         "fill-extrusion-height": ["coalesce", ["get", "render_height"], 15],
