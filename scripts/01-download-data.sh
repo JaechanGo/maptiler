@@ -35,7 +35,7 @@ echo "[4/5] MapLibre GL JS (로컬 번들, 소비 프론트와 동일 메이저)
 
 echo "[5/5] Maputnik (오프라인 스타일 편집기)"
 # v3.0.0 릴리즈에 업로드된 에셋 없음 — v2.1.1 dist.zip(정적 빌드, ~4.8 MB) 사용
-if [ ! -f "$ROOT/vendor/maputnik/index.html" ]; then
+if [ ! -f "$ROOT/vendor/maputnik/dist/index.html" ]; then
   if curl -fL -o /tmp/maputnik.zip https://github.com/maplibre/maputnik/releases/download/v2.1.1/dist.zip; then
     unzip -oq /tmp/maputnik.zip -d "$ROOT/vendor/maputnik" && rm /tmp/maputnik.zip
   else
