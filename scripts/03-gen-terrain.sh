@@ -16,7 +16,8 @@ for lat in 33 34 35 36 37 38; do
     [ -f "$HGT/$f" ] && continue
     if curl -sfL "https://s3.amazonaws.com/elevation-tiles-prod/skadi/N${lat}/N${lat}E${lon}.hgt.gz" \
          -o "$HGT/$f.gz.tmp"; then
-      gunzip -c "$HGT/$f.gz.tmp" > "$HGT/$f.tmp" && mv "$HGT/$f.tmp" "$HGT/$f" || { rm -f "$HGT/$f.tmp"; false; }
+      gunzip -c "$HGT/$f.gz.tmp" > "$HGT/$f.tmp" && mv "$HGT/$f.tmp" "$HGT/$f" \
+        || { rm -f "$HGT/$f.tmp" "$HGT/$f.gz.tmp"; false; }
       rm -f "$HGT/$f.gz.tmp"
       echo "  ✓ $f"
     else
@@ -53,12 +54,14 @@ rio rgbify -b -10000 -i 0.1 --min-z 5 --max-z 12 \
 echo "[4/4] mbtiles 메타데이터 보강 (TileServer-GL 서빙용)"
 # INSERT OR REPLACE 는 UNIQUE 제약 없는 테이블에서 중복 행을 만들므로 DELETE+INSERT 로 교체
 sqlite3 "$ROOT/tiles/terrain.mbtiles.tmp" <<'SQL'
+BEGIN;
 DELETE FROM metadata WHERE name IN ('name','format','minzoom','maxzoom','bounds');
 INSERT INTO metadata VALUES('name','terrain');
 INSERT INTO metadata VALUES('format','png');
 INSERT INTO metadata VALUES('minzoom','5');
 INSERT INTO metadata VALUES('maxzoom','12');
 INSERT INTO metadata VALUES('bounds','124.0,33.0,132.0,39.0');
+COMMIT;
 SQL
 mv "$ROOT/tiles/terrain.mbtiles.tmp" "$ROOT/tiles/terrain.mbtiles"
 echo "지형 타일 생성 완료: tiles/terrain.mbtiles"
