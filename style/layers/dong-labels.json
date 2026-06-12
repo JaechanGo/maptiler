@@ -19,6 +19,6 @@
         "text-size": ["interpolate", ["linear"], ["zoom"], 16, 10, 19, 14],
         "text-optional": true },
       "paint": {
-        "text-color": "#f3dd9a", "text-halo-color": "#0b0e13", "text-halo-width": 1.4 } }
+        "text-color": "#f3dd9a", "text-halo-color": "hsl(214, 62%, 12%)", "text-halo-width": 1.4 } }
   ]
 }
