@@ -62,7 +62,7 @@ echo "[3/3] 산출물 번들"
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" -C "$ROOT" \
   tiles style demo vendor server scripts/deploy.sh docs/integration-guide.md \
-  docs/data-licenses.md THIRD-PARTY-NOTICES.md \
+  docs/data-licenses.md docs/data-sources.md THIRD-PARTY-NOTICES.md \
   && mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 ls -lh "$DIST"
 echo "반입 대상 2개: dist/images.tar, dist/cuvia-map-bundle.tgz"

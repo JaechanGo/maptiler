@@ -14,7 +14,10 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 
 ## 설계 문서
 
-[docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md](docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md)
+- [docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md](docs/superpowers/specs/2026-06-12-maptiler-3d-closed-network-design.md)
+- [docs/data-sources.md](docs/data-sources.md) — 화면 요소별 데이터 출처(지명·역·건물·지형 등)와 기준 시점, 갱신 방법
+- [docs/data-licenses.md](docs/data-licenses.md) — 상용 배포 라이선스 매트릭스와 의무사항
+- [docs/integration-guide.md](docs/integration-guide.md) — 소비 프론트 연동(드롭인 교체)
 
 ## 빌드/실행 순서 (인터넷 가능한 Mac)
 
