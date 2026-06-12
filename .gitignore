@@ -20,6 +20,7 @@ dist/
 .DS_Store
 *.log
 node_modules/
+__pycache__/
 
 # build-style.sh 가 생성 (조각 병합 결과 — 브랜치 병합 충돌 방지 위해 비커밋)
 style/style.json

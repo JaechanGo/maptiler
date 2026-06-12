@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "dong": {
+      "type": "vector",
+      "url": "mbtiles://{dong}"
+    }
+  },
+  "layers": [
+    { "id": "dong-dot", "type": "circle", "source": "dong", "source-layer": "dong",
+      "minzoom": 14,
+      "paint": {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 14, 1.5, 18, 3.2],
+        "circle-color": "#e8b84a", "circle-opacity": 0.9 } },
+    { "id": "dong-label", "type": "symbol", "source": "dong", "source-layer": "dong",
+      "minzoom": 16,
+      "layout": {
+        "text-field": ["get", "dong"],
+        "text-font": ["KlokanTech Noto Sans Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 16, 10, 19, 14],
+        "text-optional": true },
+      "paint": {
+        "text-color": "#f3dd9a", "text-halo-color": "#0b0e13", "text-halo-width": 1.4 } }
+  ]
+}

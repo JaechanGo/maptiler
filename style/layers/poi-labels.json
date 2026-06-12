@@ -1,0 +1,48 @@
+{
+  "layers": [
+    { "id": "aerodrome-label", "type": "symbol", "source": "openmaptiles",
+      "source-layer": "aerodrome_label", "minzoom": 9,
+      "filter": ["has", "name"],
+      "layout": {
+        "text-field": ["coalesce", ["get", "name:ko"], ["get", "name"]],
+        "text-font": ["KlokanTech Noto Sans Regular"], "text-size": 11 },
+      "paint": { "text-color": "#9d8dc2", "text-halo-color": "#0b0e13", "text-halo-width": 1.2 } },
+
+    { "id": "peak-label", "type": "symbol", "source": "openmaptiles",
+      "source-layer": "mountain_peak", "minzoom": 12,
+      "filter": ["has", "name"],
+      "layout": {
+        "text-field": ["coalesce", ["get", "name:ko"], ["get", "name"]],
+        "text-font": ["KlokanTech Noto Sans Regular"], "text-size": 10,
+        "text-optional": true },
+      "paint": { "text-color": "#7d9b76", "text-halo-color": "#0b0e13", "text-halo-width": 1.2 } },
+
+    { "id": "poi-station-dot", "type": "circle", "source": "openmaptiles",
+      "source-layer": "poi", "minzoom": 12,
+      "filter": ["==", ["get", "class"], "railway"],
+      "paint": {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 5],
+        "circle-color": "#4d7cfe", "circle-stroke-color": "#0b0e13", "circle-stroke-width": 1 } },
+
+    { "id": "poi-station-label", "type": "symbol", "source": "openmaptiles",
+      "source-layer": "poi", "minzoom": 12,
+      "filter": ["==", ["get", "class"], "railway"],
+      "layout": {
+        "text-field": ["coalesce", ["get", "name:ko"], ["get", "name"]],
+        "text-font": ["KlokanTech Noto Sans Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 12, 11, 17, 14],
+        "text-offset": [0, 1.1], "text-anchor": "top", "text-optional": true },
+      "paint": { "text-color": "#a8c3ff", "text-halo-color": "#0b0e13", "text-halo-width": 1.4 } },
+
+    { "id": "poi-civic-label", "type": "symbol", "source": "openmaptiles",
+      "source-layer": "poi", "minzoom": 15,
+      "filter": ["in", ["get", "class"],
+        ["literal", ["hospital", "school", "college", "university", "town_hall",
+                     "police", "fire_station", "museum", "stadium", "library", "attraction"]]],
+      "layout": {
+        "text-field": ["coalesce", ["get", "name:ko"], ["get", "name"]],
+        "text-font": ["KlokanTech Noto Sans Regular"], "text-size": 11,
+        "text-optional": true },
+      "paint": { "text-color": "#8d9db3", "text-halo-color": "#0b0e13", "text-halo-width": 1.2 } }
+  ]
+}

@@ -8,9 +8,9 @@ mkdir -p "$DIST"
 echo "[1/3] 스타일 조립(최신화)"
 "$ROOT/scripts/build-style.sh"
 
-# tileserver-config.json 이 두 mbtiles 를 모두 참조 — 하나라도 빠진 번들은
+# tileserver-config.json 이 세 mbtiles 를 모두 참조 — 하나라도 빠진 번들은
 # 폐쇄망에서 TileServer-GL 기동 실패로 이어지므로 패키징 단계에서 차단한다.
-for mb in korea.mbtiles terrain.mbtiles; do
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do
   if [ ! -f "$ROOT/tiles/$mb" ]; then
     echo "오류: tiles/$mb 가 없습니다 — 02/03 생성 스크립트를 먼저 실행하세요." >&2
     exit 1
@@ -62,6 +62,7 @@ echo "[3/3] 산출물 번들"
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" -C "$ROOT" \
   tiles style demo vendor server scripts/deploy.sh docs/integration-guide.md \
+  docs/data-licenses.md THIRD-PARTY-NOTICES.md \
   && mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 ls -lh "$DIST"
 echo "반입 대상 2개: dist/images.tar, dist/cuvia-map-bundle.tgz"

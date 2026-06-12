@@ -9,6 +9,8 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 - 지형: SRTM 30m → Terrain-RGB
 - 서버: TileServer-GL (Docker, x86_64)
 - 3D 건물 + 3D 지형(토글) 지원
+- 아파트 동(棟) 라벨: OSM 추출 → 별도 벡터타일(dong.mbtiles, 토글)
+- 역·공항·산봉우리·주요시설 라벨 (OpenMapTiles poi/place 레이어 활용)
 
 ## 설계 문서
 
@@ -21,6 +23,8 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/01-download-data.sh    # OSM/글리프/MapLibre/Maputnik
 ./scripts/02-gen-vector.sh       # 벡터 타일 (korea.mbtiles)
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
+./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
+./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
 ./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
 ./scripts/package.sh             # 폐쇄망 반입 번들 (dist/)
 ```

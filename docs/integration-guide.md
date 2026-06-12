@@ -52,9 +52,23 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 | 스타일 | `http://<서버>:8080/styles/cuvia/style.json` |
 | 벡터 타일 TileJSON | `http://<서버>:8080/data/korea.json` |
 | 지형 타일 TileJSON | `http://<서버>:8080/data/terrain.json` |
+| 동 라벨 TileJSON | `http://<서버>:8080/data/dong.json` |
 | 글리프 | `http://<서버>:8080/fonts/{fontstack}/{range}.pbf` |
 | 데모 | `http://<서버>:8081/demo/` |
 | Maputnik(스타일 편집) | `http://<서버>:8081/vendor/maputnik/dist/` |
+
+## 4.1 스타일 내장 라벨 레이어 (토글용 id)
+
+| 레이어 id | 내용 | 표시 줌 |
+|---|---|---|
+| `dong-dot` / `dong-label` | 아파트 동(棟) 점/번호 — OSM 추출, 전국 약 9만 동 (아파트의 ~57%) | z14+ / z16+ |
+| `poi-station-dot` / `poi-station-label` | 철도·지하철역 (전국 1,383개) | z12+ (단, 데이터가 z12·z13에 부분 존재 — 완전 표시는 z14+) |
+| `poi-civic-label` | 병원·학교·관공서·박물관 등 주요 시설 | z15+ |
+| `peak-label` | 산봉우리 (전국 2만, 이름 보유) | z12+ |
+| `aerodrome-label` | 공항 | z9+ |
+
+숨기기 예: `map.setLayoutProperty('dong-label', 'visibility', 'none')`
+(동 라벨은 데모 우상단 토글과 동일하게 `dong-dot`도 함께 토글할 것)
 
 ## 5. 보안 메모
 
