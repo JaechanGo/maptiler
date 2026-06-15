@@ -48,11 +48,15 @@ Geofabrik 한국 추출본 → Planetiler(OpenMapTiles 스키마) → `korea.mbt
   (style/layers/buildings-3d.json의 coalesce) — 실제 높이가 아닐 수 있음에 유의.
 
 ### 아파트 동 라벨 (dong.mbtiles)
-- OSM 건물의 `name`/`ref`에서 scripts/04-gen-dong-labels.py 가 추출(약 9.0만 점, 건물 중심점),
-  scripts/05-gen-dong-tiles.py 가 벡터타일로 인코딩. **커버리지는 OSM 입력 수준에 종속**:
-  전국 아파트의 약 57% (인천 75%·경기 73%·서울 60%, 대구 19%·제주 16%).
-  전국 균질화 시 행안부 도로명주소 건물도형(`BULD_NM_DC` 상세건물명)으로 교체 예정
-  (data-licenses.md §4).
+- OSM 건물의 `name`/`ref`에서 scripts/04-gen-dong-labels.py 가 **92,004점** 추출(건물 중심점),
+  scripts/05-gen-dong-tiles.py 가 벡터타일로 인코딩. 단순 Way 건물뿐 아니라 **멀티폴리곤(관계)로
+  매핑된 건물도 포함**(관계 멤버 way 형상으로 중심점 근사). 이름에 행정동 표기가 든 공공시설
+  (주민센터·우체국·성당 등)은 오탐 제외.
+- **커버리지(2가지 분모로 봐야 함):**
+  - 전국 의무관리 공동주택(K-apt 144,706동) 대비 **~64%**.
+  - OSM가 이미 매핑한 아파트 건물 중 동 라벨 보유율 **~57%**(지역 편차: 인천 75%·경기 73%·서울 60%,
+    대구 19%·제주 16% — building=apartments 기준 근사 스냅샷).
+- 전국 균질화 시 행안부 도로명주소 건물도형(`BULD_NM_DC` 상세건물명)으로 교체 예정 (data-licenses.md §4).
 
 ### 지형 (terrain.mbtiles)
 - NASA SRTM 30m (2000년 2월 셔틀 레이더 관측, 퍼블릭 도메인). AWS Open Data

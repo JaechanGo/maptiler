@@ -19,18 +19,18 @@
 
     { "id": "poi-station-dot", "type": "circle", "source": "openmaptiles",
       "source-layer": "poi", "minzoom": 12,
-      "filter": ["==", ["get", "class"], "railway"],
+      "filter": ["all", ["==", ["get", "class"], "railway"], ["any", ["has", "name:ko"], ["has", "name"]]],
       "paint": {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 5],
         "circle-color": "#4d7cfe", "circle-stroke-color": "hsl(214, 62%, 12%)", "circle-stroke-width": 1 } },
 
     { "id": "poi-station-label", "type": "symbol", "source": "openmaptiles",
       "source-layer": "poi", "minzoom": 12,
-      "filter": ["==", ["get", "class"], "railway"],
+      "filter": ["all", ["==", ["get", "class"], "railway"], ["any", ["has", "name:ko"], ["has", "name"]]],
       "layout": {
         "text-field": ["let", "n", ["coalesce", ["get", "name:ko"], ["get", "name"]],
           ["case",
-            ["==", ["slice", ["var", "n"], ["-", ["length", ["var", "n"]], 1]], "역"],
+            ["==", ["slice", ["var", "n"], -1], "역"],
             ["var", "n"],
             ["concat", ["var", "n"], "역"]]],
         "text-font": ["KlokanTech Noto Sans Regular"],

@@ -4,7 +4,9 @@
 순수 파이썬 MVT(Mapbox Vector Tile spec 2.1) 인코더 — 외부 의존성 없음.
 포인트 전용이라 클리핑/심플리피케이션이 불필요해 직접 인코딩이 안전하다.
 
-- 줌: z13~z14 생성 (TileJSON maxzoom=14 → MapLibre 가 z15+ 는 오버줌)
+- 줌: z14 만 생성 (TileJSON maxzoom=14 → MapLibre 가 z15+ 는 오버줌).
+  스타일에서 dong 소스를 쓰는 최저 레이어가 dong-dot(minzoom=14)이라 z13 타일은
+  어떤 줌에서도 요청되지 않으므로(死중량) 굽지 않는다.
 - 라벨 앵커는 정확히 한 타일에만 속하므로 버퍼 중복 불필요(포인트 특성)
 - 04-gen-dong-labels.py 출력이 입력. 추후 국가 건물DB로 교체 시에도
   동일 GeoJSON 스키마({"dong": "101동"} 포인트)만 맞추면 이 스크립트 재사용.
@@ -19,7 +21,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = ROOT / "data/dong/dong-labels.geojson"
 OUT = ROOT / "tiles/dong.mbtiles"
-ZOOMS = (13, 14)
+ZOOMS = (14,)
 EXTENT = 4096
 
 if not SRC.exists():
@@ -81,6 +83,8 @@ def lonlat_to_tile(lon: float, lat: float, z: int):
 # ---- 변환 -----------------------------------------------------------------
 feats = json.loads(SRC.read_text(encoding="utf-8"))["features"]
 print(f"입력: {len(feats):,}개 동 라벨")
+if not feats:
+    sys.exit("오류: 입력 GeoJSON 에 피처가 없습니다 — 04 추출 결과를 확인하세요.")
 
 lons = [f["geometry"]["coordinates"][0] for f in feats]
 lats = [f["geometry"]["coordinates"][1] for f in feats]

@@ -12,7 +12,18 @@ echo "[1/3] 스타일 조립(최신화)"
 # 폐쇄망에서 TileServer-GL 기동 실패로 이어지므로 패키징 단계에서 차단한다.
 for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do
   if [ ! -f "$ROOT/tiles/$mb" ]; then
-    echo "오류: tiles/$mb 가 없습니다 — 02/03 생성 스크립트를 먼저 실행하세요." >&2
+    echo "오류: tiles/$mb 가 없습니다 — 02/03/05 생성 스크립트를 먼저 실행하세요." >&2
+    exit 1
+  fi
+done
+
+# vendor 오프라인 자산이 비어있지(0바이트) 않은지 검증.
+# iCloud(com~apple~CloudDocs) 경로에서 evict 되면 dataless 0바이트로 번들되어
+# 폐쇄망 데모가 깨진다(빈 maplibre-gl.js → 지도 미초기화). [ -s ] = 존재 & 크기>0.
+for asset in vendor/maplibre/maplibre-gl.js vendor/maplibre/maplibre-gl.css; do
+  if [ ! -s "$ROOT/$asset" ]; then
+    echo "오류: $asset 가 없거나 0바이트입니다 (iCloud evict 의심)." >&2
+    echo "  → 01-download-data.sh 재실행 또는 'cat $asset >/dev/null' 로 materialize 후 다시 시도." >&2
     exit 1
   fi
 done

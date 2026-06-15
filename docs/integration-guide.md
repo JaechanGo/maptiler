@@ -61,7 +61,7 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 
 | 레이어 id | 내용 | 표시 줌 |
 |---|---|---|
-| `dong-dot` / `dong-label` | 아파트 동(棟) 점/번호 — OSM 추출, 전국 약 9만 동 (아파트의 ~57%) | z14+ / z16+ |
+| `dong-dot` / `dong-label` | 아파트 동(棟) 점/번호 — OSM 추출 92,004개 (K-apt 144,706동 대비 ~64%) | z14+ / z16+ |
 | `poi-station-dot` / `poi-station-label` | 철도·지하철역 (전국 1,383개) | z12+ (단, 데이터가 z12·z13에 부분 존재 — 완전 표시는 z14+) |
 | `poi-civic-label` | 병원·학교·관공서·박물관 등 주요 시설 | z15+ |
 | `peak-label` | 산봉우리 (전국 2만, 이름 보유) | z12+ |
