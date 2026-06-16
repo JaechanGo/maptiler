@@ -5,6 +5,9 @@ tiles/
 *.osm.pbf
 *.tif
 
+# 지오코딩 인덱스 (07-gen-geocode.py 생성물)
+geocode/*.sqlite
+
 # Planetiler / vendor 바이너리
 planetiler/*.jar
 vendor/

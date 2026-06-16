@@ -32,6 +32,12 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do
   fi
 done
 
+# geocode 서비스용 지오코딩 인덱스 — compose 의 geocode 컨테이너가 참조한다.
+if [ ! -f "$ROOT/geocode/geocode.sqlite" ]; then
+  echo "오류: geocode/geocode.sqlite 가 없습니다 — 번들이 불완전합니다." >&2
+  exit 1
+fi
+
 # shellcheck disable=SC2086
 cd "$ROOT/server" && $COMPOSE_CMD up -d
 

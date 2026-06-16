@@ -28,6 +28,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
+./scripts/07-gen-geocode.py      # 지오코딩 인덱스 (geocode/geocode.sqlite)
 ./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
 ./scripts/package.sh             # 폐쇄망 반입 번들 (dist/)
 ```

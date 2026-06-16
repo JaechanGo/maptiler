@@ -36,6 +36,28 @@ services:
     networks:
       - cuvia
 
+  geocode:
+    # 지오코딩/역지오코딩 API — 무의존(파이썬 표준 라이브러리만). geocode/geocode.sqlite 서빙.
+    image: python:3.12-alpine
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    volumes:
+      - ../geocode:/data/geocode:ro
+      - ./geocode-api.py:/app/geocode-api.py:ro
+    environment:
+      GEOCODE_DB: /data/geocode/geocode.sqlite
+      GEOCODE_PORT: "8082"
+    command: ["python3", "/app/geocode-api.py"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8082/health').getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - cuvia
+
 networks:
   cuvia:
     driver: bridge

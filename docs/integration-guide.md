@@ -54,8 +54,28 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 | 지형 타일 TileJSON | `http://<서버>:8080/data/terrain.json` |
 | 동 라벨 TileJSON | `http://<서버>:8080/data/dong.json` |
 | 글리프 | `http://<서버>:8080/fonts/{fontstack}/{range}.pbf` |
+| **지오코딩** | `http://<서버>:8082/geocode?q=증미역` |
+| **역지오코딩** | `http://<서버>:8082/reverse?lon=126.86&lat=37.55` |
 | 데모 | `http://<서버>:8081/demo/` |
 | Maputnik(스타일 편집) | `http://<서버>:8081/vendor/maputnik/dist/` |
+
+## 4.2 지오코딩 / 역지오코딩 (검색)
+
+별도 무의존 서비스(`server/geocode-api.py`, 기본 :8082)가 `geocode/geocode.sqlite`(scripts/07 생성, FTS5+R-tree)를 서빙한다.
+
+```js
+// 지오코딩: 이름/주소 → 좌표
+const r = await fetch(`http://<서버>:8082/geocode?q=${encodeURIComponent('증미역')}`).then(r=>r.json());
+// r.results[0] = { name:'증미역', type:'station', lon:126.8618, lat:37.5575 }
+map.flyTo({ center: [r.results[0].lon, r.results[0].lat], zoom: 16 });
+
+// 역지오코딩: 좌표 → 최근접 장소 + 포함 영역(행정동/지번; areas 데이터 적재 시)
+const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`).then(r=>r.json());
+// rev.nearest = [{name,type,dist_m,...}], rev.areas = [{name,type}]
+```
+
+- 검색 대상: 역(전국 ~1,400) · 지명 · 아파트 동 · 도로명 · POI 등 약 67만 건(OSM 기반). 국가 상가정보 CSV(`--poi-csv`)·행정경계 GeoJSON(`--areas-geojson`)로 확장.
+- 데모 상단 검색창(`demo/js/search.js`) 참고. CORS 허용(`Access-Control-Allow-Origin: *`).
 
 ## 4.1 스타일 내장 라벨 레이어 (토글용 id)
 

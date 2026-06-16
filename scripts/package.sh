@@ -28,6 +28,12 @@ for asset in vendor/maplibre/maplibre-gl.js vendor/maplibre/maplibre-gl.css; do
   fi
 done
 
+# geocode 서비스가 참조하는 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
+if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then
+  echo "오류: geocode/geocode.sqlite 가 없습니다 — scripts/07-gen-geocode.py 를 먼저 실행하세요." >&2
+  exit 1
+fi
+
 echo "[2/3] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 # compose 파일에 고정된 태그를 그대로 사용해 드리프트를 방지한다.
 # ※ ROOT 에 공백이 포함될 수 있으므로 while read 로 라인 단위 파싱 (bash 3.2 호환)
@@ -72,7 +78,7 @@ echo "[3/3] 산출물 번들"
 # M2: vendor/ 는 maplibre·maputnik 등 오프라인 자산 전체를 포함하며 의도적으로 통째로 번들링함.
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" -C "$ROOT" \
-  tiles style demo vendor server scripts/deploy.sh docs/integration-guide.md \
+  tiles style demo vendor server geocode scripts/deploy.sh docs/integration-guide.md \
   docs/data-licenses.md docs/data-sources.md THIRD-PARTY-NOTICES.md \
   && mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 ls -lh "$DIST"
