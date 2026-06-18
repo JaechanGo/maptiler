@@ -54,6 +54,10 @@ else
   echo "  (scripts/13-qc-check.py 없음 — QC 게이트 스킵)"
 fi
 
+if [ -n "${SKIP_IMAGES:-}" ]; then
+  # 온라인 서버 배포: images.tar 불필요(서버가 'docker compose pull' 로 직접 받음). docker 미사용.
+  echo "[3/4] Docker 이미지 — SKIP_IMAGES=1 → 건너뜀 (서버에서 docker compose pull)"
+else
 echo "[3/4] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 # compose 파일에 고정된 태그를 그대로 사용해 드리프트를 방지한다.
 # ※ ROOT 에 공백이 포함될 수 있으므로 while read 로 라인 단위 파싱 (bash 3.2 호환)
@@ -97,6 +101,7 @@ done
 docker save -o "$DIST/images.tar.tmp" "${SAVE_REFS[@]}" \
   || { echo "오류: docker save 실패" >&2; rm -f "$DIST/images.tar.tmp"; exit 1; }
 mv "$DIST/images.tar.tmp" "$DIST/images.tar"
+fi
 
 echo "[4/4] 산출물 번들"
 # 번들 레이아웃은 airgap compose(server/docker-compose.yml)의 ../tiles, ../geocode/geocode.sqlite,
@@ -122,4 +127,8 @@ tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 rm -rf "$STAGE"
 ls -lh "$DIST"
-echo "반입 대상 2개: $DIST/images.tar, $DIST/cuvia-map-bundle.tgz"
+if [ -n "${SKIP_IMAGES:-}" ]; then
+  echo "반입 대상: $DIST/cuvia-map-bundle.tgz  (이미지는 서버에서 docker compose pull)"
+else
+  echo "반입 대상 2개: $DIST/images.tar, $DIST/cuvia-map-bundle.tgz"
+fi
