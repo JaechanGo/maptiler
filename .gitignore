@@ -27,3 +27,7 @@ __pycache__/
 
 # build-style.sh 가 생성 (조각 병합 결과 — 브랜치 병합 충돌 방지 위해 비커밋)
 style/style.json
+
+# 로컬 에이전트/IDE 설정
+.claude/
+.idea/
