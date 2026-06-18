@@ -8,5 +8,13 @@
   "building3d": "#54648c",
   "donglabel": "#f3dd9a",
   "poilabel": "#e8edf2",
-  "placelabel": "#e0e0e0"
+  "placelabel": "#e0e0e0",
+  "poi_food": "#e8915a",
+  "poi_retail": "#5b9bd5",
+  "poi_health": "#e06c75",
+  "poi_life": "#4db6ac",
+  "poi_culture": "#b18bd0",
+  "poi_edu": "#81c784",
+  "poi_stay": "#e0a3c8",
+  "poi_etc": "#9aa6b2"
 }

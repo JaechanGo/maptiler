@@ -21,6 +21,34 @@ OBJECTS = [
     {"key": "placelabel", "label": "지명 라벨",   "targets": [["place-label", "text-color"], ["road-label", "text-color"]]},
 ]
 
+# 시설(POI) 도트 색은 cat1 업종대분류 match 식 → 그룹별 색을 따로 편집. cats=[] 는 fallback(기타).
+POI_GROUPS = [
+    {"key": "poi_food",    "label": "음식·식품",   "cats": ["음식", "식품"],                       "default": "#e8915a"},
+    {"key": "poi_retail",  "label": "소매",        "cats": ["소매"],                               "default": "#5b9bd5"},
+    {"key": "poi_health",  "label": "보건·건강",   "cats": ["보건의료", "건강"],                   "default": "#e06c75"},
+    {"key": "poi_life",    "label": "생활·수리",   "cats": ["생활", "수리·개인", "시설관리·임대"], "default": "#4db6ac"},
+    {"key": "poi_culture", "label": "문화·스포츠", "cats": ["문화", "예술·스포츠"],                "default": "#b18bd0"},
+    {"key": "poi_edu",     "label": "교육",        "cats": ["교육"],                               "default": "#81c784"},
+    {"key": "poi_stay",    "label": "숙박",        "cats": ["숙박"],                               "default": "#e0a3c8"},
+    {"key": "poi_etc",     "label": "기타",        "cats": [],                                     "default": "#9aa6b2"},
+]
+POI_LAYER = "poi-dot"
+
+
+# 퀵 프리셋 — 객체별 색 한 벌. dark=현재 기본 팔레트, light=밝은 배경+짙은 라벨.
+PRESETS = {
+    "dark": {
+        "background": "#102542", "water": "#85cbfa", "greenery": "#1a2824", "boundary": "#495379",
+        "road": "#2e3757", "building2d": "#495679", "building3d": "#54648c",
+        "donglabel": "#f3dd9a", "poilabel": "#e8edf2", "placelabel": "#e0e0e0",
+    },
+    "light": {
+        "background": "#eef1f5", "water": "#a9d3f2", "greenery": "#cfe3c8", "boundary": "#aab2c4",
+        "road": "#c4cad4", "building2d": "#e0ddd6", "building3d": "#d6d2ca",
+        "donglabel": "#8a6d00", "poilabel": "#2f3742", "placelabel": "#1f2630",
+    },
+}
+
 
 def _hsl_to_hex(h, s, l):
     s /= 100.0; l /= 100.0
@@ -47,11 +75,42 @@ def _index(style):
     return {L.get("id"): L for L in style.get("layers", [])}
 
 
+def build_poi_match(colors):
+    """그룹색({poi_food:#hex,...}) → poi-dot circle-color 의 cat1 match 식 재구성."""
+    expr = ["match", ["get", "cat1"]]; fallback = "#9aa6b2"
+    for g in POI_GROUPS:
+        c = colors.get(g["key"]) or g["default"]
+        if not g["cats"]:
+            fallback = c; continue
+        expr += [list(g["cats"]), c]
+    expr.append(fallback)
+    return expr
+
+
+def current_poi_colors(style):
+    """poi-dot match 식에서 그룹별 현재 색을 #hex 로 추출(없으면 default)."""
+    L = _index(style).get(POI_LAYER, {})
+    expr = L.get("paint", {}).get("circle-color")
+    out = {g["key"]: g["default"] for g in POI_GROUPS}
+    if isinstance(expr, list) and expr and expr[0] == "match" and len(expr) >= 4:
+        body, fallback = expr[2:-1], expr[-1]
+        pairs = list(zip(body[0::2], body[1::2]))
+        for g in POI_GROUPS:
+            if not g["cats"]:
+                out[g["key"]] = to_hex(fallback) or g["default"]; continue
+            for labels, color in pairs:
+                labs = labels if isinstance(labels, list) else [labels]
+                if set(labs) == set(g["cats"]):
+                    out[g["key"]] = to_hex(color) or g["default"]; break
+    return out
+
+
 def apply_theme(style, theme):
-    """theme({key:#hex}) 를 style 의 해당 레이어 paint 속성에 적용. 반환: 적용된 (layer,prop) 수."""
+    """theme({key:#hex}) 를 style 에 적용(평면 객체 + POI 그룹 match). 반환: 적용 수."""
     idx = _index(style); n = 0
+    theme = theme or {}
     objs = {o["key"]: o for o in OBJECTS}
-    for key, color in (theme or {}).items():
+    for key, color in theme.items():
         o = objs.get(key)
         if not o or not color:
             continue
@@ -60,6 +119,13 @@ def apply_theme(style, theme):
             if L is None:
                 continue
             L.setdefault("paint", {})[prop] = color; n += 1
+    # POI 업종 그룹색 → poi-dot match 식 재구성(현재값 위에 덮어써 누락 그룹 보존)
+    poi_keys = {g["key"] for g in POI_GROUPS}
+    poi_theme = {k: v for k, v in theme.items() if k in poi_keys and v}
+    if poi_theme and POI_LAYER in idx:
+        cur = current_poi_colors(style); cur.update(poi_theme)
+        idx[POI_LAYER].setdefault("paint", {})["circle-color"] = build_poi_match(cur)
+        n += len(poi_theme)
     return n
 
 

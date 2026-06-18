@@ -175,7 +175,7 @@ MGR = Manager()
 
 # ── 스타일 색 테마 적용 ───────────────────────────────────────────
 HEXRE = re.compile(r"^#[0-9a-fA-F]{6}$")
-VALID_KEYS = {o["key"] for o in style_objects.OBJECTS}
+VALID_KEYS = {o["key"] for o in style_objects.OBJECTS} | {g["key"] for g in style_objects.POI_GROUPS}
 
 def apply_style_theme(theme):
     # 유효 키 + #rrggbb 만 통과(주입 방지) → style/theme.json 저장 → build_style → tileserver 재시작
@@ -239,12 +239,25 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/style/objects":
             try:
                 style = json.loads((ROOT / "style/style.json").read_text(encoding="utf-8"))
-                cur = style_objects.current_colors(style)
+                cur = style_objects.current_colors(style); poi = style_objects.current_poi_colors(style)
             except Exception:
-                cur = {}
+                cur = {}; poi = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888"} for o in style_objects.OBJECTS]
-            return self._json({"objects": objs, "tile_port": TILE_PORT})
+            groups = [{"key": g["key"], "label": g["label"], "cats": g["cats"],
+                       "color": poi.get(g["key"]) or g["default"]} for g in style_objects.POI_GROUPS]
+            return self._json({"objects": objs, "poi_groups": groups,
+                               "presets": style_objects.PRESETS, "poi_layer": style_objects.POI_LAYER,
+                               "tile_port": TILE_PORT})
+        if self.path == "/api/style/export":
+            p = ROOT / "style/style.json"
+            if not p.is_file():
+                return self.send_error(404)
+            b = p.read_bytes()
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="style.json"')
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+            return
         if self.path == "/api/targets":
             return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"]}
                                             for k, v in TARGETS().items()]})
@@ -271,6 +284,19 @@ class H(BaseHTTPRequestHandler):
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
             return self._json(apply_style_theme(body.get("theme", {})))
+        if self.path == "/api/style/import":
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > 4 * 1024 * 1024: return self._json({"error": "style.json 과대(4MB 초과)"}, 413)
+            try:
+                imported = json.loads(self.rfile.read(n) or "{}")
+                if not isinstance(imported.get("layers"), list):
+                    return self._json({"error": "style.json 형식 아님(layers 배열 없음)"}, 400)
+                colors = {**style_objects.current_colors(imported), **style_objects.current_poi_colors(imported)}
+            except Exception as e:
+                return self._json({"error": f"style.json 파싱 실패: {e}"}, 400)
+            res = apply_style_theme({k: v for k, v in colors.items() if v})
+            res["colors"] = colors
+            return self._json(res)
         self.send_error(404)
 
     def _upload(self):
@@ -451,6 +477,11 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  button.g{background:transparent;color:#e8edf5;border:1px solid #26304a}
  .st{font-size:12px;color:#8d9bb5}
  .hint{font-size:11px;color:#5f6b80;margin-top:14px;line-height:1.6}
+ .tb{display:flex;flex-direction:column;gap:7px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #26304a}
+ .tbrow{display:flex;align-items:center;gap:6px} .tbrow>span{font-size:11px;color:#8d9bb5;width:40px;flex:none}
+ .mini{background:#1a2233;color:#cfe0ff;border:1px solid #26304a;border-radius:6px;padding:6px 9px;font-size:12px;font-weight:500;cursor:pointer;flex:1}
+ .mini:hover{border-color:#5b9bd5}
+ h2{font-size:11px;color:#8d9bb5;margin:14px 0 5px;font-weight:600;letter-spacing:.04em}
 </style>
 <div class=top>
  <a href="/">← 대시보드</a>
@@ -460,35 +491,65 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  <span class=st id=status></span>
 </div>
 <div class=main>
- <div class=side><div id=rows></div>
-   <p class=hint>색을 바꾸면 미리보기에 즉시 반영됩니다. 팔레트(색상칸 클릭) 또는 #색상값 직접 입력 모두 가능.
-   <br>‘저장 & 적용’ → style.json에 기록 + 타일서버 재시작(영구 반영).</p>
+ <div class=side>
+   <div class=tb>
+     <div class=tbrow><span>프리셋</span><button class=mini id=pl>화이트</button><button class=mini id=pd>다크</button></div>
+     <div class=tbrow><span>파일</span><button class=mini id=exp>내보내기</button><button class=mini id=imp>가져오기</button></div>
+   </div>
+   <input type=file id=impf accept=".json,application/json" style="display:none">
+   <h2>객체</h2><div id=rows></div>
+   <h2>시설(POI) 업종 대분류별</h2><div id=poirows></div>
+   <p class=hint>색을 바꾸면 미리보기에 즉시 반영. 팔레트(색칸 클릭) 또는 #색상값 입력 모두 가능.
+   <br>프리셋=화이트/다크 한 벌 적용 · 내보내기=style.json 다운로드 · 가져오기=style.json의 색 적용.
+   <br>‘저장 & 적용’ → style.json 기록 + 타일서버 재시작(영구 반영).</p>
  </div>
  <div id=map></div>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], map=null, INIT={};
+ const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={};
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
-   OBJ=d.objects;
-   $('#rows').innerHTML=OBJ.map(o=>`<div class=row><label>${o.label}</label>
-     <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
-     <input type=color id=c_${o.key} value="${o.color}"></div>`).join('');
-   OBJ.forEach(o=>{ INIT[o.key]=o.color;
-     const c=$('#c_'+o.key), h=$('#h_'+o.key);
-     c.oninput=()=>{h.value=c.value; apply(o,c.value)};
-     h.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(h.value)){c.value=h.value; apply(o,h.value)}};
-   });
+   OBJ=d.objects; POI=d.poi_groups||[]; PRE=d.presets||{}; POILAYER=d.poi_layer||'poi-dot';
+   $('#rows').innerHTML=OBJ.map(row).join('');
+   $('#poirows').innerHTML=POI.map(row).join('');
+   OBJ.forEach(o=>{ INIT[o.key]=o.color; wire(o,v=>apply(o,v)); });
+   POI.forEach(o=>{ INIT[o.key]=o.color; wire(o,()=>applyPoi()); });
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${d.tile_port}/styles/cuvia/style.json`,
      center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
    map.addControl(new maplibregl.NavigationControl());
  }).catch(e=>$('#status').textContent='객체 로드 실패: '+e);
+ function row(o){return `<div class=row><label>${o.label}</label>
+   <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
+   <input type=color id=c_${o.key} value="${o.color}"></div>`;}
+ function wire(o,fn){const c=$('#c_'+o.key),h=$('#h_'+o.key);
+   c.oninput=()=>{h.value=c.value; fn(c.value)};
+   h.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(h.value)){c.value=h.value; fn(h.value)}};}
+ function setColor(k,v){const c=$('#c_'+k),h=$('#h_'+k); if(c){c.value=v;h.value=v;}}
  function apply(o,color){ if(!map||!map.isStyleLoaded())return;
    o.targets.forEach(t=>{ try{map.setPaintProperty(t[0],t[1],color)}catch(e){} }); }
- $('#reset').onclick=()=>OBJ.forEach(o=>{const v=INIT[o.key];$('#c_'+o.key).value=v;$('#h_'+o.key).value=v;apply(o,v)});
+ function poiExpr(){ const e=['match',['get','cat1']]; let fb='#9aa6b2';
+   POI.forEach(g=>{ const v=$('#c_'+g.key).value; if(!g.cats||!g.cats.length){fb=v;return;} e.push(g.cats.slice(),v); });
+   e.push(fb); return e; }
+ function applyPoi(){ if(!map||!map.isStyleLoaded())return; try{map.setPaintProperty(POILAYER,'circle-color',poiExpr())}catch(e){} }
+ function preset(name){ const p=PRE[name]||{};
+   OBJ.forEach(o=>{ if(p[o.key]){setColor(o.key,p[o.key]); apply(o,p[o.key]);} });
+   $('#status').textContent=name+' 프리셋 적용(미저장)'; }
+ $('#pl').onclick=()=>preset('light'); $('#pd').onclick=()=>preset('dark');
+ $('#reset').onclick=()=>{ OBJ.forEach(o=>{setColor(o.key,INIT[o.key]); apply(o,INIT[o.key]);});
+   POI.forEach(o=>setColor(o.key,INIT[o.key])); applyPoi(); };
+ $('#exp').onclick=()=>location.href='/api/style/export';
+ $('#imp').onclick=()=>$('#impf').click();
+ $('#impf').onchange=e=>{const f=e.target.files[0]; if(!f)return; e.target.value='';
+   $('#status').textContent='가져오는 중…';
+   f.text().then(t=>fetch('/api/style/import',{method:'POST',headers:{'Content-Type':'application/json'},body:t}))
+    .then(r=>r.json()).then(d=>{ if(!d.ok){$('#status').textContent='✗ '+(d.error||'오류');return;}
+      OBJ.forEach(o=>{const v=d.colors[o.key]; if(v){setColor(o.key,v); apply(o,v);}});
+      POI.forEach(o=>{const v=d.colors[o.key]; if(v)setColor(o.key,v);}); applyPoi();
+      $('#status').textContent=`✓ 가져옴 ${d.applied}개 · 타일서버 ${d.reloaded}`;
+    }).catch(err=>$('#status').textContent='✗ 실패: '+err); };
  $('#save').onclick=()=>{
-   const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
+   const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value); POI.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
    $('#status').textContent='적용 중…';
    fetch('/api/style',{method:'POST',body:JSON.stringify({theme})}).then(r=>r.json()).then(d=>{
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
