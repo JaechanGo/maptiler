@@ -50,6 +50,53 @@ PRESETS = {
 }
 
 
+# 글꼴 개별 설정 대상(라벨 객체) — OBJECTS 중 symbol 레이어를 가진 것
+FONT_LABELS = ["donglabel", "poilabel", "placelabel"]
+
+
+def _label_layers(key):
+    o = {x["key"]: x for x in OBJECTS}.get(key, {})
+    return [t[0] for t in o.get("targets", []) if t[1] == "text-color"]
+
+
+def available_fonts(glyphs_dir):
+    import os
+    if not glyphs_dir or not os.path.isdir(glyphs_dir):
+        return []
+    return sorted(d for d in os.listdir(glyphs_dir)
+                  if os.path.isdir(os.path.join(glyphs_dir, d)) and not d.startswith("."))
+
+
+def current_fonts(style):
+    idx = _index(style); out = {}
+    for key in FONT_LABELS:
+        for lid in _label_layers(key):
+            tf = idx.get(lid, {}).get("layout", {}).get("text-font")
+            if isinstance(tf, list) and tf:
+                out[key] = tf[0]; break
+    return out
+
+
+def apply_fonts(style, fonts):
+    """fonts({all?, <label_key>:font}) → 심볼 레이어 text-font 적용. all 먼저, 라벨별 override."""
+    if not fonts:
+        return 0
+    idx = _index(style); n = 0
+    allf = fonts.get("all")
+    if allf:
+        for L in style.get("layers", []):
+            if L.get("type") == "symbol":
+                L.setdefault("layout", {})["text-font"] = [allf]; n += 1
+    for key in FONT_LABELS:
+        f = fonts.get(key)
+        if not f:
+            continue
+        for lid in _label_layers(key):
+            if lid in idx:
+                idx[lid].setdefault("layout", {})["text-font"] = [f]; n += 1
+    return n
+
+
 def _hsl_to_hex(h, s, l):
     s /= 100.0; l /= 100.0
     c = (1 - abs(2 * l - 1)) * s
@@ -126,6 +173,8 @@ def apply_theme(style, theme):
         cur = current_poi_colors(style); cur.update(poi_theme)
         idx[POI_LAYER].setdefault("paint", {})["circle-color"] = build_poi_match(cur)
         n += len(poi_theme)
+    # 글꼴(layout text-font)
+    n += apply_fonts(style, theme.get("fonts") or {})
     return n
 
 

@@ -5,7 +5,8 @@
       "fonts": "glyphs",
       "styles": "styles",
       "mbtiles": "tiles"
-    }
+    },
+    "serveAllFonts": true
   },
   "styles": {
     "cuvia": {
