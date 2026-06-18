@@ -32,6 +32,9 @@
     },
     "buildings": {
       "mbtiles": "buildings.mbtiles"
+    },
+    "poi": {
+      "mbtiles": "poi.mbtiles"
     }
   }
 }

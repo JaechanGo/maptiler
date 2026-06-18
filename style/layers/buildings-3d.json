@@ -3,14 +3,35 @@
     {
       "id": "Building 3D",
       "type": "fill-extrusion",
-      "source": "openmaptiles",
+      "source": "buildings",
       "source-layer": "building",
       "minzoom": 13,
-      "filter": ["!=", ["get", "hide_3d"], true],
+      "filter": [
+        "!=",
+        [
+          "get",
+          "hide_3d"
+        ],
+        true
+      ],
       "paint": {
         "fill-extrusion-color": "hsl(223, 25%, 44%)",
-        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 15],
-        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+        "fill-extrusion-height": [
+          "coalesce",
+          [
+            "get",
+            "render_height"
+          ],
+          15
+        ],
+        "fill-extrusion-base": [
+          "coalesce",
+          [
+            "get",
+            "render_min_height"
+          ],
+          0
+        ],
         "fill-extrusion-opacity": 0.85
       }
     }

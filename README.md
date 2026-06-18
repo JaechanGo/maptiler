@@ -11,6 +11,9 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 - 3D 건물 + 3D 지형(토글) 지원
 - 아파트 동(棟) 라벨: OSM 추출 → 별도 벡터타일(dong.mbtiles, 토글)
 - 역·공항·산봉우리·주요시설 라벨 (OpenMapTiles poi/place 레이어 활용)
+- 통합 지오코더: 전국 도로명주소(내비DB) + OSM 이름 + 소상공인 상가 + LOCALDATA 인허가
+  → FTS5+R-tree 단일 인덱스. 결과에 전체주소·지번·우편번호·전화·업종대분류(cat1) 동반
+- 상가·시설 라벨: 지오코더 시설(biz) → 별도 벡터타일(poi.mbtiles, 업종 색상 도트+상호 라벨)
 
 ## 설계 문서
 
@@ -28,7 +31,11 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
-./scripts/07-gen-geocode.py      # 지오코딩 인덱스 (geocode/geocode.sqlite)
+./scripts/10-gen-buildings.sh    # 3D 건물 타일 (buildings.mbtiles, GIS건물통합 SHP)
+./scripts/11-build-localdata.py  # LOCALDATA 인허가 → 상가포맷 CSV (영업중·비물리제외·NFC)
+./scripts/09-gen-geocode.py \    # 통합 지오코딩 인덱스 (geocode.sqlite)
+  --src <내비DB> --osm osm.sqlite --poi-csv-dir <상가CSV폴더> --out geocode.sqlite
+./scripts/12-build-poi.sh        # 시설 라벨 타일 (poi.mbtiles, geocode.sqlite의 biz 추출)
 ./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
 ./scripts/package.sh             # 폐쇄망 반입 번들 (dist/)
 ```

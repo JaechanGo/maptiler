@@ -70,14 +70,14 @@ def addr_at(con, lon, lat):
     cf = math.cos(math.radians(lat)) ** 2
     for w in (0.0015, 0.006, 0.025):       # ~150m → 600m → 2.5km 확장
         r = con.execute(
-            """SELECT p.sido,p.sigungu,p.emd,p.road,p.main_no,p.sub_no,p.bld,p.postal FROM place_rtree x
+            """SELECT p.sido,p.sigungu,p.emd,p.road,p.main_no,p.sub_no,p.bld,p.postal,p.jibun FROM place_rtree x
                JOIN places p ON p.id=x.id
                WHERE x.minlon>=? AND x.maxlon<=? AND x.minlat>=? AND x.maxlat<=? AND p.kind='addr'
                ORDER BY (p.lon-?)*(p.lon-?)*?+(p.lat-?)*(p.lat-?) LIMIT 1""",
             (lon - w, lon + w, lat - w, lat + w, lon, lon, cf, lat, lat)).fetchone()
         if r:
-            return addr_str(r), r['postal']
-    return None, None
+            return addr_str(r), r['postal'], r['jibun']
+    return None, None, None
 
 
 def parse(q):
@@ -135,7 +135,7 @@ def geocode(con, q, limit):
         for s, r in cand:
             results.append((s, {'name': addr_str(r), 'kind': 'addr', 'lon': r['lon'], 'lat': r['lat'],
                                 'building': f"{r['main_no']}" + (f"-{r['sub_no']}" if r['sub_no'] else ""),
-                                'postal': r['postal']}))
+                                'postal': r['postal'], 'jibun': r['jibun']}))
 
     # ---- 이름 경로: 역/지명/POI/건물명 (도로명 질의엔 잡음 억제) ----
     if p['terms'] and (not p['road'] or not results):
@@ -152,6 +152,7 @@ def geocode(con, q, limit):
             item = {'name': disp, 'kind': r['kind'], 'subtype': r['subtype'], 'lon': r['lon'], 'lat': r['lat']}
             if 'phone' in rk and r['phone']: item['phone'] = r['phone']
             if 'opened' in rk and r['opened']: item['opened'] = r['opened']
+            if 'cat1' in rk and r['cat1']: item['cat1'] = r['cat1']
             results.append((s, item))
 
     # ---- 병합·정렬·중복 제거 ----
@@ -168,9 +169,10 @@ def geocode(con, q, limit):
         if it['kind'] == 'addr':
             it['address'] = it['name']
         else:
-            a, pc = addr_at(con, it['lon'], it['lat'])
+            a, pc, jb = addr_at(con, it['lon'], it['lat'])
             it['address'] = a
             if pc: it['postal'] = pc
+            if jb: it['jibun'] = jb
     return out
 
 
