@@ -3,9 +3,10 @@
 (function () {
   const map = window.cuviaMap;
   if (!map) { console.warn('search.js: cuviaMap 미초기화'); return; }
-  // 지오코드 API 주소(타일서버처럼 같은 호스트의 8082). ?geocode= 로 재지정 가능.
+  // 지오코드 API 주소 — 게이트웨이 경유면 same-origin(/geocode), 직접 포트(:8081)면 같은 호스트의 :8082.
   const params = new URLSearchParams(location.search);
-  const GEOCODE = params.get('geocode') || `http://${location.hostname}:8082`;
+  const VIA_GATEWAY = ['', '80', '443', '8088'].includes(location.port);
+  const GEOCODE = params.get('geocode') || (VIA_GATEWAY ? '' : `http://${location.hostname}:8082`);
   const TYPE_KO = { station: '역', place: '지명', dong: '동', road: '도로', poi: 'POI', biz: '상가' };
 
   // ---- UI ----

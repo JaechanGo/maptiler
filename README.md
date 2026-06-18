@@ -68,6 +68,23 @@ STUDIO_TOKEN=$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → htt
 > 보안: Style Studio 기본 바인드 `127.0.0.1`. LAN 노출(`HOST=0.0.0.0`) 시 `STUDIO_TOKEN` 설정 권장
 > (변경 API는 `X-Studio-Token` 요구). `build-studio.py`(빌드 콘솔)는 인터넷 서버 전용.
 
+### 단일 도메인 게이트웨이 (공개망 권장)
+
+`server/docker-compose.yml` 의 `gateway`(nginx) 가 모든 서비스를 한 포트로 통합한다:
+`/`→demo · `/styles /data /fonts`→tileserver · `/geocode /reverse`→geocode. 데모 JS는 게이트웨이
+경유(80/443/8088 포트)면 자동으로 same-origin(상대경로)으로 호출하므로 CORS·다중포트 노출이 불필요하다.
+
+```bash
+cd server && GATEWAY_PORT=80 docker compose up -d   # → http://<서버>/demo/ (단일 도메인)
+# 게이트웨이만 노출하려면 tileserver/demo/geocode 의 ports 매핑 제거
+```
+
+> ★ tileserver-gl은 프록시 뒤에서 스타일 내부 URL을 **Host 호스트명 + 포트 80** 으로 만든다.
+> **포트 80(http) 게이트웨이는 그대로 동작**하지만, **https(443)나 비표준 포트**로 띄우면
+> `server/tileserver-config.json` 의 `options` 에 `"publicUrl": "https://maps.example.com/"` 를 명시해야
+> glyphs/sprite/sources URL이 맞는다(미설정 시 라벨·타일이 안 보임 — 예전 게이트웨이 실패 원인).
+> Style Studio는 관리툴이라 게이트웨이 밖 `:8091`(토큰) 유지.
+
 ## 브랜치
 
 - `main` — 토대(타일 생성·서버·스타일·데모·패키징) + 3D 건물/지형 병합 완료
