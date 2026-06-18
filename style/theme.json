@@ -1,0 +1,12 @@
+{
+  "background": "#102542",
+  "water": "#85cbfa",
+  "greenery": "#1a2824",
+  "boundary": "#495379",
+  "road": "#2e3757",
+  "building2d": "#495679",
+  "building3d": "#54648c",
+  "donglabel": "#f3dd9a",
+  "poilabel": "#e8edf2",
+  "placelabel": "#e0e0e0"
+}

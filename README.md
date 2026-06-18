@@ -42,7 +42,9 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ```
 
 > 선택: `python3 scripts/build-studio.py` → http://localhost:8090 (무의존 빌드 콘솔).
-> 업로드·체크박스 정제·종류별 진행률(SSE)·QC·패키징을 웹에서. 기본 로컬 전용(외부노출은 `HOST=0.0.0.0`).
+> 업로드(드래그앤드롭·다중·⌘V)·체크박스 정제·종류별 진행률(SSE)·QC·패키징을 웹에서.
+> `/style` 스타일 디자인: 객체별(배경·물·녹지·도로·건물·라벨…) 색을 팔레트/색상값으로 설정,
+> MapLibre 라이브 미리보기, 저장 시 `style/theme.json` 기록 → `build_style.py` 적용. 기본 로컬 전용(외부노출은 `HOST=0.0.0.0`).
 
 폐쇄망 서버: 번들 해제 후 `./scripts/deploy.sh /path/to/images.tar`
 

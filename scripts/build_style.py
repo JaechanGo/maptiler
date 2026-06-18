@@ -35,6 +35,13 @@ for layer in style["layers"]:
         sys.exit(f"중복 layer id: {lid!r} (조각 충돌 — 같은 id가 두 번 정의됨)")
     seen.add(lid)
 
+# 객체별 색 테마(빌드 스튜디오 색 편집기가 저장) 적용 — 조각 병합 후 최종 paint 덮어쓰기
+theme_path = root / "theme.json"
+if theme_path.exists():
+    import style_objects
+    n = style_objects.apply_theme(style, load_json(theme_path))
+    print(f"테마 적용: {theme_path.name} → {n}개 paint 속성")
+
 out = root / "style.json"
 out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"OK: {out} (layers={len(style['layers'])})")

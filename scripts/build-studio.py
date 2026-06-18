@@ -10,10 +10,13 @@
 """
 import json, os, pathlib, queue, subprocess, threading, time, re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import style_objects
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
 PORT = int(os.environ.get("PORT", "8090"))
+TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))   # 미리보기가 스타일을 읽어올 tileserver 포트
+COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 # 기본은 로컬 전용(127.0.0.1). 외부 노출이 필요할 때만 HOST=0.0.0.0 으로 명시. 인증이 없으므로
 # 0.0.0.0 바인딩 시 같은 LAN의 누구나 빌드 실행/업로드가 가능함을 운영자가 인지해야 함.
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -170,6 +173,36 @@ class Manager:
 MGR = Manager()
 
 
+# ── 스타일 색 테마 적용 ───────────────────────────────────────────
+HEXRE = re.compile(r"^#[0-9a-fA-F]{6}$")
+VALID_KEYS = {o["key"] for o in style_objects.OBJECTS}
+
+def apply_style_theme(theme):
+    # 유효 키 + #rrggbb 만 통과(주입 방지) → style/theme.json 저장 → build_style → tileserver 재시작
+    clean = {k: v for k, v in (theme or {}).items() if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v)}
+    (ROOT / "style").mkdir(exist_ok=True)
+    (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    log = []
+    try:
+        r = subprocess.run(["python3", str(ROOT / "scripts/build_style.py")],
+                           capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+        log.append(r.stdout.strip() or r.stderr.strip())
+        if r.returncode != 0: return {"ok": False, "error": "build_style 실패", "log": log}
+    except Exception as e:
+        return {"ok": False, "error": f"build_style 오류: {e}", "log": log}
+    # tileserver는 시작 시 스타일을 캐시하므로 서빙본 갱신엔 재시작이 필요하나, amd64 에뮬레이션이라
+    # 부팅이 수십 초 걸린다 → 동기 대기하지 않고 detached로 띄우고 즉시 반환(라이브 미리보기는 이미 반영됨).
+    reloaded = "스킵(compose 없음)"
+    if os.path.exists(COMPOSE_FILE):
+        try:
+            subprocess.Popen(["docker", "compose", "-f", COMPOSE_FILE, "restart", "tileserver"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            reloaded = "재시작 요청됨(수십초 소요)"
+        except Exception as e:
+            reloaded = f"오류: {e}"
+    return {"ok": True, "applied": len(clean), "reloaded": reloaded, "log": log}
+
+
 # ── HTTP 핸들러 ────────────────────────────────────────────────────
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -180,11 +213,38 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
+    def _send(self, body, ctype, code=200):
+        b = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code); self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+
+    def _static(self, rel):
+        # ROOT 하위 정적파일만(경로조작 차단). maplibre 등 vendor 자산 서빙.
+        base = ROOT.resolve()
+        p = (base / rel).resolve()
+        if base not in p.parents or not p.is_file():   # 경로조작·접두사형제 디렉토리 우회 차단
+            return self.send_error(404)
+        ext = p.suffix.lower()
+        ctype = {".js": "application/javascript", ".css": "text/css", ".png": "image/png",
+                 ".json": "application/json", ".svg": "image/svg+xml"}.get(ext, "application/octet-stream")
+        self._send(p.read_bytes(), ctype + ("; charset=utf-8" if ext in (".js", ".css", ".json", ".svg") else ""))
+
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/?"):
-            b = PAGE.encode()
-            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
+            return self._send(PAGE, "text/html; charset=utf-8")
+        if self.path == "/style":
+            return self._send(STYLE_PAGE, "text/html; charset=utf-8")
+        if self.path.startswith("/vendor/"):
+            return self._static(self.path.lstrip("/").split("?")[0])
+        if self.path == "/api/style/objects":
+            try:
+                style = json.loads((ROOT / "style/style.json").read_text(encoding="utf-8"))
+                cur = style_objects.current_colors(style)
+            except Exception:
+                cur = {}
+            objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
+                     "color": cur.get(o["key"]) or "#888888"} for o in style_objects.OBJECTS]
+            return self._json({"objects": objs, "tile_port": TILE_PORT})
         if self.path == "/api/targets":
             return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"]}
                                             for k, v in TARGETS().items()]})
@@ -206,6 +266,11 @@ class H(BaseHTTPRequestHandler):
             return self._json({"queued": ordered})
         if self.path == "/api/upload":
             return self._upload()
+        if self.path == "/api/style":
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            body = json.loads(self.rfile.read(n) or "{}")
+            return self._json(apply_style_theme(body.get("theme", {})))
         self.send_error(404)
 
     def _upload(self):
@@ -304,7 +369,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .chip{display:inline-block;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
 </style>
 <header><div style="width:9px;height:9px;border-radius:99px;background:var(--ac)"></div>
- <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div></header>
+ <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
+ <a href="/style" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 스타일 디자인 →</a></header>
 <div class=wrap>
  <div>
   <div class=panel><h2>데이터 업로드</h2>
@@ -363,6 +429,71 @@ $('#fin').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
 ['dragleave','dragend','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.remove('drag')}));
 dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer&&e.dataTransfer.files));
 document.addEventListener('paste',e=>{const f=e.clipboardData&&e.clipboardData.files;if(f&&f.length)uploadFiles(f);});
+</script></html>"""
+
+
+STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>스타일 디자인 — CUVIA</title>
+<link rel=stylesheet href="/vendor/maplibre/maplibre-gl.css">
+<style>
+ body{margin:0;background:#0f1420;color:#e8edf5;font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif;height:100vh;overflow:hidden}
+ .top{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid #26304a}
+ .top a{color:#8d9bb5;text-decoration:none;font-size:13px} h1{font-size:15px;margin:0;font-weight:600}
+ .main{display:flex;height:calc(100vh - 50px)}
+ .side{width:310px;border-right:1px solid #26304a;overflow:auto;padding:12px 16px;flex:none}
+ #map{flex:1;height:100%}
+ .row{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid #1a2233}
+ .row label{flex:1;font-size:13px}
+ input[type=color]{width:36px;height:28px;border:1px solid #26304a;border-radius:6px;background:none;padding:0;cursor:pointer}
+ input[type=text]{width:82px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 7px;font:12px ui-monospace,Menlo,monospace}
+ button{background:#5b9bd5;color:#06121f;border:0;border-radius:8px;padding:8px 15px;font-weight:600;cursor:pointer}
+ button.g{background:transparent;color:#e8edf5;border:1px solid #26304a}
+ .st{font-size:12px;color:#8d9bb5}
+ .hint{font-size:11px;color:#5f6b80;margin-top:14px;line-height:1.6}
+</style>
+<div class=top>
+ <a href="/">← 대시보드</a>
+ <h1>스타일 디자인 · 객체별 색상</h1>
+ <button class=g id=reset style="margin-left:auto">되돌리기</button>
+ <button id=save>저장 & 적용</button>
+ <span class=st id=status></span>
+</div>
+<div class=main>
+ <div class=side><div id=rows></div>
+   <p class=hint>색을 바꾸면 미리보기에 즉시 반영됩니다. 팔레트(색상칸 클릭) 또는 #색상값 직접 입력 모두 가능.
+   <br>‘저장 & 적용’ → style.json에 기록 + 타일서버 재시작(영구 반영).</p>
+ </div>
+ <div id=map></div>
+</div>
+<script src="/vendor/maplibre/maplibre-gl.js"></script>
+<script>
+ const $=s=>document.querySelector(s); let OBJ=[], map=null, INIT={};
+ fetch('/api/style/objects').then(r=>r.json()).then(d=>{
+   OBJ=d.objects;
+   $('#rows').innerHTML=OBJ.map(o=>`<div class=row><label>${o.label}</label>
+     <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
+     <input type=color id=c_${o.key} value="${o.color}"></div>`).join('');
+   OBJ.forEach(o=>{ INIT[o.key]=o.color;
+     const c=$('#c_'+o.key), h=$('#h_'+o.key);
+     c.oninput=()=>{h.value=c.value; apply(o,c.value)};
+     h.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(h.value)){c.value=h.value; apply(o,h.value)}};
+   });
+   map=new maplibregl.Map({container:'map',
+     style:`http://${location.hostname}:${d.tile_port}/styles/cuvia/style.json`,
+     center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
+   map.addControl(new maplibregl.NavigationControl());
+ }).catch(e=>$('#status').textContent='객체 로드 실패: '+e);
+ function apply(o,color){ if(!map||!map.isStyleLoaded())return;
+   o.targets.forEach(t=>{ try{map.setPaintProperty(t[0],t[1],color)}catch(e){} }); }
+ $('#reset').onclick=()=>OBJ.forEach(o=>{const v=INIT[o.key];$('#c_'+o.key).value=v;$('#h_'+o.key).value=v;apply(o,v)});
+ $('#save').onclick=()=>{
+   const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
+   $('#status').textContent='적용 중…';
+   fetch('/api/style',{method:'POST',body:JSON.stringify({theme})}).then(r=>r.json()).then(d=>{
+     $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
+   }).catch(e=>$('#status').textContent='✗ 실패: '+e);
+ };
 </script></html>"""
 
 
