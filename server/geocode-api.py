@@ -124,7 +124,9 @@ def geocode(con, q, limit):
 
     # ---- 이름 경로: 역/지명/POI/건물명 (도로명 질의엔 잡음 억제) ----
     if p['terms'] and (not p['road'] or not results):
-        m = ' '.join(f'{{name bld}}:"{t}"*' for t in p['terms'])
+        # 2+토큰이면 지역(region)도 검색 → '스타벅스 강남' 같은 상호+지역 조합. 단일 토큰은 name/bld만(주소 오염 방지)
+        cols = '{name region bld}' if len(p['terms']) >= 2 else '{name bld}'
+        m = ' '.join(f'{cols}:"{t}"*' for t in p['terms'])
         base = {'station': 175, 'place': 165, 'dong': 160, 'poi': 140, 'biz': 135, 'road': 120, 'addr': 130}
         nq = norm(q)
         for r in _fts(con, m):

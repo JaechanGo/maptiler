@@ -10,12 +10,28 @@
   "styles": {
     "cuvia": {
       "style": "cuvia/style.json",
-      "tilejson": { "bounds": [124.5, 33.0, 131.0, 38.7] }
+      "tilejson": {
+        "bounds": [
+          124.5,
+          33.0,
+          131.0,
+          38.7
+        ]
+      }
     }
   },
   "data": {
-    "korea": { "mbtiles": "korea.mbtiles" },
-    "terrain": { "mbtiles": "terrain.mbtiles" },
-    "dong": { "mbtiles": "dong.mbtiles" }
+    "korea": {
+      "mbtiles": "korea.mbtiles"
+    },
+    "terrain": {
+      "mbtiles": "terrain.mbtiles"
+    },
+    "dong": {
+      "mbtiles": "dong.mbtiles"
+    },
+    "buildings": {
+      "mbtiles": "buildings.mbtiles"
+    }
   }
 }

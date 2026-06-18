@@ -107,6 +107,28 @@ def add_osm(db, osm_path, state):
     o.close(); state["pid"]=pid
     print(f"  osm: +{pid-n0:>8,} · areas {na:,}  ({time.time()-st:.1f}s)", file=sys.stderr)
 
+def add_biz(db, csvdir, state):
+    # 소상공인 상가(상권)정보 CSV(시도별) → kind='biz'. 경도/위도 이미 WGS84.
+    import csv, glob
+    pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
+    for path in sorted(glob.glob(os.path.join(csvdir,"*.csv"))):
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                try: lon=float(row.get("경도") or 0); lat=float(row.get("위도") or 0)
+                except ValueError: continue
+                if not (124<=lon<=132 and 33<=lat<=39): continue
+                nm=(row.get("상호명") or "").strip()
+                if not nm: continue
+                biz=(row.get("상권업종소분류명") or "").strip()
+                sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip(); emd=(row.get("행정동명") or "").strip()
+                pid+=1
+                pb.append((pid,'biz',nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,round(lon,6),round(lat,6)))
+                fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
+                rb.append((pid,lon,lon,lat,lat))
+                if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
+    _flush(db,pb,fb,rb)
+    print(f"  biz: +{pid-n0:,}  ({time.time()-st:.1f}s)", file=sys.stderr); state["pid"]=pid
+
 def _flush(db,pb,fb,rb):
     if not pb: return
     db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
@@ -119,6 +141,7 @@ def main():
     ap.add_argument("--osm", default=os.path.expanduser("~/geocode-build/osm.sqlite"))
     ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
     ap.add_argument("--only")
+    ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
     args=ap.parse_args()
     only=set(args.only.split(",")) if args.only else None
     out=pathlib.Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +151,7 @@ def main():
     print(f"[통합 지오코드 빌드] juso={args.src}\n  osm={args.osm}", file=sys.stderr)
     add_juso(db, pathlib.Path(args.src), only, state)
     add_osm(db, args.osm, state)
+    if args.poi_csv_dir: add_biz(db, args.poi_csv_dir, state)
     db.execute("CREATE TABLE meta(k TEXT,v TEXT)")
     db.executemany("INSERT INTO meta VALUES(?,?)", [("places",str(state["pid"])),("srid","4326"),
         ("source","내비게이션용DB 2026.05 + OSM"),("built_s",f"{time.time()-t0:.0f}")])
