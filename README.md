@@ -51,6 +51,23 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 > `style/style.json` 은 생성물이라 git에 없다. `git clone` 직후 바로 `docker compose up` 하면
 > 스타일 404가 나므로 반드시 `build-style.sh` 를 먼저 실행할 것 (`package.sh` 는 자동 수행).
 
+## 배포 구조 (빌드 / 운영 2환경)
+
+- **인터넷 서버 = 빌드 + 모델하우스(쇼룸)**: `build-studio.py`(또는 위 CLI)로 빌드 → `package.sh` 번들.
+  같은 호스트에 운영 스택(tileserver·demo·geocode·Style Studio)을 띄워 미리보기·스타일 디자인.
+- **번들 물리 반입** → **폐쇄망 서버 = 운영**: `deploy.sh` 로 지도 스택 기동.
+- **Style Studio**(`scripts/style-studio.py`, 경량·무의존) — 빌드 없이 **스타일만** 담당하며 번들에 포함되어
+  쇼룸·폐쇄망 어디서나 배포. 색·POI·글꼴 테마를 팔레트/색상값으로 지정 + MapLibre 라이브 미리보기,
+  저장 시 `style/theme.json` → `build_style.py` → tileserver 재시작(영구 반영). import/export 로 환경 간 스타일 이동.
+
+```bash
+# 폐쇄망/쇼룸 서버에서 지도 스택 옆에 Style Studio 기동(호스트 실행 → docker로 tileserver 재시작)
+STUDIO_TOKEN=$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → http://<서버IP>:8091/?token=…
+```
+
+> 보안: Style Studio 기본 바인드 `127.0.0.1`. LAN 노출(`HOST=0.0.0.0`) 시 `STUDIO_TOKEN` 설정 권장
+> (변경 API는 `X-Studio-Token` 요구). `build-studio.py`(빌드 콘솔)는 인터넷 서버 전용.
+
 ## 브랜치
 
 - `main` — 토대(타일 생성·서버·스타일·데모·패키징) + 3D 건물/지형 병합 완료

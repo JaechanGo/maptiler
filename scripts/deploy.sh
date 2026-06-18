@@ -58,3 +58,7 @@ echo "tileserver 정상 응답 확인"
 echo "기동 완료:"
 echo "  스타일  http://<이서버IP>:8080/styles/cuvia/style.json"
 echo "  데모    http://<이서버IP>:8081/demo/"
+echo
+echo "스타일 디자인(Style Studio)을 현장에서 띄우려면(선택):"
+echo "  STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → http://<이서버IP>:8091/?token=…"
+echo "  (저장 시 style.json 갱신 + tileserver 자동 재시작. 색·POI·글꼴 테마 현장 지정)"

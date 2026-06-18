@@ -112,6 +112,8 @@ cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
 # `tar && mv`로 묶으면 set -e가 tar 실패를 전파하지 못해 stale 번들로 0종료한다 → 분리.
 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   -C "$ROOT"       style demo vendor server scripts/deploy.sh scripts/13-qc-check.py \
+                   scripts/style-studio.py scripts/style_objects.py scripts/build_style.py \
+                   scripts/build-style.sh scripts/start-style-studio.sh \
                    docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
                    THIRD-PARTY-NOTICES.md \
   -C "$BUILD_HOME" tiles \
