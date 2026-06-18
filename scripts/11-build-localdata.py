@@ -41,7 +41,7 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     files = sorted(glob.glob(os.path.join(SRC,"**","*.csv"), recursive=True))
     w = csv.writer(open(OUT,"w",encoding="utf-8",newline=""))
-    w.writerow(["상호명","상권업종소분류명","시도명","시군구명","행정동명","경도","위도"])
+    w.writerow(["상호명","상권업종소분류명","시도명","시군구명","행정동명","경도","위도","전화번호","인허가일자"])
     total=0; dropped=0
     for f in files:
         업종 = N(re.sub(r"^[^_]+_","",os.path.basename(f)).replace(".csv",""))
@@ -57,12 +57,13 @@ def main():
             full=f"{cat} {업종}"
             if noise(full): dropped+=1; continue          # 비물리 제외
             sido,sgg,emd=parse_region(row.get("지번주소"), row.get("도로명주소"))
-            rows.append([nm, full, sido, sgg, emd]); coords.append((x,y))
+            phone=N(row.get("전화번호")).strip(); opened=(row.get("인허가일자") or "").strip()
+            rows.append([nm, full, sido, sgg, emd, phone, opened]); coords.append((x,y))
         fp.close()
         ll=convert(coords); n=0
         for r,(lon,lat) in zip(rows,ll):
             if lon is None or not (124<=lon<=132 and 33<=lat<=39): continue
-            w.writerow(r+[lon,lat]); n+=1
+            w.writerow([r[0],r[1],r[2],r[3],r[4],lon,lat,r[5],r[6]]); n+=1
         total+=n
         if n: print(f"  {업종:24s} +{n:,}", file=sys.stderr)
     print(f"OK: {OUT}  유지 {total:,} · 제외(비물리) {dropped:,}", file=sys.stderr)

@@ -144,11 +144,15 @@ def geocode(con, q, limit):
         m = ' '.join(f'{cols}:"{t}"*' for t in p['terms'])
         base = {'station': 175, 'place': 165, 'dong': 160, 'poi': 140, 'biz': 135, 'road': 120, 'addr': 130}
         nq = norm(q)
+        rk = None
         for r in _fts(con, m):
+            if rk is None: rk = set(r.keys())
             disp = addr_str(r) if r['kind'] == 'addr' else r['name']
             s = base.get(r['kind'], 100) + (30 if (r['name'] or '') == nq else 0)
-            results.append((s, {'name': disp, 'kind': r['kind'], 'subtype': r['subtype'],
-                                'lon': r['lon'], 'lat': r['lat']}))
+            item = {'name': disp, 'kind': r['kind'], 'subtype': r['subtype'], 'lon': r['lon'], 'lat': r['lat']}
+            if 'phone' in rk and r['phone']: item['phone'] = r['phone']
+            if 'opened' in rk and r['opened']: item['opened'] = r['opened']
+            results.append((s, item))
 
     # ---- 병합·정렬·중복 제거 ----
     results.sort(key=lambda x: -x[0])

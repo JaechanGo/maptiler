@@ -46,7 +46,7 @@ SCHEMA = """
   PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1048576; PRAGMA temp_store=MEMORY;
   CREATE TABLE places(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, subtype TEXT,
     sido TEXT,sigungu TEXT,emd TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
-    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT, lon REAL,lat REAL);
+    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT, phone TEXT,opened TEXT, lon REAL,lat REAL);
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
   CREATE VIRTUAL TABLE place_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
@@ -73,7 +73,7 @@ def add_juso(db, src, only, state):
             if not (124<=lon<=132 and 33<=lat<=39): continue
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,lon,lat))
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,None,None,lon,lat))
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -90,7 +90,7 @@ def add_osm(db, osm_path, state):
     for name,typ,sub,lon,lat in o.execute("SELECT name,type,subtype,lon,lat FROM places"):
         if lon is None or lat is None: continue
         pid+=1
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,lon,lat))
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,lon,lat))
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -121,8 +121,9 @@ def add_biz(db, csvdir, state):
                 if not nm: continue
                 biz=(row.get("상권업종소분류명") or "").strip()
                 sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip(); emd=(row.get("행정동명") or "").strip()
+                phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None
                 pid+=1
-                pb.append((pid,'biz',nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,round(lon,6),round(lat,6)))
+                pb.append((pid,'biz',nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -131,7 +132,7 @@ def add_biz(db, csvdir, state):
 
 def _flush(db,pb,fb,rb):
     if not pb: return
-    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
+    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
     db.executemany("INSERT INTO places_fts(rowid,name,region,road,bld) VALUES(?,?,?,?,?)",fb)
     db.executemany("INSERT INTO place_rtree VALUES(?,?,?,?,?)",rb)
 
