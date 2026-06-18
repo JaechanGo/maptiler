@@ -112,3 +112,18 @@ maptiler/ (iCloud repo)               # 소스 코드 본체
 - 내비게이션용DB(주소 좌표, 심사): https://business.juso.go.kr/addrlink/elctrnMapProvd/geoDBDwldList.do
 - 상가(상권)정보: https://www.data.go.kr/data/15083033/fileData.do
 - (상세) repo `docs/data-sources.md`, `docs/data-licenses.md`, `docs/geocode-juso-plan.md`
+
+---
+
+## 부록 — LOCALDATA 시설 POI (대기업·전체 인허가)
+
+소상공인 상가정보가 누락하는 **대기업 직영(스타벅스·맥도날드 등)**까지 넣으려면 LOCALDATA 사용.
+- 출처: **LOCALDATA 지방행정인허가데이터** https://www.localdata.go.kr/ (카테고리별, 무료). data.go.kr 표준데이터도 동일.
+- 형식: **CP949**, 39컬럼, 좌표 **EPSG:5174**, 영업상태 혼재.
+- 핵심: **휴게음식점**(스벅/카페/맥도/패스트푸드)·일반음식점·제과점·대규모점포·병원·의원·약국·미용·숙박·주유(석유판매)·PC방·노래방 등 **물리 시설**.
+- 빌드: `python3 build-localdata.py <인허가정보_DIR> localdata/localdata_clean.csv`
+  → 비물리(통신판매·제조·도매·농축·공사·대행) 카테고리 제외 + 영업중 + 5174→4326(gdaltransform) + **NFC 정규화** + 상가포맷 변환.
+- 적재: 상가 CSV들과 함께 한 폴더에 두고 `09-gen-geocode.py --poi-csv-dir <폴더>` → kind=biz.
+
+⚠️ **한글 NFC/NFD 정규화 필수**: 정부 데이터/파일명이 NFD(자모분리)일 수 있어, 키워드 매칭(EXCLUDE)·FTS 검색이 조용히 실패한다. build-localdata·검색 모두 NFC로 통일.
+⚠️ **중복**: 상가정보 ↔ LOCALDATA 겹침(같은 가게 중복). 검색은 되지만 중복제거·랭킹은 개선 과제.
