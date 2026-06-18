@@ -219,6 +219,7 @@ class H(BaseHTTPRequestHandler):
         if n > MAX_UPLOAD:   # 메모리 고갈 방지 — 대용량 원천(내비DB/SHP, 수 GB)은 BUILD_HOME 경로 지정 권장
             return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과 — 대용량은 BUILD_HOME에 직접 배치"}, 413)
         body = self.rfile.read(n)
+        saved = []                              # 한 요청에 여러 파일 파트(name="file")를 모두 저장
         for part in body.split(boundary):
             if b'name="file"' not in part: continue
             idx = part.find(b"\r\n\r\n")
@@ -228,11 +229,13 @@ class H(BaseHTTPRequestHandler):
             if data.endswith(b"\r\n"): data = data[:-2]
             fm = re.search(r'filename="([^"]*)"', head)
             if not fm or not fm.group(1): continue
-            name = os.path.basename(fm.group(1))
+            name = os.path.basename(fm.group(1))   # 경로조작 차단
+            if not name: continue
             dest = UPLOADS / name
             with open(dest, "wb") as o: o.write(data)
-            return self._json({"saved": name, "size": dest.stat().st_size, "detected": detect(name)})
-        return self._json({"error": "파일 파트 없음"}, 400)
+            saved.append({"saved": name, "size": dest.stat().st_size, "detected": detect(name)})
+        if not saved: return self._json({"error": "파일 파트 없음"}, 400)
+        return self._json({"files": saved})
 
     def _sse(self):
         self.send_response(200)
@@ -293,7 +296,10 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  button:disabled{opacity:.5;cursor:default}
  pre{background:#0a0e16;border:1px solid var(--bd);border-radius:9px;padding:10px;height:230px;
    overflow:auto;font:11px/1.45 ui-monospace,Menlo,monospace;color:#bcd;white-space:pre-wrap;margin:10px 0 0}
- .up{border:1px dashed var(--bd);border-radius:9px;padding:12px;text-align:center;color:var(--mut);font-size:12px}
+ .up{border:1.5px dashed var(--bd);border-radius:9px;padding:18px 12px;text-align:center;color:var(--mut);font-size:12px;cursor:pointer;transition:.15s}
+ .up:hover{border-color:var(--mut)}
+ .up.drag{border-color:var(--ac);background:#0c1a2c;color:var(--tx)}
+ .up a{color:var(--ac);text-decoration:underline;cursor:pointer}
  .ds{font-size:12px;color:var(--mut)} .ds b{color:var(--tx);font-weight:500}
  .chip{display:inline-block;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
 </style>
@@ -302,8 +308,10 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <div class=wrap>
  <div>
   <div class=panel><h2>데이터 업로드</h2>
-   <form id=upf><div class=up><input type=file name=file id=fin>
-    <div style="margin-top:8px">SHP·CSV·PBF 업로드 → 자동감지</div></div></form>
+   <div class=up id=dz>
+    <input type=file id=fin multiple style="display:none">
+    <div style="font-size:13px"><b>드래그&드롭</b> 또는 <a id=browse>파일 선택</a></div>
+    <div style="margin-top:5px">여러 개 동시 · 붙여넣기(⌘V) 가능 · SHP·CSV·PBF 자동감지</div></div>
    <div id=dslist class=ds style="margin-top:10px"></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 대상 (정제 체크)</h2>
    <div id=checks></div>
@@ -338,8 +346,23 @@ es.onmessage=e=>{const d=JSON.parse(e.data);
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('대상을 선택하세요'); fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>logln('▶ 큐: '+d.queued.join(', ')));};
 $('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));
-$('#fin').onchange=e=>{const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append('file',f);
- logln('⇧ 업로드: '+f.name);fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{logln('✓ 저장: '+d.saved+' ('+d.detected+')');fetch('/api/datasets').then(r=>r.json()).then(x=>render(x.datasets))});};
+function uploadFiles(files){
+ const fs=[...(files||[])]; if(!fs.length)return;
+ const fd=new FormData(); fs.forEach(f=>fd.append('file',f));
+ logln('⇧ 업로드('+fs.length+'): '+fs.map(f=>f.name).join(', '));
+ fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+   if(d.error)return logln('✗ '+d.error);
+   (d.files||[]).forEach(x=>logln('✓ 저장: '+x.saved+' · '+(x.size/1048576).toFixed(1)+'MB · '+x.detected));
+   fetch('/api/datasets').then(r=>r.json()).then(x=>render(x.datasets));
+ }).catch(e=>logln('✗ 업로드 실패: '+e));}
+const dz=$('#dz');
+$('#browse').onclick=()=>$('#fin').click();
+dz.onclick=e=>{if(e.target.id!=='browse')$('#fin').click()};
+$('#fin').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.add('drag')}));
+['dragleave','dragend','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.remove('drag')}));
+dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer&&e.dataTransfer.files));
+document.addEventListener('paste',e=>{const f=e.clipboardData&&e.clipboardData.files;if(f&&f.length)uploadFiles(f);});
 </script></html>"""
 
 
