@@ -65,6 +65,21 @@ def addr_str(r):
     return s
 
 
+def addr_at(con, lon, lat):
+    """좌표 → 최근접 도로명주소(전체) + 우편번호. 가게/POI 결과에 주소 부착용."""
+    cf = math.cos(math.radians(lat)) ** 2
+    for w in (0.0015, 0.006, 0.025):       # ~150m → 600m → 2.5km 확장
+        r = con.execute(
+            """SELECT p.sido,p.sigungu,p.emd,p.road,p.main_no,p.sub_no,p.bld,p.postal FROM place_rtree x
+               JOIN places p ON p.id=x.id
+               WHERE x.minlon>=? AND x.maxlon<=? AND x.minlat>=? AND x.maxlat<=? AND p.kind='addr'
+               ORDER BY (p.lon-?)*(p.lon-?)*?+(p.lat-?)*(p.lat-?) LIMIT 1""",
+            (lon - w, lon + w, lat - w, lat + w, lon, lon, cf, lat, lat)).fetchone()
+        if r:
+            return addr_str(r), r['postal']
+    return None, None
+
+
 def parse(q):
     q = re.sub(r'(?<=\d)\.(?=\d)', '', norm(q))
     house = road = None; terms = []
@@ -145,6 +160,13 @@ def geocode(con, q, limit):
         seen.add(k); out.append(item)
         if len(out) >= limit:
             break
+    for it in out:                              # 결과에 전체주소 부착(가게/POI는 최근접 도로명주소)
+        if it['kind'] == 'addr':
+            it['address'] = it['name']
+        else:
+            a, pc = addr_at(con, it['lon'], it['lat'])
+            it['address'] = a
+            if pc: it['postal'] = pc
     return out
 
 
@@ -157,8 +179,12 @@ def reverse(con, lon, lat, limit):
                ORDER BY d LIMIT ?""",
             (lat, lon, lon - w, lon + w, lat - w, lat + w, limit)).fetchall()
         if rows:
-            nearest = [{'name': addr_str(r) if r['kind'] == 'addr' else r['name'], 'kind': r['kind'],
-                        'lon': r['lon'], 'lat': r['lat'], 'dist_m': round(r['d'], 1)} for r in rows]
+            nearest = []
+            for r in rows:
+                nm = addr_str(r) if r['kind'] == 'addr' else r['name']
+                adr = nm if r['kind'] == 'addr' else (addr_at(con, r['lon'], r['lat'])[0])
+                nearest.append({'name': nm, 'address': adr, 'kind': r['kind'], 'subtype': r['subtype'],
+                                'lon': r['lon'], 'lat': r['lat'], 'dist_m': round(r['d'], 1)})
             break
     areas = []
     for a in con.execute(
