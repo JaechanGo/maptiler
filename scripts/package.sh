@@ -2,17 +2,25 @@
 # [온라인 단계] 폐쇄망 반입용 번들 생성: Docker 이미지 tar + 산출물 tgz
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST="$ROOT/dist"
+# 산출물(images.tar + 멀티GB tgz)도 iCloud 밖에 둔다(기본 BUILD_HOME/dist). DIST 로 재정의 가능.
+DIST="${DIST:-${BUILD_HOME:-$HOME/geocode-build}/dist}"
 mkdir -p "$DIST"
 
-echo "[1/3] 스타일 조립(최신화)"
+# 대용량 산출물(geocode.sqlite 4.6GB, buildings 1GB, poi 174MB 등)은 iCloud(com~apple~CloudDocs)
+# repo 안에 두면 evict/스로틀로 막히므로 iCloud 밖 BUILD_HOME 에 둔다. tiles/ 와 geocode.sqlite 는
+# 여기서 가져오고, style/demo/vendor/server/docs/scripts 는 repo(ROOT)에서 가져온다.
+BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
+TILES_DIR="$BUILD_HOME/tiles"
+GEOCODE_DB="$BUILD_HOME/geocode.sqlite"
+
+echo "[1/4] 스타일 조립(최신화)"
 "$ROOT/scripts/build-style.sh"
 
-# tileserver-config.json 이 세 mbtiles 를 모두 참조 — 하나라도 빠진 번들은
-# 폐쇄망에서 TileServer-GL 기동 실패로 이어지므로 패키징 단계에서 차단한다.
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do
-  if [ ! -f "$ROOT/tiles/$mb" ]; then
-    echo "오류: tiles/$mb 가 없습니다 — 02/03/05 생성 스크립트를 먼저 실행하세요." >&2
+# tileserver-config.json 이 참조하는 mbtiles 5종 — 하나라도 빠진 번들은
+# 폐쇄망에서 TileServer-GL 기동 실패/레이어 누락으로 이어지므로 패키징 단계에서 차단한다.
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+  if [ ! -s "$TILES_DIR/$mb" ]; then
+    echo "오류: $TILES_DIR/$mb 가 없거나 0바이트 — 02/03/05/10/12 생성 스크립트를 먼저 실행하세요." >&2
     exit 1
   fi
 done
@@ -28,13 +36,25 @@ for asset in vendor/maplibre/maplibre-gl.js vendor/maplibre/maplibre-gl.css; do
   fi
 done
 
-# geocode 서비스가 참조하는 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
-if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then
-  echo "오류: geocode/geocode.sqlite 가 없습니다 — scripts/07-gen-geocode.py 를 먼저 실행하세요." >&2
+# geocode 서비스가 참조하는 통합 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
+if [ ! -s "$GEOCODE_DB" ]; then
+  echo "오류: $GEOCODE_DB 가 없습니다 — scripts/09-gen-geocode.py 를 먼저 실행하세요." >&2
   exit 1
 fi
 
-echo "[2/3] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
+# QC 게이트: 구조검사(NFC·좌표범위·시도커버리지·인덱스·스타일↔타일 정합) FAIL 시 번들 차단.
+# (골든질의는 실행중 API가 필요하므로 패키징 단계에선 --api 생략 → 스킵/경고 처리)
+echo "[2/4] QC 검증 게이트"
+if [ -f "$ROOT/scripts/13-qc-check.py" ]; then
+  python3 "$ROOT/scripts/13-qc-check.py" \
+    --db "$GEOCODE_DB" --tiles "$TILES_DIR" \
+    --style "$ROOT/style/style.json" --config "$ROOT/server/tileserver-config.json" --api "" \
+    || { echo "오류: QC FAIL — 위 항목을 고친 뒤 다시 패키징하세요." >&2; exit 1; }
+else
+  echo "  (scripts/13-qc-check.py 없음 — QC 게이트 스킵)"
+fi
+
+echo "[3/4] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 # compose 파일에 고정된 태그를 그대로 사용해 드리프트를 방지한다.
 # ※ ROOT 에 공백이 포함될 수 있으므로 while read 로 라인 단위 파싱 (bash 3.2 호환)
 TAGS=()
@@ -72,14 +92,32 @@ for tag in "${TAGS[@]}"; do
 done
 
 # C2: 이미지 tar 를 원자적으로 기록 (저장 도중 실패해도 이전 tar 를 오염시키지 않음)
-docker save -o "$DIST/images.tar.tmp" "${SAVE_REFS[@]}" && mv "$DIST/images.tar.tmp" "$DIST/images.tar"
+# 주의: `A && mv`로 묶으면 set -e가 A(docker save) 실패를 전파하지 못해 stale tar로 0종료한다.
+# → 별도 명령으로 분리하여 set -e가 docker save 실패에서 즉시 중단하도록 한다.
+docker save -o "$DIST/images.tar.tmp" "${SAVE_REFS[@]}" \
+  || { echo "오류: docker save 실패" >&2; rm -f "$DIST/images.tar.tmp"; exit 1; }
+mv "$DIST/images.tar.tmp" "$DIST/images.tar"
 
-echo "[3/3] 산출물 번들"
+echo "[4/4] 산출물 번들"
+# 번들 레이아웃은 airgap compose(server/docker-compose.yml)의 ../tiles, ../geocode/geocode.sqlite,
+# ../style 등 상대마운트에 맞춘다. tiles 와 geocode.sqlite 는 BUILD_HOME 에 있으므로,
+# geocode.sqlite 만 geocode/ 하위 레이아웃으로 스테이징(APFS clonefile=즉시·무추가공간)한 뒤 묶는다.
+STAGE="$BUILD_HOME/.pkg-stage"
+rm -rf "$STAGE"; mkdir -p "$STAGE/geocode"
+cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
+  || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # clonefile 불가 시(타 볼륨) 일반 복사 폴백
+
 # M2: vendor/ 는 maplibre·maputnik 등 오프라인 자산 전체를 포함하며 의도적으로 통째로 번들링함.
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
-tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" -C "$ROOT" \
-  tiles style demo vendor server geocode scripts/deploy.sh docs/integration-guide.md \
-  docs/data-licenses.md docs/data-sources.md THIRD-PARTY-NOTICES.md \
-  && mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
+# `tar && mv`로 묶으면 set -e가 tar 실패를 전파하지 못해 stale 번들로 0종료한다 → 분리.
+tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
+  -C "$ROOT"       style demo vendor server scripts/deploy.sh scripts/13-qc-check.py \
+                   docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
+                   THIRD-PARTY-NOTICES.md \
+  -C "$BUILD_HOME" tiles \
+  -C "$STAGE"      geocode \
+  || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
+mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
+rm -rf "$STAGE"
 ls -lh "$DIST"
-echo "반입 대상 2개: dist/images.tar, dist/cuvia-map-bundle.tgz"
+echo "반입 대상 2개: $DIST/images.tar, $DIST/cuvia-map-bundle.tgz"

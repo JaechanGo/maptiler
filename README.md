@@ -36,9 +36,13 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/09-gen-geocode.py \    # 통합 지오코딩 인덱스 (geocode.sqlite)
   --src <내비DB> --osm osm.sqlite --poi-csv-dir <상가CSV폴더> --out geocode.sqlite
 ./scripts/12-build-poi.sh        # 시설 라벨 타일 (poi.mbtiles, geocode.sqlite의 biz 추출)
+./scripts/13-qc-check.py         # 빌드 QC 검증 (NFC·좌표·시도커버리지·인덱스·골든질의·스타일↔타일)
 ./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
-./scripts/package.sh             # 폐쇄망 반입 번들 (dist/)
+./scripts/package.sh             # 폐쇄망 반입 번들 (QC 게이트 통과 시 dist/, 대용량은 BUILD_HOME)
 ```
+
+> 선택: `python3 scripts/build-studio.py` → http://localhost:8090 (무의존 빌드 콘솔).
+> 업로드·체크박스 정제·종류별 진행률(SSE)·QC·패키징을 웹에서. 기본 로컬 전용(외부노출은 `HOST=0.0.0.0`).
 
 폐쇄망 서버: 번들 해제 후 `./scripts/deploy.sh /path/to/images.tar`
 

@@ -23,17 +23,17 @@ else
   echo "⚠ images.tar 경로를 인자로 주세요 (이미 load 했다면 무시)" >&2
 fi
 
-# tileserver-config.json 이 세 mbtiles 를 모두 참조하므로, 하나라도 없으면
+# tileserver-config.json 이 mbtiles 5종을 모두 참조하므로, 하나라도 없으면
 # TileServer-GL 이 기동 자체에 실패한다(벡터 단독 degrade 없음) — 사전 검증.
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do
-  if [ ! -f "$ROOT/tiles/$mb" ]; then
-    echo "오류: tiles/$mb 가 없습니다 — 번들이 불완전합니다. 압축 해제 경로를 확인하세요." >&2
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+  if [ ! -s "$ROOT/tiles/$mb" ]; then   # -s: 존재+크기>0 (0바이트 evict/잘린 파일도 차단, package.sh와 통일)
+    echo "오류: tiles/$mb 가 없거나 0바이트 — 번들이 불완전합니다. 압축 해제 경로를 확인하세요." >&2
     exit 1
   fi
 done
 
 # geocode 서비스용 지오코딩 인덱스 — compose 의 geocode 컨테이너가 참조한다.
-if [ ! -f "$ROOT/geocode/geocode.sqlite" ]; then
+if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then
   echo "오류: geocode/geocode.sqlite 가 없습니다 — 번들이 불완전합니다." >&2
   exit 1
 fi
