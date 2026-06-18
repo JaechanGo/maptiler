@@ -513,7 +513,6 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <input type=file id=impf accept=".json,application/json" style="display:none">
    <h2>객체</h2><div id=rows></div>
    <h2>시설(POI) 업종 대분류별</h2><div id=poirows></div>
-   <h2>글꼴(폰트)</h2><div id=fontrows></div><div id=fonthint style="font-size:11px;color:#5f6b80;margin-top:4px"></div>
    <p class=hint>색을 바꾸면 미리보기에 즉시 반영. 팔레트(색칸 클릭) 또는 #색상값 입력 모두 가능.
    <br>프리셋=화이트/다크 한 벌 적용 · 내보내기=style.json 다운로드 · 가져오기=style.json의 색 적용.
    <br>‘저장 & 적용’ → style.json 기록 + 타일서버 재시작(영구 반영).</p>
@@ -522,10 +521,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, FL=[], FCUR={}, TPORT=8080;
+ const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, TPORT=8080;
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
    OBJ=d.objects; POI=d.poi_groups||[]; PRE=d.presets||{}; POILAYER=d.poi_layer||'poi-dot';
-   FL=(d.fonts&&d.fonts.labels)||[]; FCUR=(d.fonts&&d.fonts.current)||{}; TPORT=d.tile_port;
+   TPORT=d.tile_port;
    $('#rows').innerHTML=OBJ.map(row).join('');
    $('#poirows').innerHTML=POI.map(row).join('');
    OBJ.forEach(o=>{ INIT[o.key]=o.color; wire(o,v=>apply(o,v)); });
@@ -534,23 +533,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
      center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
    map.addControl(new maplibregl.NavigationControl());
-   loadFonts();
  }).catch(e=>$('#status').textContent='객체 로드 실패: '+e);
- function loadFonts(){  // tileserver가 실제 서빙하는 글꼴만 제공(미서빙 글꼴 선택 시 라벨 깨짐 방지)
-   fetch(`http://${location.hostname}:${TPORT}/fonts.json`).then(r=>r.json()).then(fonts=>{
-     const opt=f=>`<option ${f===''?'':''}>${f}</option>`;
-     $('#fontrows').innerHTML=FL.map(l=>{
-       const cur=FCUR[l.key]; const opts=fonts.map(f=>`<option ${f===cur?'selected':''}>${f}</option>`).join('');
-       return `<div class=row><label>${l.label}</label><select id=fn_${l.key}>${opts}</select></div>`;}).join('');
-     FL.forEach(l=>{ $('#fn_'+l.key).onchange=()=>applyFont(l.key,$('#fn_'+l.key).value); });
-     $('#fonthint').textContent = fonts.length<2
-       ? `서빙 글꼴 ${fonts.length}종 — 추가 글꼴은 tileserver 등록 필요`
-       : `${fonts.length}종 서빙 중`;
-   }).catch(()=>{$('#fonthint').textContent='글꼴 목록 로드 실패';});
- }
- function applyFont(key,font){ if(!map||!map.isStyleLoaded())return;
-   const o=OBJ.find(x=>x.key===key); if(!o)return;
-   o.targets.filter(t=>t[1]==='text-color').forEach(t=>{try{map.setLayoutProperty(t[0],'text-font',[font])}catch(e){}}); }
  function row(o){return `<div class=row><label>${o.label}</label>
    <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
    <input type=color id=c_${o.key} value="${o.color}"></div>`;}
@@ -582,8 +565,6 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
     }).catch(err=>$('#status').textContent='✗ 실패: '+err); };
  $('#save').onclick=()=>{
    const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value); POI.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
-   const fonts={}; FL.forEach(l=>{const s=$('#fn_'+l.key); if(s)fonts[l.key]=s.value;});
-   if(Object.keys(fonts).length) theme.fonts=fonts;
    $('#status').textContent='적용 중…';
    fetch('/api/style',{method:'POST',body:JSON.stringify({theme})}).then(r=>r.json()).then(d=>{
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
