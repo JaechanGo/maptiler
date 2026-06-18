@@ -31,3 +31,4 @@ style/style.json
 # 로컬 에이전트/IDE 설정
 .claude/
 .idea/
+*.bak
