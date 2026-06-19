@@ -66,11 +66,18 @@ def fetch_latest(source):
     url = lc.get("url") or source.get("url")
     if not url or (lc.get("type") != "json" and not lc.get("regex")):
         return None
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,*/*"})
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,*/*"}
+    data = None; method = lc.get("method", "GET").upper()
+    if lc.get("body") is not None:   # POST JSON 바디 — {year}/{month}는 현재 연·월로 치환(juso 등)
+        t = time.localtime()
+        sub = lambda v: t.tm_year if v == "{year}" else (t.tm_mon if v == "{month}" else v)
+        data = json.dumps({k: sub(v) for k, v in lc["body"].items()}).encode()
+        headers["Content-Type"] = "application/json"; method = "POST"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     # 공공 사이트(VWorld 등) 인증서 체인 이슈 회피 — 공개 메타데이터 조회 전용
-    body = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    resp = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
     if lc.get("type") == "json":   # JSON API — json_path(점표기) 리스트에서 filter 후 field 추출
-        node = json.loads(body)
+        node = json.loads(resp)
         for seg in (lc.get("json_path") or "").split("."):
             node = node.get(seg, {}) if isinstance(node, dict) else {}
         rows = node if isinstance(node, list) else []
@@ -78,7 +85,7 @@ def fetch_latest(source):
         vals = [str(r.get(lc["field"])) for r in rows
                 if isinstance(r, dict) and r.get(lc["field"]) and all(r.get(k) == v for k, v in flt.items())]
     else:
-        vals = re.findall(lc.get("regex", ""), body)
+        vals = re.findall(lc.get("regex", ""), resp)
     if not vals:
         return None
     return max(vals) if lc.get("pick", "max") == "max" else vals[0]

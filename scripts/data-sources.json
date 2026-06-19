@@ -8,8 +8,17 @@
       "url": "https://business.juso.go.kr/addrlink/main.do",
       "period_fmt": "YYYYMM",
       "cycle": "월",
-      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 목록의 '내비게이션용DB'(SN 28). match_build_*.txt 사용",
-      "_latest_hint": "juso 목록 API엔 날짜 없음 — DB별 파일목록 API(SN 28)를 알면 latest_check 추가 가능. 현재 수동"
+      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용",
+      "latest_check": {
+        "type": "json",
+        "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
+        "method": "POST",
+        "body": { "rtlDtaDtlSn": "28", "year": "{year}", "month": "{month}", "expand": "Y" },
+        "json_path": "results.allMonthFileList",
+        "field": "crtrYm",
+        "filter": { "isExist": "Y", "fileTypeNm": "NAVIDATA" },
+        "pick": "max"
+      }
     },
     {
       "key": "sangga",
