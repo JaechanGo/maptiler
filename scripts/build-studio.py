@@ -153,7 +153,7 @@ def prepare_sources(keys=None):
                         errs.append(f"{f.name}: zip {str(e)[:50]}")
                 elif ext == ".7z":
                     if not tool:
-                        errs.append(f"{f.name}: 7z 도구 없음(p7zip 설치 또는 압축해제 후 배치)"); continue
+                        errs.append(f"{f.name}: 7z 없음 — scripts/setup-build-host.sh 실행(p7zip 설치) 후 재빌드, 또는 .txt 직접배치"); continue
                     r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(f)], capture_output=True, text=True, timeout=3600)
                     if r.returncode != 0: errs.append(f"{f.name}: {(r.stderr or '')[-80:]}")
                     else: n += 1
