@@ -22,8 +22,6 @@ COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-co
 HOST = os.environ.get("HOST", "127.0.0.1")
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD", str(1024**3)))   # 업로드 본문 상한(기본 1GB) — 초과 413
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
-UPLOADS = BUILD_HOME / "uploads"
-UPLOADS.mkdir(parents=True, exist_ok=True)
 DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
 DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # 출처별 현재/최신 기준일·파일·이력
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
@@ -93,6 +91,33 @@ def fetch_latest(source):
 
 def _nonempty_dir(p):
     return p.is_dir() and any(p.iterdir())
+
+
+def detect_key(name):
+    """파일명으로 업로드 가능한 출처 key 추정(불명확하면 None) — 일반 드래그&드롭 자동 분류용."""
+    n = (name or "").lower()
+    if "내비" in name or "navi" in n or n.endswith(".7z"): return "juso_navi"
+    if "상가" in name: return "sangga"
+    if "인허가" in name or "localdata" in n: return "localdata"
+    if "건물" in name or "gis" in n or n.endswith(".shp") or n.endswith(".zip"): return "building_db"
+    return None
+
+
+def _save_source_file(key, name, data):
+    """업로드 파일을 sources/<key>/ 에 저장 + data-versions.json 에 기준일·이력 기록. period 반환."""
+    sdir = SOURCES_DIR / key; sdir.mkdir(parents=True, exist_ok=True)
+    dest = sdir / name
+    with open(dest, "wb") as o: o.write(data)
+    period = _period_from_name(name)
+    ver = load_versions(); rec = ver.setdefault(key, {})
+    entry = {"file": name, "period": period, "size": dest.stat().st_size,
+             "uploaded_at": time.strftime("%Y-%m-%d %H:%M")}
+    rec["file"] = name
+    if period: rec["current"] = period
+    rec["history"] = ([entry] + [h for h in rec.get("history", []) if h.get("file") != name])[:10]
+    save_versions(ver)
+    return period
+
 
 def prepare_sources(keys=None):
     """업로드한 출처 파일(sources/<key>/)을 빌드 입력 경로(build_input.dest)로 적재.
@@ -324,11 +349,6 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/targets":
             return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"]}
                                             for k, v in TARGETS().items()]})
-        if self.path == "/api/datasets":
-            ds = []
-            for f in sorted(UPLOADS.glob("*")):
-                ds.append({"name": f.name, "size": f.stat().st_size})
-            return self._json({"datasets": ds, "build_home": str(BUILD_HOME)})
         if self.path == "/api/builds":
             p = DIST / "cuvia-map-bundle.tgz"
             cur = {"exists": p.is_file(), "size": (p.stat().st_size if p.is_file() else 0)}
@@ -346,7 +366,7 @@ class H(BaseHTTPRequestHandler):
                             "uploadable": bool(s.get("build_input")),
                             "checked_at": v.get("checked_at"), "status": status,
                             "file": v.get("file"), "history": v.get("history", [])})
-            return self._json({"sources": out})
+            return self._json({"sources": out, "build_home": str(BUILD_HOME)})
         if self.path == "/api/download/bundle":
             p = DIST / "cuvia-map-bundle.tgz"
             if not p.is_file():
@@ -413,7 +433,7 @@ class H(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _upload(self):
-        # cgi 모듈이 3.13에서 제거되어 무의존 multipart/form-data 파서를 직접 구현.
+        # 드래그&드롭 일반 업로드 — 파일명으로 출처 자동 분류 → sources/<key>/ 적재(빌드 입력). 무의존 multipart 파서.
         ctype = self.headers.get("Content-Type", "")
         m = re.search(r"boundary=([^;]+)", ctype)
         if "multipart/form-data" not in ctype or not m:
@@ -423,7 +443,8 @@ class H(BaseHTTPRequestHandler):
         if n > MAX_UPLOAD:   # 메모리 고갈 방지 — 대용량 원천(내비DB/SHP, 수 GB)은 BUILD_HOME 경로 지정 권장
             return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과 — 대용량은 BUILD_HOME에 직접 배치"}, 413)
         body = self.rfile.read(n)
-        saved = []                              # 한 요청에 여러 파일 파트(name="file")를 모두 저장
+        srcmap = {s["key"]: s for s in load_sources()}
+        saved = []                              # 한 요청에 여러 파일 파트(name="file")를 모두 자동 분류 적재
         for part in body.split(boundary):
             if b'name="file"' not in part: continue
             idx = part.find(b"\r\n\r\n")
@@ -435,9 +456,13 @@ class H(BaseHTTPRequestHandler):
             if not fm or not fm.group(1): continue
             name = os.path.basename(fm.group(1))   # 경로조작 차단
             if not name: continue
-            dest = UPLOADS / name
-            with open(dest, "wb") as o: o.write(data)
-            saved.append({"saved": name, "size": dest.stat().st_size, "detected": detect(name)})
+            key = detect_key(name)
+            src = srcmap.get(key) if key else None
+            if not src or not src.get("build_input"):   # 자동인식 실패 → 수동 업로드 안내
+                saved.append({"file": name, "error": "출처 자동인식 실패 — ‘데이터 출처’에서 수동 업로드"})
+                continue
+            period = _save_source_file(key, name, data)
+            saved.append({"file": name, "key": key, "source": src["name"], "period": period})
         if not saved: return self._json({"error": "파일 파트 없음"}, 400)
         return self._json({"files": saved})
 
@@ -470,16 +495,7 @@ class H(BaseHTTPRequestHandler):
             if not fm or not fm.group(1): continue
             name = os.path.basename(fm.group(1))
             if not name: continue
-            dest = sdir / name
-            with open(dest, "wb") as o: o.write(data)
-            period = _period_from_name(name)
-            ver = load_versions(); rec = ver.setdefault(key, {})
-            entry = {"file": name, "period": period, "size": dest.stat().st_size,
-                     "uploaded_at": time.strftime("%Y-%m-%d %H:%M")}
-            rec["file"] = name
-            if period: rec["current"] = period
-            rec["history"] = ([entry] + [h for h in rec.get("history", []) if h.get("file") != name])[:10]
-            save_versions(ver)
+            period = _save_source_file(key, name, data)
             return self._json({"ok": True, "key": key, "file": name, "period": period})
         return self._json({"error": "파일 파트 없음"}, 400)
 
@@ -507,15 +523,6 @@ class H(BaseHTTPRequestHandler):
             MGR.unsubscribe(q)
 
 
-def detect(name):
-    n = name.lower()
-    if n.endswith(".7z") or "내비" in name or "navi" in n: return "도로명주소 내비DB"
-    if n.endswith(".zip") or n.endswith(".shp"): return "SHP (GIS건물/전자지도) — EPSG 확인필요"
-    if "상가" in name: return "소상공인 상가정보 CSV"
-    if "인허가" in name or "localdata" in n: return "LOCALDATA 인허가 CSV (EPSG:5174)"
-    if n.endswith(".csv"): return "CSV"
-    if n.endswith(".pbf") or n.endswith(".osm"): return "OSM"
-    return "미상"
 
 
 PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
@@ -554,19 +561,17 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  <a href="/style" target="_blank" rel="noopener" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 스타일 디자인 →</a></header>
 <div class=wrap>
  <div>
-  <div class=panel><h2>데이터 업로드</h2>
+  <div class=panel><h2>데이터 출처 · 업로드</h2>
    <div class=up id=dz>
     <input type=file id=fin multiple style="display:none">
     <div style="font-size:13px"><b>드래그&드롭</b> 또는 <a id=browse>파일 선택</a></div>
-    <div style="margin-top:5px">여러 개 동시 · 붙여넣기(⌘V) 가능 · SHP·CSV·PBF 자동감지</div></div>
-   <div id=dslist class=ds style="margin-top:10px"></div></div>
+    <div style="margin-top:5px">파일명으로 출처 <b>자동 분류</b> → 해당 출처에 적재(빌드 반영)<br>여러 개 동시 · 붙여넣기(⌘V) 가능</div></div>
+   <div id=sources class=ds style="margin-top:12px"></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 대상 (정제 체크)</h2>
    <div id=checks></div>
    <div style="display:flex;gap:8px;margin-top:12px">
      <button id=run>빌드 시작</button>
      <button class=ghost id=selftest>셀프테스트</button></div></div>
-  <div class=panel style="margin-top:14px"><h2>데이터 출처 &amp; 버전</h2>
-   <div id=sources class=ds></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
    <div id=builds class=ds></div></div>
  </div>
@@ -576,8 +581,6 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
-fetch('/api/datasets').then(r=>r.json()).then(d=>{$('#bh').textContent='BUILD_HOME: '+d.build_home;render(d.datasets)});
-function render(ds){$('#dslist').innerHTML=ds.length?ds.map(x=>`<div>· <b>${x.name}</b> (${(x.size/1048576).toFixed(1)}MB)</div>`).join(''):'<i>업로드된 파일 없음</i>'}
 fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
   $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${['geocode','poi','qc'].includes(t.kind)?'checked':''}> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
@@ -598,6 +601,7 @@ es.onmessage=e=>{const d=JSON.parse(e.data);
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
+  if(d.build_home)$('#bh').textContent='BUILD_HOME: '+d.build_home;
   $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:8px 0;border-bottom:1px solid var(--bd)">
    <div>· <b>${s.name}</b> <span class=chip>${s.category}</span>
      <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a>
@@ -640,8 +644,9 @@ function uploadFiles(files){
  logln('⇧ 업로드('+fs.length+'): '+fs.map(f=>f.name).join(', '));
  fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
    if(d.error)return logln('✗ '+d.error);
-   (d.files||[]).forEach(x=>logln('✓ 저장: '+x.saved+' · '+(x.size/1048576).toFixed(1)+'MB · '+x.detected));
-   fetch('/api/datasets').then(r=>r.json()).then(x=>render(x.datasets));
+   (d.files||[]).forEach(x=> x.error ? logln('⚠ '+x.file+' — '+x.error)
+     : logln('✓ '+x.source+' ← '+x.file+(x.period?' (기준일 '+x.period+')':'')));
+   loadSources();
  }).catch(e=>logln('✗ 업로드 실패: '+e));}
 const dz=$('#dz');
 $('#browse').onclick=()=>$('#fin').click();
