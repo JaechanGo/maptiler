@@ -411,6 +411,7 @@ class H(BaseHTTPRequestHandler):
                     a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
                     status = ("update" if b[:k] > a[:k] else "current") if k else "unknown"
                 out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
+                            "uploadable": bool(s.get("build_input")),
                             "checked_at": v.get("checked_at"), "status": status,
                             "file": v.get("file"), "history": v.get("history", [])})
             return self._json({"sources": out})
@@ -530,8 +531,11 @@ class H(BaseHTTPRequestHandler):
         # 출처별 업로드 — sources/<key>/ 에 저장 + 기준일(파일명) 기록 + 이력. ?key=<source>
         import urllib.parse as _up
         key = _up.parse_qs(_up.urlparse(self.path).query).get("key", [""])[0]
-        if key not in {s["key"] for s in load_sources()}:
+        srcmap = {s["key"]: s for s in load_sources()}
+        if key not in srcmap:
             return self._json({"error": "알 수 없는 key"}, 400)
+        if not srcmap[key].get("build_input"):
+            return self._json({"error": "이 출처는 업로드 미지원 — 변환은 오프라인 재빌드(02·osm-from-mbtiles)로 반영"}, 400)
         ctype = self.headers.get("Content-Type", "")
         m = re.search(r"boundary=([^;]+)", ctype)
         if "multipart/form-data" not in ctype or not m:
@@ -683,11 +687,11 @@ function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
   $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:8px 0;border-bottom:1px solid var(--bd)">
    <div>· <b>${s.name}</b> <span class=chip>${s.category}</span>
      <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a>
-     <a onclick="uploadSource('${s.key}')" style="cursor:pointer;color:var(--ac)">⬆ 업로드</a></div>
+     ${s.uploadable?`<a onclick="uploadSource('${s.key}')" style="cursor:pointer;color:var(--ac)">⬆ 업로드</a>`:'<span style="color:var(--mut);font-size:11px">⬆ 업로드 미지원(오프라인 재빌드)</span>'}</div>
    <div style="font-size:11px;margin-top:3px">현재 <b>${fmt(s.current)}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
     · 최신 <b>${fmt(s.latest)}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)" style="cursor:pointer;color:var(--ac)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>`}
     · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div>
-   ${s.file?`<div style="font-size:11px;color:var(--mut);margin-top:2px">📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:'<div style="font-size:11px;color:#7a4">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>'}</div>`).join('');});}
+   ${s.file?`<div style="font-size:11px;color:var(--mut);margin-top:2px">📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:(s.uploadable?'<div style="font-size:11px;color:#7a4">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>':'')}</div>`).join('');});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}

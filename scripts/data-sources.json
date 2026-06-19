@@ -90,16 +90,10 @@
       "url": "https://download.geofabrik.de/asia/south-korea.html",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "일",
-      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf",
+      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf. 최신 조회는 가능하나, .pbf→벡터타일/osm.sqlite 변환은 오프라인 재빌드(02·osm-from-mbtiles)로만 반영되므로 여기서는 업로드 미지원(build_input 없음).",
       "latest_check": {
         "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "first"
-      },
-      "build_input": {
-        "dest": "staged/osm",
-        "extract": null,
-        "into": "dir",
-        "note": "pbf — 벡터타일/osm.sqlite 변환은 별도(02) 필요"
       }
     }
   ]
