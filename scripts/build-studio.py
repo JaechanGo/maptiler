@@ -90,9 +90,55 @@ def fetch_latest(source):
         return None
     return max(vals) if lc.get("pick", "max") == "max" else vals[0]
 
+
+def _nonempty_dir(p):
+    return p.is_dir() and any(p.iterdir())
+
+def prepare_sources(keys=None):
+    """업로드한 출처 파일(sources/<key>/)을 빌드 입력 경로(build_input.dest)로 적재.
+    zip=stdlib 추출 / 7z=CLI(있으면) / 그외=복사. 새 업로드가 없으면 기존 staged 재사용(직전 데이터)."""
+    import shutil, zipfile
+    ver = load_versions(); report = []
+    for s in load_sources():
+        bi = s.get("build_input")
+        if not bi or (keys is not None and s["key"] not in keys):
+            continue
+        key = s["key"]; rec = ver.get(key, {})
+        dest = BUILD_HOME / bi["dest"]; fname = rec.get("file")
+        src = (SOURCES_DIR / key / fname) if fname else None
+        if not src or not src.is_file():   # 업로드 없음 → 기존 staged 있으면 재사용
+            report.append({"key": key, "action": "reused" if _nonempty_dir(dest) else "missing", "dest": str(dest)})
+            continue
+        if rec.get("staged_file") == fname and _nonempty_dir(dest):   # 이미 적재됨
+            report.append({"key": key, "action": "ok", "file": fname, "dest": str(dest)})
+            continue
+        try:
+            ex = bi.get("extract")
+            if ex in ("zip", "7z"):
+                shutil.rmtree(dest, ignore_errors=True); dest.mkdir(parents=True, exist_ok=True)
+                if ex == "zip":
+                    with zipfile.ZipFile(src) as z: z.extractall(dest)
+                else:
+                    tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+                    if not tool:
+                        report.append({"key": key, "action": "no-tool", "file": fname,
+                                       "msg": "7z 추출도구 없음 — 서버에 p7zip 설치 또는 압축해제 후 배치"}); continue
+                    r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(src)], capture_output=True, text=True, timeout=3600)
+                    if r.returncode != 0:
+                        report.append({"key": key, "action": "error", "msg": (r.stderr or "")[-200:]}); continue
+            else:
+                dest.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest / fname)
+            ver.setdefault(key, {})["staged_file"] = fname; save_versions(ver)
+            report.append({"key": key, "action": "staged", "file": fname, "dest": str(dest)})
+        except Exception as e:
+            report.append({"key": key, "action": "error", "msg": str(e)[:200]})
+    return report
+
 # 원천데이터 기본 경로(업로드/환경변수로 덮어쓸 수 있음)
-SRC_JUSO = os.environ.get("SRC_JUSO", "/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
-SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", "/Users/jaechango_cudo/Downloads/인허가정보")
+# 빌드 입력 — 기본값은 Build Studio 업로드 적재 경로(prepare_sources). 외부 경로는 환경변수로 덮어쓰기.
+SRC_JUSO = os.environ.get("SRC_JUSO", str(BUILD_HOME / "staged/navi"))
+SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", str(BUILD_HOME / "staged/localdata"))
+SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))
 
 # ── 빌드 대상 정의 ─────────────────────────────────────────────────
 # kind: 카드 id / label / cmd(argv) / dep(선행 대상) / weight(진행률 가중 단계 키워드)
@@ -107,7 +153,7 @@ def TARGETS():
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
                  "--out", str(BUILD_HOME/"geocode.sqlite")]),
         "buildings": dict(label="3D 건물 타일", dep=None,
-            cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh")]),
+            cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh"), SRC_GIS]),
         "poi": dict(label="시설 라벨 타일 (poi.mbtiles)", dep="geocode",
             cmd=["bash", str(BUILD_HOME/"build-poi.sh")]),
         "qc": dict(label="QC 검증", dep=None,
@@ -385,8 +431,10 @@ class H(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
-            ordered = MGR.enqueue(body.get("targets", []))
-            return self._json({"queued": ordered})
+            targets = body.get("targets", [])
+            prep = [] if "__selftest__" in targets else prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
+            ordered = MGR.enqueue(targets)
+            return self._json({"queued": ordered, "prepared": prep})
         if self.path == "/api/sources/version":   # 출처 기준일 수동 등록/갱신(현재/최신)
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -655,7 +703,11 @@ function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
   $('#builds').innerHTML=`<div style="margin-bottom:8px">${dl}</div>${rows}`;});}
 loadSources(); loadBuilds();
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
- if(!t.length)return alert('대상을 선택하세요'); fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>logln('▶ 큐: '+d.queued.join(', ')));};
+ if(!t.length)return alert('대상을 선택하세요');
+ const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
+ fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
+   (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.file?' ('+p.file+')':'')+(p.msg?' — '+p.msg:'')));
+   logln('▶ 큐: '+d.queued.join(', '));loadSources();});};
 $('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));
 function uploadFiles(files){
  const fs=[...(files||[])]; if(!fs.length)return;

@@ -13,11 +13,24 @@
         "type": "json",
         "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
         "method": "POST",
-        "body": { "rtlDtaDtlSn": "28", "year": "{year}", "month": "{month}", "expand": "Y" },
+        "body": {
+          "rtlDtaDtlSn": "28",
+          "year": "{year}",
+          "month": "{month}",
+          "expand": "Y"
+        },
         "json_path": "results.allMonthFileList",
         "field": "crtrYm",
-        "filter": { "isExist": "Y", "fileTypeNm": "NAVIDATA" },
+        "filter": {
+          "isExist": "Y",
+          "fileTypeNm": "NAVIDATA"
+        },
         "pick": "max"
+      },
+      "build_input": {
+        "dest": "staged/navi",
+        "extract": "7z",
+        "into": "dir"
       }
     },
     {
@@ -31,6 +44,11 @@
       "latest_check": {
         "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
         "pick": "first"
+      },
+      "build_input": {
+        "dest": "poi-all",
+        "extract": null,
+        "into": "dir"
       }
     },
     {
@@ -40,7 +58,12 @@
       "url": "https://www.localdata.go.kr/",
       "period_fmt": "YYYYMMDD",
       "cycle": "일",
-      "note": "지자체 인허가(업소) 전체분. 자동조회 미지원(localdata.go.kr 로그인/세션·API키 필요로 단순 GET 불가) — 현재 수동 등록"
+      "note": "지자체 인허가(업소) 전체분. 자동조회 미지원(localdata.go.kr 로그인/세션·API키 필요로 단순 GET 불가) — 현재 수동 등록",
+      "build_input": {
+        "dest": "staged/localdata",
+        "extract": null,
+        "into": "dir"
+      }
     },
     {
       "key": "building_db",
@@ -53,6 +76,11 @@
       "latest_check": {
         "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "max"
+      },
+      "build_input": {
+        "dest": "staged/gis",
+        "extract": "zip",
+        "into": "dir"
       }
     },
     {
@@ -66,6 +94,12 @@
       "latest_check": {
         "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "first"
+      },
+      "build_input": {
+        "dest": "staged/osm",
+        "extract": null,
+        "into": "dir",
+        "note": "pbf — 벡터타일/osm.sqlite 변환은 별도(02) 필요"
       }
     }
   ]
