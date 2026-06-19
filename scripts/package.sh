@@ -54,6 +54,10 @@ else
   echo "  (scripts/13-qc-check.py 없음 — QC 게이트 스킵)"
 fi
 
+if [ -n "${SKIP_IMAGES:-}" ]; then
+  # 온라인 서버 배포: images.tar 불필요(서버가 'docker compose pull' 로 직접 받음). docker 미사용.
+  echo "[3/4] Docker 이미지 — SKIP_IMAGES=1 → 건너뜀 (서버에서 docker compose pull)"
+else
 echo "[3/4] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 # compose 파일에 고정된 태그를 그대로 사용해 드리프트를 방지한다.
 # ※ ROOT 에 공백이 포함될 수 있으므로 while read 로 라인 단위 파싱 (bash 3.2 호환)
@@ -97,6 +101,7 @@ done
 docker save -o "$DIST/images.tar.tmp" "${SAVE_REFS[@]}" \
   || { echo "오류: docker save 실패" >&2; rm -f "$DIST/images.tar.tmp"; exit 1; }
 mv "$DIST/images.tar.tmp" "$DIST/images.tar"
+fi
 
 echo "[4/4] 산출물 번들"
 # 번들 레이아웃은 airgap compose(server/docker-compose.yml)의 ../tiles, ../geocode/geocode.sqlite,
@@ -121,5 +126,37 @@ tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 rm -rf "$STAGE"
+
+# 빌드 버전관리 — 매니페스트를 builds.json(최근 50건)에 추가. Build Studio '빌드 이력'이 읽음.
+DIST="$DIST" BUILD_HOME="$BUILD_HOME" \
+  VER="$(date +%Y%m%d-%H%M%S)" AT="$(date -Iseconds 2>/dev/null || date)" \
+  SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')" \
+  python3 - <<'PY' || echo "  (매니페스트 기록 건너뜀)"
+import json, os
+dist = os.environ["DIST"]
+idx = os.path.join(dist, "builds.json")
+def sz(p): return os.path.getsize(p) if os.path.exists(p) else 0
+# 현재 데이터 기준일 스냅샷(있으면)
+dv = os.path.join(os.environ.get("BUILD_HOME", ""), "data-versions.json")
+srcs = {}
+if os.path.exists(dv):
+    try: srcs = {k: v.get("current") for k, v in json.load(open(dv)).items() if v.get("current")}
+    except Exception: pass
+entry = {"version": os.environ["VER"], "built_at": os.environ["AT"], "git": os.environ["SHA"],
+         "bundle_bytes": sz(os.path.join(dist, "cuvia-map-bundle.tgz")),
+         "images_bytes": sz(os.path.join(dist, "images.tar")), "sources": srcs}
+builds = []
+if os.path.exists(idx):
+    try: builds = json.load(open(idx))
+    except Exception: builds = []
+builds.insert(0, entry)
+json.dump(builds[:50], open(idx, "w"), ensure_ascii=False, indent=2)
+print(f"  매니페스트: {entry['version']} → {idx}")
+PY
+
 ls -lh "$DIST"
-echo "반입 대상 2개: $DIST/images.tar, $DIST/cuvia-map-bundle.tgz"
+if [ -n "${SKIP_IMAGES:-}" ]; then
+  echo "반입 대상: $DIST/cuvia-map-bundle.tgz  (이미지는 서버에서 docker compose pull)"
+else
+  echo "반입 대상 2개: $DIST/images.tar, $DIST/cuvia-map-bundle.tgz"
+fi

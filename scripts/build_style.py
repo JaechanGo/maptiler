@@ -45,3 +45,13 @@ if theme_path.exists():
 out = root / "style.json"
 out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"OK: {out} (layers={len(style['layers'])})")
+
+# 카테고리 아이콘 스프라이트 재생성(style/icons/*.png → sprite{,@2x}.{png,json}).
+# Pillow 필요 — 없으면 경고만 남기고 계속(스타일 자체는 이미 기록됨).
+import subprocess
+try:
+    r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parent / "14-gen-sprite.py")],
+                       capture_output=True, text=True, timeout=120)
+    print((r.stdout or r.stderr).strip())
+except Exception as e:
+    print(f"(스프라이트 생성 건너뜀: {e})")

@@ -17,17 +17,13 @@
         "text-optional": true },
       "paint": { "text-color": "#7d9b76", "text-halo-color": "hsl(214, 62%, 12%)", "text-halo-width": 1.2 } },
 
-    { "id": "poi-station-dot", "type": "circle", "source": "openmaptiles",
-      "source-layer": "poi", "minzoom": 12,
-      "filter": ["all", ["==", ["get", "class"], "railway"], ["any", ["has", "name:ko"], ["has", "name"]]],
-      "paint": {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 17, 5],
-        "circle-color": "#4d7cfe", "circle-stroke-color": "hsl(214, 62%, 12%)", "circle-stroke-width": 1 } },
-
     { "id": "poi-station-label", "type": "symbol", "source": "openmaptiles",
       "source-layer": "poi", "minzoom": 12,
       "filter": ["all", ["==", ["get", "class"], "railway"], ["any", ["has", "name:ko"], ["has", "name"]]],
       "layout": {
+        "icon-image": "station",
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.6, 17, 1.0],
+        "icon-optional": true,
         "text-field": ["let", "n", ["coalesce", ["get", "name:ko"], ["get", "name"]],
           ["case",
             ["==", ["slice", ["var", "n"], -1], "역"],

@@ -8,26 +8,374 @@
 기동:  python3 scripts/build-studio.py            # http://localhost:8090
        BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
 """
-import json, os, pathlib, queue, subprocess, threading, time, re
+import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import style_objects
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
 PORT = int(os.environ.get("PORT", "8090"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))   # 미리보기가 스타일을 읽어올 tileserver 포트
+STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "8091")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 # 기본은 로컬 전용(127.0.0.1). 외부 노출이 필요할 때만 HOST=0.0.0.0 으로 명시. 인증이 없으므로
 # 0.0.0.0 바인딩 시 같은 LAN의 누구나 빌드 실행/업로드가 가능함을 운영자가 인지해야 함.
 HOST = os.environ.get("HOST", "127.0.0.1")
-MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD", str(1024**3)))   # 업로드 본문 상한(기본 1GB) — 초과 413
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
-UPLOADS = BUILD_HOME / "uploads"
-UPLOADS.mkdir(parents=True, exist_ok=True)
+# 업로드는 raw 바디 스트리밍(청크→디스크)이라 용량 상한 없음 — 대용량 내비DB/건물DB 웹 업로드 지원.
+DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
+DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON — 최초 1회 DB로 마이그레이션 후 .bak 보존
+DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
+SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
+SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
+
+
+def _period_from_name(name):
+    """파일명에서 기준일 추출 — 20260618 / 202605 우선. 예: 202605_내비게이션용DB_전체분.7z → 202605"""
+    m = re.search(r"(?<!\d)(\d{8}|\d{6})(?!\d)", name or "")
+    return m.group(1) if m else ""
+
+
+def _load_json(p, default):
+    try:
+        return json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+def load_sources():
+    return _load_json(SOURCES_FILE, {}).get("sources", [])
+
+# ── 업로드 이력·버전·검증 상태(통합 sqlite) ───────────────────────────
+SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS sources_state(
+  key TEXT PRIMARY KEY, current TEXT, latest TEXT, checked_at TEXT,
+  file TEXT, staged_sig TEXT,
+  validation_status TEXT, validation_msg TEXT, validated_at TEXT);
+CREATE TABLE IF NOT EXISTS upload_history(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, file TEXT, period TEXT,
+  size INTEGER, uploaded_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_hist_key ON upload_history(key, id DESC);
+"""
+_STATE_COLS = ("current", "latest", "checked_at", "file", "staged_sig",
+               "validation_status", "validation_msg", "validated_at")
+_DB_READY = False
+_DB_LOCK = threading.Lock()
+
+
+def _migrate_versions_once(conn):
+    """(구) data-versions.json → DB 최초 1회 이전. json 은 .bak 로 보존."""
+    if conn.execute("SELECT 1 FROM sources_state LIMIT 1").fetchone():
+        return
+    if not DATA_VERSIONS.is_file():
+        return
+    for key, rec in (_load_json(DATA_VERSIONS, {}) or {}).items():
+        conn.execute("INSERT OR REPLACE INTO sources_state(key,current,latest,checked_at,file,staged_sig) "
+                     "VALUES(?,?,?,?,?,?)",
+                     (key, rec.get("current"), rec.get("latest"), rec.get("checked_at"),
+                      rec.get("file"), rec.get("staged_sig")))
+        for h in (rec.get("history") or []):
+            conn.execute("INSERT INTO upload_history(key,file,period,size,uploaded_at) VALUES(?,?,?,?,?)",
+                         (key, h.get("file"), h.get("period"), h.get("size"), h.get("uploaded_at")))
+    conn.commit()
+    try:
+        DATA_VERSIONS.rename(str(DATA_VERSIONS) + ".bak")
+    except Exception:
+        pass
+
+
+def _db():
+    global _DB_READY
+    BUILD_HOME.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    if not _DB_READY:
+        with _DB_LOCK:
+            if not _DB_READY:
+                conn.executescript(SCHEMA_DDL)
+                _migrate_versions_once(conn)
+                _DB_READY = True
+    return conn
+
+
+def load_versions():
+    """전 출처 상태(현재/최신/검증/staged_sig)+이력(최근10)을 nested dict 로 — 기존 호출부 호환."""
+    c = _db(); out = {}
+    try:
+        for row in c.execute(f"SELECT key,{','.join(_STATE_COLS)} FROM sources_state"):
+            out[row[0]] = {col: val for col, val in zip(_STATE_COLS, row[1:]) if val is not None}
+        for key, file, period, size, uat in c.execute(
+                "SELECT key,file,period,size,uploaded_at FROM upload_history ORDER BY id DESC LIMIT 400"):
+            h = out.setdefault(key, {}).setdefault("history", [])
+            if len(h) < 10:
+                h.append({"file": file, "period": period, "size": size, "uploaded_at": uat})
+    finally:
+        c.close()
+    return out
+
+
+def save_versions(v):
+    """상태 컬럼만 upsert(이력은 _record_upload 가 관리). rec 는 load_versions 산출이라 기존값 보존."""
+    c = _db()
+    try:
+        sets = ",".join(f"{col}=excluded.{col}" for col in _STATE_COLS)
+        for key, rec in (v or {}).items():
+            c.execute(f"INSERT INTO sources_state(key,{','.join(_STATE_COLS)}) "
+                      f"VALUES(?,{','.join(['?'] * len(_STATE_COLS))}) "
+                      f"ON CONFLICT(key) DO UPDATE SET {sets}",
+                      [key] + [rec.get(col) for col in _STATE_COLS])
+        c.commit()
+    finally:
+        c.close()
+
+
+def _record_upload(key, name, size):
+    """업로드 1파일 → 이력 append + 상태(file/current) 갱신 + 검증상태 pending 리셋. period 반환."""
+    period = _period_from_name(name)
+    c = _db()
+    try:
+        c.execute("INSERT INTO upload_history(key,file,period,size,uploaded_at) VALUES(?,?,?,?,?)",
+                  (key, name, period, size, time.strftime("%Y-%m-%d %H:%M")))
+        c.execute("INSERT INTO sources_state(key,file,current,validation_status) VALUES(?,?,?, 'pending') "
+                  "ON CONFLICT(key) DO UPDATE SET file=excluded.file, "
+                  "current=COALESCE(excluded.current, sources_state.current), "
+                  "validation_status='pending', validation_msg=NULL, validated_at=NULL",
+                  (key, name, period or None))
+        c.commit()
+    finally:
+        c.close()
+    return period
+
+
+def _set_validation(key, status, msg):
+    c = _db()
+    try:
+        c.execute("INSERT INTO sources_state(key,validation_status,validation_msg,validated_at) "
+                  "VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                  "validation_status=excluded.validation_status, validation_msg=excluded.validation_msg, "
+                  "validated_at=excluded.validated_at",
+                  (key, status, msg, time.strftime("%Y-%m-%d %H:%M")))
+        c.commit()
+    finally:
+        c.close()
+
+
+# ── 업로드 데이터 경량 검증(구조·핵심 컬럼만 — 압축 central directory + 헤더 1줄만 읽어 GB급도 수초) ──
+def _split_hdr(line):
+    return [c.strip().strip('"').strip() for c in (line or "").rstrip("\r\n").split(",")]
+
+
+def _zip_csv_members(path):
+    with zipfile.ZipFile(path) as z:
+        return [n for n in z.namelist() if n.lower().endswith(".csv")]
+
+
+def _zip_header(path, member, encoding):
+    with zipfile.ZipFile(path) as z, z.open(member) as fp:
+        return fp.readline().decode(encoding, "replace")
+
+
+def _v_sangga(files):
+    need = {"상호명", "경도", "위도"}
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    csvs = [f for f in files if f.suffix.lower() == ".csv"]
+    if zips:
+        mem = _zip_csv_members(zips[0])
+        if not mem:
+            return ("fail", "zip 안에 CSV가 없습니다")
+        miss = need - set(_split_hdr(_zip_header(zips[0], mem[0], "utf-8-sig")))
+        return ("ok" if not miss else "warn", f"zip · CSV {len(mem)}개" + ("" if not miss else f" · 컬럼 누락 {sorted(miss)}"))
+    if csvs:
+        with open(csvs[0], encoding="utf-8-sig", errors="replace") as f:
+            miss = need - set(_split_hdr(f.readline()))
+        return ("ok" if not miss else "warn", f"CSV {len(csvs)}개" + ("" if not miss else f" · 컬럼 누락 {sorted(miss)}"))
+    return ("fail", "zip 또는 CSV가 필요합니다")
+
+
+def _v_localdata(files):
+    need = {"사업장명"}; coord = {"좌표정보(X)", "좌표정보(Y)"}
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    csvs = [f for f in files if f.suffix.lower() == ".csv"]
+
+    def judge(cols, ncsv, tag):
+        ok = (need <= cols) and bool(coord & cols)
+        return ("ok" if ok else "warn", f"{tag} · CSV {ncsv}개" + ("" if ok else " · 컬럼 확인필요(사업장명/좌표정보)"))
+    if zips:
+        mem = _zip_csv_members(zips[0])
+        if not mem:
+            return ("fail", "zip 안에 CSV가 없습니다")
+        return judge(set(_split_hdr(_zip_header(zips[0], mem[0], "cp949"))), len(mem), "zip")
+    if csvs:
+        with open(csvs[0], encoding="cp949", errors="replace") as f:
+            return judge(set(_split_hdr(f.readline())), len(csvs), "폴더")
+    return ("fail", "zip 또는 CSV가 필요합니다")
+
+
+def _v_navi(files):
+    z7 = [f for f in files if f.suffix.lower() == ".7z"]
+    mb = [f for f in files if f.name.lower().startswith("match_build")]
+    if z7:
+        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not tool:
+            return ("warn", ".7z 업로드됨 — 7z 미설치로 내용검증 생략(빌드 시 추출)")
+        try:
+            r = subprocess.run([tool, "l", str(z7[0])], capture_output=True, text=True, timeout=180)
+            cnt = len(set(re.findall(r"match_build_\w+\.txt", r.stdout)))
+        except Exception as e:
+            return ("warn", f".7z (목록 확인 실패: {str(e)[:60]})")
+        return ("ok" if cnt else "warn", f".7z · match_build {cnt}개 시도" if cnt else ".7z지만 match_build_*.txt 미발견")
+    if mb:
+        return ("ok", f"match_build_*.txt {len(mb)}개")
+    return ("fail", ".7z 또는 match_build_*.txt 가 필요합니다")
+
+
+def _v_building(files):
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    shps = [f for f in files if f.suffix.lower() == ".shp"]
+    if zips:
+        tot = 0
+        for z in zips:
+            try:
+                with zipfile.ZipFile(z) as zf:
+                    tot += len([n for n in zf.namelist() if n.lower().endswith(".shp")])
+            except Exception:
+                return ("warn", f"zip {len(zips)}개 (일부 열기 실패)")
+        return ("ok" if tot else "warn", f"zip {len(zips)}개 · shp {tot}개" if tot else f"zip {len(zips)}개지만 .shp 없음")
+    if shps:
+        return ("ok", f"shp {len(shps)}개")
+    return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
+
+
+_VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building}
+
+
+def _validate_source(key):
+    sdir = SOURCES_DIR / key
+    files = sorted((f for f in sdir.rglob("*") if f.is_file()), key=lambda p: str(p)) if sdir.is_dir() else []
+    if not files:
+        return ("fail", "업로드된 파일이 없습니다")
+    fn = _VALIDATORS.get(key)
+    if not fn:
+        return ("warn", f"{len(files)}개 파일(검증기 미정의)")
+    try:
+        return fn(files)
+    except Exception as e:
+        return ("fail", f"검증 오류: {str(e)[:120]}")
+
+def load_builds():
+    return _load_json(DIST / "builds.json", [])
+
+def _norm(x):
+    return re.sub(r"\D", "", str(x or ""))   # 기준일 비교용 — 숫자만(202605 vs 2026-06-18 호환)
+
+def fetch_latest(source):
+    """레지스트리의 latest_check(url/regex/pick)로 외부 페이지에서 최신 기준일 추출. 실패 시 None.
+    URL/정규식은 신뢰된 data-sources.json 출처라 사용자 입력이 아님(SSRF 무관)."""
+    lc = source.get("latest_check")
+    if not lc:
+        return None
+    url = lc.get("url") or source.get("url")
+    if not url or (lc.get("type") != "json" and not lc.get("regex")):
+        return None
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,*/*"}
+    data = None; method = lc.get("method", "GET").upper()
+    if lc.get("body") is not None:   # POST JSON 바디 — {year}/{month}는 현재 연·월로 치환(juso 등)
+        t = time.localtime()
+        sub = lambda v: t.tm_year if v == "{year}" else (t.tm_mon if v == "{month}" else v)
+        data = json.dumps({k: sub(v) for k, v in lc["body"].items()}).encode()
+        headers["Content-Type"] = "application/json"; method = "POST"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    # 공공 사이트(VWorld 등) 인증서 체인 이슈 회피 — 공개 메타데이터 조회 전용
+    resp = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    if lc.get("type") == "json":   # JSON API — json_path(점표기) 리스트에서 filter 후 field 추출
+        node = json.loads(resp)
+        for seg in (lc.get("json_path") or "").split("."):
+            node = node.get(seg, {}) if isinstance(node, dict) else {}
+        rows = node if isinstance(node, list) else []
+        flt = lc.get("filter") or {}
+        vals = [str(r.get(lc["field"])) for r in rows
+                if isinstance(r, dict) and r.get(lc["field"]) and all(r.get(k) == v for k, v in flt.items())]
+    else:
+        vals = re.findall(lc.get("regex", ""), resp)
+    if not vals:
+        return None
+    return max(vals) if lc.get("pick", "max") == "max" else vals[0]
+
+
+def _nonempty_dir(p):
+    return p.is_dir() and any(p.iterdir())
+
+
+def _safe_relpath(name):
+    """업로드 상대경로 정규화 — 폴더 구조(서브디렉토리) 보존 + 경로조작(.. /절대경로) 차단."""
+    parts = []
+    for seg in (name or "").replace("\\", "/").split("/"):
+        seg = seg.strip()
+        if seg in ("", ".", ".."):
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def prepare_sources(keys=None):
+    """sources/<key>/ 의 '모든' 업로드 파일을 build_input.dest 로 적재(누적).
+    확장자별: .zip=stdlib 추출 / .7z=CLI(있으면) / .tar·.tgz·.txz=stdlib 추출 / 그외(.csv·.txt·.shp 등)=복사.
+    업로드가 없으면 기존 staged 재사용(직전 빌드분 또는 BUILD_HOME 직접 배치 데이터)."""
+    import shutil, tarfile, zipfile
+    ver = load_versions(); report = []
+    for s in load_sources():
+        bi = s.get("build_input")
+        if not bi or (keys is not None and s["key"] not in keys):
+            continue
+        key = s["key"]; dest = BUILD_HOME / bi["dest"]
+        srcdir = SOURCES_DIR / key
+        files = sorted((f for f in srcdir.rglob("*") if f.is_file()), key=lambda p: str(p)) if srcdir.is_dir() else []
+        if not files:   # 업로드 없음 → 기존 staged 있으면 재사용(직접 배치 포함)
+            report.append({"key": key, "action": "reused" if _nonempty_dir(dest) else "missing", "dest": str(dest)})
+            continue
+        sig = ";".join(f"{f.relative_to(srcdir)}:{f.stat().st_size}" for f in files)   # 업로드 집합 변경 시에만 재적재
+        rec = ver.get(key, {})
+        if rec.get("staged_sig") == sig and _nonempty_dir(dest):
+            report.append({"key": key, "action": "ok", "n": len(files), "dest": str(dest)})
+            continue
+        try:
+            shutil.rmtree(dest, ignore_errors=True); dest.mkdir(parents=True, exist_ok=True)
+            tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+            n = 0; errs = []
+            for f in files:
+                ext = f.suffix.lower()
+                if ext == ".zip":
+                    try:
+                        with zipfile.ZipFile(f) as z: z.extractall(dest); n += 1
+                    except Exception as e:
+                        errs.append(f"{f.name}: zip {str(e)[:50]}")
+                elif ext == ".7z":
+                    if not tool:
+                        errs.append(f"{f.name}: 7z 없음 — scripts/setup-build-host.sh 실행(p7zip 설치) 후 재빌드, 또는 .txt 직접배치"); continue
+                    r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(f)], capture_output=True, text=True, timeout=3600)
+                    if r.returncode != 0: errs.append(f"{f.name}: {(r.stderr or '')[-80:]}")
+                    else: n += 1
+                elif ext == ".tar" or f.name.lower().endswith((".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
+                    try:
+                        with tarfile.open(f) as t:
+                            try: t.extractall(dest, filter="data")   # py3.12+ 경로조작 방지
+                            except TypeError: t.extractall(dest)     # 구버전 폴백
+                        n += 1
+                    except Exception as e:
+                        errs.append(f"{f.name}: tar {str(e)[:50]}")
+                else:   # 폴더 업로드(서브디렉토리 포함) 구조 보존 복사 — localdata 대분류 폴더 등
+                    rel = f.relative_to(srcdir); (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest / rel); n += 1
+            ver.setdefault(key, {})["staged_sig"] = sig; save_versions(ver)
+            action = "staged" if (n and not errs) else ("partial" if n else "error")
+            report.append({"key": key, "action": action, "n": n, "dest": str(dest),
+                           "msg": "; ".join(errs)[:200] if errs else None})
+        except Exception as e:
+            report.append({"key": key, "action": "error", "msg": str(e)[:200]})
+    return report
 
 # 원천데이터 기본 경로(업로드/환경변수로 덮어쓸 수 있음)
-SRC_JUSO = os.environ.get("SRC_JUSO", "/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
-SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", "/Users/jaechango_cudo/Downloads/인허가정보")
+# 빌드 입력 — 기본값은 Build Studio 업로드 적재 경로(prepare_sources). 외부 경로는 환경변수로 덮어쓰기.
+SRC_JUSO = os.environ.get("SRC_JUSO", str(BUILD_HOME / "staged/navi"))
+SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", str(BUILD_HOME / "staged/localdata"))
+SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))
 
 # ── 빌드 대상 정의 ─────────────────────────────────────────────────
 # kind: 카드 id / label / cmd(argv) / dep(선행 대상) / weight(진행률 가중 단계 키워드)
@@ -36,25 +384,33 @@ def TARGETS():
     return {
         "localdata": dict(label="인허가 정제 (LOCALDATA→상가포맷)", dep=None,
             cmd=[py, str(ROOT/"scripts/11-build-localdata.py"), SRC_LOCALDATA,
-                 str(BUILD_HOME/"localdata/localdata_clean.csv")]),
-        "geocode": dict(label="통합 지오코딩 인덱스", dep="localdata",
+                 str(BUILD_HOME/"poi-all/localdata_clean.csv")]),   # 09가 읽는 poi-all 에 직접 출력(geocoder 반영)
+        "facility": dict(label="생활편의시설 정제 (facility)", dep=None,
+            cmd=[py, str(ROOT/"scripts/11b-build-facility.py"), str(BUILD_HOME/"staged/facility"),
+                 str(BUILD_HOME/"poi-all/facility_clean.csv")]),   # kind=facility 로 09가 적재(biz 분리)
+        "osm_vector": dict(label="OSM 벡터타일 (korea.mbtiles)", dep=None,
+            cmd=["bash", str(ROOT/"scripts/02-gen-vector.sh")]),
+        "osm_sqlite": dict(label="OSM 지오코더 소스 (osm.sqlite)", dep="osm_vector",
+            cmd=[py, str(ROOT/"scripts/osm-from-mbtiles.py")]),
+        "dong": dict(label="아파트 동 라벨 (dong.mbtiles)", dep=None,
+            cmd=["bash", "-c", f'python3 "{ROOT/"scripts/04-gen-dong-labels.py"}" && python3 "{ROOT/"scripts/05-gen-dong-tiles.py"}"']),
+        "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
                  "--out", str(BUILD_HOME/"geocode.sqlite")]),
         "buildings": dict(label="3D 건물 타일", dep=None,
-            cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh")]),
+            cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh"), SRC_GIS]),
         "poi": dict(label="시설 라벨 타일 (poi.mbtiles)", dep="geocode",
-            cmd=["bash", str(BUILD_HOME/"build-poi.sh")]),
+            cmd=["bash", str(ROOT/"scripts/12-build-poi.sh")]),   # repo 원본 직접 — 배포본(BUILD_HOME/build-poi.sh) 동기 불필요
         "qc": dict(label="QC 검증", dep=None,
             cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
                  "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
                  "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082"]),
         "package": dict(label="폐쇄망 번들 패키징", dep=None,
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
-        "__selftest__": dict(label="셀프테스트(가짜 진행률)", dep=None, cmd=None),
     }
 
-CANON = ["localdata", "geocode", "buildings", "poi", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "buildings", "poi", "qc", "package"]
 
 def progress_of(kind, line, st):
     """스크립트 stderr 라인 → 진행률(0..1) 휴리스틱. st는 대상별 누적 상태(dict)."""
@@ -88,6 +444,7 @@ def progress_of(kind, line, st):
 class Manager:
     def __init__(self):
         self.jobs = {}          # kind -> {status,progress,log[],st}
+        self.last_targets = []  # 직전 /api/build 정제 체크(매니페스트 기록용)
         self.subs = []          # SSE 구독자 Queue 목록
         self.lock = threading.Lock()
         self.work = queue.Queue()   # FIFO 워커 큐 (순차 실행)
@@ -118,8 +475,9 @@ class Manager:
             t = T.get(k)
             if not t or k in plan: continue
             plan.add(k)
-            if t["dep"] and t["dep"] in T: stack.append(t["dep"])
-        ordered = [k for k in CANON if k in plan] + [k for k in plan if k == "__selftest__"]
+            for d in (([t["dep"]] if isinstance(t["dep"], str) else (t["dep"] or [])) if t["dep"] else []):
+                if d in T: stack.append(d)
+        ordered = [k for k in CANON if k in plan]
         # jobs 변형은 subscribe()의 스냅샷과 같은 lock으로 보호(동시 SSE 연결 중 dict 크기변경 크래시 방지).
         # 이미 queued/running 인 kind는 재적재하지 않음(중복 동시 실행 방지). publish/work.put은 lock 밖에서.
         started = []
@@ -149,23 +507,21 @@ class Manager:
         j = self.jobs[kind]; j["status"] = "running"
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
-            if kind == "__selftest__":
-                for i in range(1, 21):
-                    time.sleep(0.25); j["progress"] = i/20
-                    self._emit(kind, f"  셀프테스트 진행 {i*5}% …")
-            else:
-                cmd = TARGETS()[kind]["cmd"]
-                self._emit(kind, "$ " + " ".join(cmd))
-                # PYTHONUNBUFFERED=1 — 파이썬 자식이 파이프로 출력 시 블록버퍼링되어 진행률이
-                # 종료 시점에 몰리는 것을 막아 라인 단위 라이브 스트리밍을 보장.
-                env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, bufsize=1, cwd=str(ROOT), env=env)
-                for line in p.stdout:
-                    self._emit(kind, line.rstrip("\n"))
-                rc = p.wait()
-                if rc != 0: raise RuntimeError(f"종료코드 {rc}")
+            cmd = TARGETS()[kind]["cmd"]
+            self._emit(kind, "$ " + " ".join(cmd))
+            # PYTHONUNBUFFERED=1 — 파이썬 자식이 파이프로 출력 시 블록버퍼링되어 진행률이
+            # 종료 시점에 몰리는 것을 막아 라인 단위 라이브 스트리밍을 보장.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1, cwd=str(ROOT), env=env)
+            for line in p.stdout:
+                self._emit(kind, line.rstrip("\n"))
+            rc = p.wait()
+            if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
+            if kind == "package":   # 빌드(패키징) 완료 → 매니페스트 자동저장(번들 포함)
+                try: save_manifest(with_bundle=True)
+                except Exception as e: self._emit(kind, f"[프로필 저장 실패] {e}")
         except Exception as e:
             j["status"] = "error"; self._emit(kind, f"[오류] {e}")
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"]})
@@ -173,42 +529,383 @@ class Manager:
 MGR = Manager()
 
 
-# ── 스타일 색 테마 적용 ───────────────────────────────────────────
-HEXRE = re.compile(r"^#[0-9a-fA-F]{6}$")
-VALID_KEYS = {o["key"] for o in style_objects.OBJECTS} | {g["key"] for g in style_objects.POI_GROUPS}
+# ── 내용주소 저장소(store) + 자동수집(collector) ─────────────────────
+# store/<sha[:2]>/<sha> 로 같은 내용 1벌 저장(중복 0, 영구 보관). 수집은 항목 1건씩 순차
+# (Referer·백오프·HTML 차단감지) → SHA 비교(동일=staged 유지·재빌드 생략) → staged 추출/배치 → DB(현재일·sha=staged_sig).
+STORE_DIR = BUILD_HOME / "store"
+FACILITY_CATALOG = ROOT / "scripts" / "facility-catalog.json"
+LOCALDATA_REGIONS = ROOT / "scripts" / "localdata-regions.json"
+_COLLECT_LOCK = threading.Lock()
+_DL_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.localdata.go.kr/"}
 
-def apply_style_theme(theme):
-    # 유효 키 + #rrggbb 만 통과(주입 방지) → style/theme.json 저장 → build_style → tileserver 재시작
-    theme = theme or {}
-    clean = {k: v for k, v in theme.items() if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v)}
-    fonts = theme.get("fonts")
-    if isinstance(fonts, dict):   # 글꼴: 설치된 글꼴 + 유효 라벨키만(없는 글꼴 지정 시 글리프 404 방지)
-        avail = set(style_objects.available_fonts(str(ROOT / "style/glyphs")))
-        cf = {k: v for k, v in fonts.items()
-              if (k == "all" or k in style_objects.FONT_LABELS) and isinstance(v, str) and v in avail}
-        if cf:
-            clean["fonts"] = cf
-    (ROOT / "style").mkdir(exist_ok=True)
-    (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    log = []
-    try:
-        r = subprocess.run(["python3", str(ROOT / "scripts/build_style.py")],
-                           capture_output=True, text=True, cwd=str(ROOT), timeout=60)
-        log.append(r.stdout.strip() or r.stderr.strip())
-        if r.returncode != 0: return {"ok": False, "error": "build_style 실패", "log": log}
-    except Exception as e:
-        return {"ok": False, "error": f"build_style 오류: {e}", "log": log}
-    # tileserver는 시작 시 스타일을 캐시하므로 서빙본 갱신엔 재시작이 필요하나, amd64 에뮬레이션이라
-    # 부팅이 수십 초 걸린다 → 동기 대기하지 않고 detached로 띄우고 즉시 반환(라이브 미리보기는 이미 반영됨).
-    reloaded = "스킵(compose 없음)"
-    if os.path.exists(COMPOSE_FILE):
+
+def _sha256_file(path, buf=1 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(buf), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def store_put(tmp_path):
+    """임시파일을 SHA로 store에 1벌 저장(이미 있으면 tmp 삭제). (sha, reused) 반환."""
+    sha = _sha256_file(tmp_path)
+    dest = STORE_DIR / sha[:2] / sha
+    if dest.exists():
+        os.remove(tmp_path); return sha, True
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(tmp_path), str(dest))
+    return sha, False
+
+
+def store_path(sha):
+    return STORE_DIR / sha[:2] / sha
+
+
+def _http_download(url, dest, headers=None, retries=3, timeout=900):
+    """파일 다운로드 — 302→/error·HTML 에러페이지 감지 + 백오프 재시도. 스트리밍 저장, size 반환."""
+    hd = {**_DL_HEADERS, **(headers or {})}
+    last = None
+    for attempt in range(retries):
         try:
-            subprocess.Popen(["docker", "compose", "-f", COMPOSE_FILE, "restart", "tileserver"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            reloaded = "재시작 요청됨(수십초 소요)"
+            req = urllib.request.Request(url, headers=hd)
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl._create_unverified_context()) as r:
+                if "/error" in r.geturl():
+                    raise RuntimeError(f"차단/에러 리다이렉트: {r.geturl()}")
+                with open(dest, "wb") as o:
+                    head = r.read(1 << 16)
+                    low = head[:300].lstrip().lower()
+                    if low.startswith(b"<!doctype html") or b"<html" in low:
+                        raise RuntimeError("파일 아님(HTML 에러페이지) — 한국 IP/세션 확인")
+                    o.write(head)
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        o.write(chunk)
+            return os.path.getsize(dest)
         except Exception as e:
-            reloaded = f"오류: {e}"
-    return {"ok": True, "applied": len(clean), "reloaded": reloaded, "log": log}
+            last = e
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"다운로드 실패({retries}회): {str(last)[:140]}")
+
+
+def _extract_into(src, dest_dir, orig_name=None):
+    """수집/저장 파일을 staged 로 추출/복사 — 내용(매직바이트) 기반 판별(파일명 무관: store는 확장자 없는 <sha>).
+    zip/tar/7z 추출, 그 외(csv 등) 복사. 확장자 없으면 .csv 보존(11/11b 가 *.csv glob)."""
+    import tarfile
+    dest_dir = pathlib.Path(dest_dir); dest_dir.mkdir(parents=True, exist_ok=True)
+    src = pathlib.Path(src)
+    if zipfile.is_zipfile(src):
+        with zipfile.ZipFile(src) as z: z.extractall(dest_dir); return
+    if tarfile.is_tarfile(src):
+        with tarfile.open(src) as t:
+            try: t.extractall(dest_dir, filter="data")
+            except TypeError: t.extractall(dest_dir)
+        return
+    with open(src, "rb") as fh: head = fh.read(6)
+    if head == b"7z\xbc\xaf\x27\x1c":
+        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not tool: raise RuntimeError("7z 미설치 — scripts/setup-build-host.sh")
+        subprocess.run([tool, "x", "-y", f"-o{dest_dir}", str(src)], check=True, capture_output=True, timeout=3600); return
+    nm = orig_name or src.name
+    if "." not in nm: nm += ".csv"
+    shutil.copy2(src, dest_dir / nm)
+
+
+def _collect_plan(item_key):
+    """항목키 → (source, urls[], dest, mode). 항목키: '<srckey>' 또는 '<srckey>:<sub>'."""
+    skey, _, sub = item_key.partition(":")
+    sub = sub or None
+    src = next((s for s in load_sources() if s["key"] == skey), None)
+    if not src:
+        raise RuntimeError(f"알 수 없는 출처: {skey}")
+    col = src.get("collect") or {}; method = col.get("method")
+    if method == "localdata_facility":
+        cat = _load_json(FACILITY_CATALOG, {}); base = cat.get("base", "")
+        it = next((x for x in cat.get("items", []) if x["key"] == sub), None)
+        if not it:
+            raise RuntimeError(f"facility 항목 없음: {sub}")
+        return src, [base + p for p in it["paths"]], BUILD_HOME / "staged/facility" / sub, "extract"
+    if method == "localdata_all":
+        reg = _load_json(LOCALDATA_REGIONS, {}); base = reg.get("base", "")
+        if sub:
+            return src, [base + reg["region_path"].replace("{orgCode}", sub)], BUILD_HOME / "staged/localdata" / sub, "extract"
+        return src, [base + reg["all_path"]], BUILD_HOME / "staged/localdata", "extract"
+    if method == "geofabrik":
+        return src, [col["url"]], ROOT / col.get("dest", "data/osm/south-korea.osm.pbf"), "file"  # 02-gen-vector.sh 가 ROOT/data/osm 읽음
+    if method == "datago_filedown":   # data.go.kr 2단계: selectFileDataDownload.do(메타) → fileDownload.do(파일)
+        meta_url = (col.get("detail_url", "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do")
+                    + f"?recommendDataYn=Y&publicDataPk={col.get('publicDataPk')}"
+                    + f"&publicDataDetailPk={urllib.parse.quote(col.get('publicDataDetailPk', ''))}")
+        req = urllib.request.Request(meta_url, headers={"User-Agent": "Mozilla/5.0", "Referer": src.get("url", "")})
+        meta = json.loads(urllib.request.urlopen(req, timeout=30, context=ssl._create_unverified_context()).read().decode("utf-8", "replace"))
+        if not (meta.get("status") and meta.get("atchFileId")):
+            raise RuntimeError("상가 메타 조회 실패(atchFileId 없음) — data.go.kr 변경/차단 확인")
+        dnm = (meta.get("dataSetFileDetailInfo") or {}).get("dataNm", "sangga")
+        url = ("https://www.data.go.kr/cmm/cmm/fileDownload.do"
+               + f"?atchFileId={meta['atchFileId']}&fileDetailSn={meta.get('fileDetailSn', '1')}&dataNm={urllib.parse.quote(dnm)}")
+        return src, [url], BUILD_HOME / src.get("build_input", {}).get("dest", "poi-all/sangga"), "extract"
+    raise RuntimeError(f"수집 미지원: {skey}")
+
+
+def collect_catalog():
+    """자동수집 목록(통합) — 소스 + facility 14종 + localdata 17시·도, DB 상태 병합. sha=staged_sig."""
+    ver = load_versions(); out = []
+    for s in load_sources():
+        col = s.get("collect") or {}; key = s["key"]; v = ver.get(key, {}); m = col.get("method")
+        node = {"key": key, "name": s["name"], "category": s["category"], "method": m,
+                "collectable": bool(col), "host_capture": bool(col.get("host_capture")),
+                "default_collect": bool(s.get("default_collect")), "uploadable": bool(s.get("build_input")),
+                "auto": bool(s.get("latest_check")), "current": v.get("current"), "latest": v.get("latest"),
+                "sha": v.get("staged_sig"), "checked_at": v.get("checked_at"), "children": []}
+        if m == "localdata_facility":
+            for it in _load_json(FACILITY_CATALOG, {}).get("items", []):
+                cv = ver.get(f"{key}:{it['key']}", {})
+                node["children"].append({"key": f"{key}:{it['key']}", "name": it["name"],
+                    "default_collect": bool(it.get("default")), "role": it.get("role"),
+                    "current": cv.get("current"), "latest": cv.get("latest"), "checked_at": cv.get("checked_at"), "sha": cv.get("staged_sig")})
+        elif m == "localdata_all":
+            for rg in _load_json(LOCALDATA_REGIONS, {}).get("regions", []):
+                cv = ver.get(f"{key}:{rg['orgCode']}", {})
+                node["children"].append({"key": f"{key}:{rg['orgCode']}", "name": rg["name"],
+                    "default_collect": True, "current": cv.get("current"), "latest": cv.get("latest"), "checked_at": cv.get("checked_at"), "sha": cv.get("staged_sig")})
+        out.append(node)
+    return out
+
+
+def _datago_search_filepk(keyword, want_prefix=None):
+    """data.go.kr fileData 검색 → publicDataPk. want_prefix 제목 접두 일치 우선, 없으면 첫 '행정안전부' 데이터셋."""
+    import unicodedata
+    kw = urllib.parse.quote(keyword)
+    url = f"https://www.data.go.kr/tcs/dss/selectDataSetList.do?dType=FILE&keyword={kw}&perPage=30&currentPage=1"
+    html = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                                  timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    html = unicodedata.normalize("NFC", html); first = None
+    for pk, inner in re.findall(r'<a href="/data/(\d+)/fileData\.do"[^>]*>(.*?)</a>', html, re.S):
+        t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", inner)).strip()
+        t = re.sub(r"^(CSV|XLS|XLSX|JSON|XML|HWP|PDF|ZIP|SHP)\s+", "", t)
+        if want_prefix and t.startswith(want_prefix):
+            return pk
+        if first is None and t.startswith("행정안전부"):
+            first = pk
+    return first
+
+
+def _datago_updt(pk):
+    """publicDataPk → 현행화 날짜(yyyy-mm-dd). dataNm 의 _YYYYMMDD 우선, 없으면 updtDt."""
+    if not pk:
+        return None
+    url = f"https://www.data.go.kr/tcs/dss/selectFileDataDownload.do?publicDataPk={pk}&fileDetailSn=1"
+    info = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+          timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")).get("dataSetFileDetailInfo", {})
+    m = re.search(r"(\d{4})(\d{2})(\d{2})$", (info.get("dataNm") or "").replace("_", ""))
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return (info.get("updtDt") or info.get("registDt") or "")[:10] or None
+
+
+def _collect_latest(item_key):
+    """항목별 최신일 — facility=data.go.kr 행정안전부_<시설명> 현행화일, localdata 지역=인허가 전국 대표(병원, ≈D-2)."""
+    skey, _, sub = item_key.partition(":")
+    if skey == "facility":
+        it = next((x for x in _load_json(FACILITY_CATALOG, {}).get("items", []) if x["key"] == sub), None)
+        return _datago_updt(_datago_search_filepk(f"행정안전부 {it['name']}")) if it else None
+    if skey == "localdata":
+        return _datago_updt(_datago_search_filepk("행정안전부_건강_병원", "행정안전부_건강_병원"))
+    return None
+
+
+def _item_dest(item_key):
+    """항목키 → staged 경로(개별 다운/업로드용). 상위=build_input.dest, 하위=staged/<군>/<sub>."""
+    skey, _, sub = item_key.partition(":")
+    src = next((s for s in load_sources() if s["key"] == skey), None)
+    if not src:
+        return None
+    if not sub:
+        bi = src.get("build_input"); return (BUILD_HOME / bi["dest"]) if bi else None
+    col = src.get("collect") or {}
+    if col.get("method") == "localdata_facility":
+        return BUILD_HOME / "staged/facility" / sub
+    if col.get("method") == "localdata_all":
+        return BUILD_HOME / "staged/localdata" / sub
+    return None
+
+
+def run_collect(selected):
+    """선택 항목 1건씩 순차 수집(차단 회피 간격). SHA 동일이면 staged 유지·재빌드 생략. SSE=kind 'collect'."""
+    with _COLLECT_LOCK:
+        ver = load_versions()
+        MGR.jobs["collect"] = {"status": "running", "progress": 0.0, "log": [], "st": {}}
+        MGR.publish({"kind": "collect", "status": "running", "progress": 0.0})
+        STORE_DIR.mkdir(parents=True, exist_ok=True)
+        tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
+        total = len(selected); done = 0; changed = []
+        for item_key in selected:
+            try:
+                src, urls, dest, mode = _collect_plan(item_key)
+                MGR._emit("collect", f"⇩ {item_key} 다운로드 ({len(urls)}파일)…")
+                shas = []
+                if mode == "file":
+                    destp = pathlib.Path(dest); destp.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = tmpdir / (item_key.replace(":", "_") + ".part")
+                    sz = _http_download(urls[0], tmp)
+                    sha, reused = store_put(tmp); shas.append(sha)
+                    if not reused or not destp.exists():
+                        shutil.copy2(store_path(sha), destp)
+                    MGR._emit("collect", f"  {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ' → 배치'}")
+                else:
+                    allreused = True
+                    for i, u in enumerate(urls):
+                        tmp = tmpdir / (item_key.replace(":", "_") + f"_{i}.part")
+                        sz = _http_download(u, tmp)
+                        sha, reused = store_put(tmp); shas.append(sha); allreused = allreused and reused
+                        MGR._emit("collect", f"  파일{i+1}/{len(urls)} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
+                    if (not allreused) or (not _nonempty_dir(pathlib.Path(dest))):
+                        shutil.rmtree(dest, ignore_errors=True)
+                        for sha in shas:
+                            _extract_into(store_path(sha), dest)
+                cur_sha = ",".join(shas); prev = ver.get(item_key, {}).get("staged_sig")
+                rec = ver.setdefault(item_key, {})
+                rec["staged_sig"] = cur_sha; rec["current"] = time.strftime("%Y-%m-%d")
+                rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+                save_versions({item_key: rec})
+                changed.append(item_key) if cur_sha != prev else None
+                MGR._emit("collect", f"  {'✓ 갱신' if cur_sha != prev else '= 변경 없음'}: {item_key}")
+            except Exception as e:
+                MGR._emit("collect", f"  ✗ {item_key}: {str(e)[:140]}")
+            done += 1
+            MGR.jobs["collect"]["progress"] = done / max(total, 1)
+            MGR.publish({"kind": "collect", "status": "running", "progress": done / max(total, 1)})
+            time.sleep(6)   # 차단 회피 간격
+        if 'osm' in changed:   # OSM 변경 시 변환(planetiler→korea.mbtiles, osm.sqlite, 동) 자동 enqueue
+            bt = (next((s for s in load_sources() if s['key'] == 'osm'), {}).get('collect') or {}).get('build_targets') or []
+            if bt:
+                MGR._emit("collect", f"  ▶ OSM 변환 빌드 enqueue: {', '.join(bt)}")
+                MGR.enqueue(bt)
+        MGR.jobs["collect"]["status"] = "done"
+        MGR._emit("collect", f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
+        MGR.publish({"kind": "collect", "status": "done", "progress": 1.0})
+        return changed
+
+
+# ── 빌드 프로필(매니페스트) — 빌드에 쓴 파일집합(SHA) 스냅샷 저장·불러오기 ─────────
+MANIFESTS_DIR = BUILD_HOME / "manifests"
+
+
+def list_manifests():
+    out = []
+    if MANIFESTS_DIR.is_dir():
+        for p in sorted(MANIFESTS_DIR.glob("*.json"), reverse=True):
+            try:
+                m = json.loads(p.read_text(encoding="utf-8"))
+                bdir = MANIFESTS_DIR / m["id"]
+                m["has_bundle"] = (bdir / "cuvia-map-bundle.tgz").is_file()
+                out.append(m)
+            except Exception:
+                pass
+    return out
+
+
+def _working_snapshot():
+    """현재 sources_state(staged_sig=sha, current, file)에서 수집/업로드된 항목 스냅샷."""
+    snap = {}
+    for key, rec in load_versions().items():
+        if rec.get("staged_sig") or rec.get("current"):
+            snap[key] = {"sha": rec.get("staged_sig"), "current": rec.get("current"), "file": rec.get("file")}
+    return snap
+
+
+def save_manifest(name=None, with_bundle=False):
+    MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+    mid = time.strftime("%Y%m%d-%H%M%S"); base = mid; i = 1
+    while (MANIFESTS_DIR / f"{mid}.json").exists():   # 같은 초 저장 충돌 방지
+        mid = f"{base}-{i}"; i += 1
+    man = {"id": mid, "name": name or f"빌드 {time.strftime('%Y-%m-%d %H:%M')}",
+           "created": time.strftime("%Y-%m-%d %H:%M"), "sources": _working_snapshot(),
+           "targets": list(getattr(MGR, "last_targets", []) or [])}
+    try:
+        man["git"] = (subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                      capture_output=True, text=True, timeout=10).stdout.strip() or None)
+    except Exception:
+        man["git"] = None
+    bundle = DIST / "cuvia-map-bundle.tgz"; images = DIST / "images.tar"
+    if with_bundle and bundle.is_file():   # 이름붙은 프로필마다 출력 번들 보관
+        bdir = MANIFESTS_DIR / mid; bdir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bundle, bdir / "cuvia-map-bundle.tgz")
+        if images.is_file(): shutil.copy2(images, bdir / "images.tar")
+        man["bundle_bytes"] = (bdir / "cuvia-map-bundle.tgz").stat().st_size
+    (MANIFESTS_DIR / f"{mid}.json").write_text(json.dumps(man, ensure_ascii=False), encoding="utf-8")
+    return man
+
+
+def load_manifest(mid):
+    """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로."""
+    p = MANIFESTS_DIR / f"{mid}.json"
+    if not p.is_file():
+        raise RuntimeError("프로필 없음")
+    man = json.loads(p.read_text(encoding="utf-8")); ver = load_versions(); restored = 0
+    for key, info in (man.get("sources") or {}).items():
+        sha = info.get("sha"); dest = _item_dest(key)
+        if sha and dest:
+            if dest.suffix:   # 파일형(osm .pbf)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                sp = store_path(sha.split(",")[0])
+                if sp.exists(): shutil.copy2(sp, dest)
+            else:
+                shutil.rmtree(dest, ignore_errors=True)
+                for s in sha.split(","):
+                    sp = store_path(s)
+                    if sp.exists(): _extract_into(sp, dest)
+            restored += 1
+        rec = ver.setdefault(key, {}); rec["staged_sig"] = sha
+        rec["current"] = info.get("current"); rec["file"] = info.get("file")
+        save_versions({key: rec})
+    return {"id": mid, "name": man.get("name"), "restored": restored}
+
+
+def rename_manifest(mid, name):
+    p = MANIFESTS_DIR / f"{mid}.json"
+    if not p.is_file():
+        raise RuntimeError("프로필 없음")
+    man = json.loads(p.read_text(encoding="utf-8")); man["name"] = name
+    p.write_text(json.dumps(man, ensure_ascii=False), encoding="utf-8"); return man
+
+
+def _referenced_shas():
+    """남은 매니페스트 + 현재 working set 이 참조하는 모든 SHA(콤마결합 분해)."""
+    refs = set()
+    for m in list_manifests():
+        for info in (m.get("sources") or {}).values():
+            refs.update(s for s in str(info.get("sha") or "").split(",") if s)
+    for rec in load_versions().values():
+        refs.update(s for s in str(rec.get("staged_sig") or "").split(",") if s)
+    return refs
+
+
+def gc_store():
+    """어떤 매니페스트/working set 도 참조 않는 store SHA 파일 정리. (지운 개수, 회수 bytes)."""
+    if not STORE_DIR.is_dir():
+        return 0, 0
+    refs = _referenced_shas(); n = 0; freed = 0
+    for sub in STORE_DIR.iterdir():
+        if not sub.is_dir():
+            continue
+        for f in sub.iterdir():
+            if f.is_file() and f.name not in refs:
+                try:
+                    freed += f.stat().st_size; f.unlink(); n += 1
+                except OSError:
+                    pass
+    return n, freed
+
+
+def delete_manifest(mid):
+    (MANIFESTS_DIR / f"{mid}.json").unlink(missing_ok=True)
+    shutil.rmtree(MANIFESTS_DIR / mid, ignore_errors=True)
+    return gc_store()   # 삭제 후 미참조 SHA 파일 정리
 
 
 # ── HTTP 핸들러 ────────────────────────────────────────────────────
@@ -240,47 +937,94 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/?"):
             return self._send(PAGE, "text/html; charset=utf-8")
-        if self.path == "/style":
-            return self._send(STYLE_PAGE, "text/html; charset=utf-8")
+        if self.path == "/style":   # 스타일 편집기는 style-studio 로 일원화 → 리다이렉트
+            host = (self.headers.get("Host") or "localhost").split(":")[0]
+            self.send_response(302)
+            self.send_header("Location", f"http://{host}:{STYLE_STUDIO_PORT}/")
+            self.send_header("Content-Length", "0"); self.end_headers()
+            return
         if self.path.startswith("/vendor/"):
             return self._static(self.path.lstrip("/").split("?")[0])
-        if self.path == "/api/style/objects":
-            try:
-                style = json.loads((ROOT / "style/style.json").read_text(encoding="utf-8"))
-                cur = style_objects.current_colors(style); poi = style_objects.current_poi_colors(style)
-                fonts_cur = style_objects.current_fonts(style)
-            except Exception:
-                cur = {}; poi = {}; fonts_cur = {}
-            objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
-                     "color": cur.get(o["key"]) or "#888888"} for o in style_objects.OBJECTS]
-            groups = [{"key": g["key"], "label": g["label"], "cats": g["cats"],
-                       "color": poi.get(g["key"]) or g["default"]} for g in style_objects.POI_GROUPS]
-            labels = {o["key"]: o["label"] for o in style_objects.OBJECTS}
-            fonts = {"available": style_objects.available_fonts(str(ROOT / "style/glyphs")),
-                     "current": fonts_cur,
-                     "labels": [{"key": k, "label": labels.get(k, k)} for k in style_objects.FONT_LABELS]}
-            return self._json({"objects": objs, "poi_groups": groups, "fonts": fonts,
-                               "presets": style_objects.PRESETS, "poi_layer": style_objects.POI_LAYER,
-                               "tile_port": TILE_PORT})
-        if self.path == "/api/style/export":
-            p = ROOT / "style/style.json"
-            if not p.is_file():
-                return self.send_error(404)
-            b = p.read_bytes()
-            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="style.json"')
-            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
-            return
         if self.path == "/api/targets":
             return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"]}
                                             for k, v in TARGETS().items()]})
-        if self.path == "/api/datasets":
-            ds = []
-            for f in sorted(UPLOADS.glob("*")):
-                ds.append({"name": f.name, "size": f.stat().st_size})
-            return self._json({"datasets": ds, "build_home": str(BUILD_HOME)})
+        if self.path == "/api/builds":
+            p = DIST / "cuvia-map-bundle.tgz"
+            cur = {"exists": p.is_file(), "size": (p.stat().st_size if p.is_file() else 0)}
+            return self._json({"builds": load_builds(), "current_bundle": cur, "dist": str(DIST)})
+        if self.path == "/api/profiles":
+            return self._json({"profiles": list_manifests()})
+        if self.path.startswith("/api/profiles/bundle"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            bp = MANIFESTS_DIR / (q.get("id") or [""])[0] / "cuvia-map-bundle.tgz"
+            if not bp.is_file():
+                return self.send_error(404)
+            self.send_response(200); self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition", f'attachment; filename="{(q.get("id") or ["p"])[0]}-bundle.tgz"')
+            self.send_header("Content-Length", str(bp.stat().st_size)); self.end_headers()
+            with open(bp, "rb") as f:
+                while True:
+                    ch = f.read(1 << 20)
+                    if not ch: break
+                    try: self.wfile.write(ch)
+                    except (BrokenPipeError, ConnectionResetError): break
+            return
+        if self.path == "/api/sources":
+            ver = load_versions()
+            out = []
+            for s in load_sources():
+                v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
+                status = "unknown"
+                if cur and lat:   # 공통 정밀도로 비교(YYYYMM vs YYYYMMDD 동월 오판 방지)
+                    a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
+                    status = ("update" if b[:k] > a[:k] else "current") if k else "unknown"
+                out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
+                            "uploadable": bool(s.get("build_input")),
+                            "checked_at": v.get("checked_at"), "status": status,
+                            "file": v.get("file"), "history": v.get("history", []),
+                            "validation": v.get("validation_status"), "validation_msg": v.get("validation_msg"),
+                            "validated_at": v.get("validated_at")})
+            return self._json({"sources": out, "build_home": str(BUILD_HOME)})
+        if self.path == "/api/download/bundle":
+            p = DIST / "cuvia-map-bundle.tgz"
+            if not p.is_file():
+                return self.send_error(404)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition", 'attachment; filename="cuvia-map-bundle.tgz"')
+            self.send_header("Content-Length", str(p.stat().st_size)); self.end_headers()
+            with open(p, "rb") as f:                       # 청크 스트리밍(3GB도 메모리 적재 X)
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk: break
+                    try: self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError): break
+            return
         if self.path == "/api/events":
             return self._sse()
+        if self.path == "/api/collect/catalog":
+            return self._json({"items": collect_catalog(), "build_home": str(BUILD_HOME)})
+        if self.path.startswith("/api/collect/download"):   # 항목별 staged 를 zip 스트리밍(내 PC로)
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            key = (q.get("key") or [""])[0]; dest = _item_dest(key)
+            if not dest or not dest.exists():
+                return self.send_error(404)
+            import zipfile as _zf
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{key.replace(":", "_") or "item"}.zip"')
+            self.send_header("Connection", "close"); self.end_headers(); self.close_connection = True
+            try:
+                z = _zf.ZipFile(self.wfile, "w", _zf.ZIP_STORED, allowZip64=True)
+                if dest.is_dir():
+                    for f in sorted(dest.rglob("*")):
+                        if f.is_file(): z.write(f, str(f.relative_to(dest)))
+                else:
+                    z.write(dest, dest.name)
+                z.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         self.send_error(404)
 
     def do_POST(self):
@@ -288,58 +1032,141 @@ class H(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
-            ordered = MGR.enqueue(body.get("targets", []))
-            return self._json({"queued": ordered})
-        if self.path == "/api/upload":
-            return self._upload()
-        if self.path == "/api/style":
+            targets = body.get("targets", [])
+            MGR.last_targets = list(body.get("targets", []))   # 정제 체크 기록(매니페스트)
+            prep = prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
+            ordered = MGR.enqueue(targets)
+            return self._json({"queued": ordered, "prepared": prep})
+        if self.path == "/api/sources/version":   # 출처 기준일 수동 등록/갱신(현재/최신)
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
-            body = json.loads(self.rfile.read(n) or "{}")
-            return self._json(apply_style_theme(body.get("theme", {})))
-        if self.path == "/api/style/import":
+            b = json.loads(self.rfile.read(n) or "{}")
+            key = b.get("key"); field = b.get("field"); val = (b.get("value") or "").strip()
+            valid = {s["key"] for s in load_sources()}
+            if key not in valid or field not in ("current", "latest"):
+                return self._json({"error": "잘못된 key/field"}, 400)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            rec[field] = val
+            if field == "latest":
+                rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+            save_versions(ver)
+            return self._json({"ok": True, key: rec})
+        if self.path == "/api/sources/check":   # 외부 출처에서 최신 기준일 자동조회(latest_check 설정 시)
             n = int(self.headers.get("Content-Length", "0"))
-            if n > 4 * 1024 * 1024: return self._json({"error": "style.json 과대(4MB 초과)"}, 413)
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            key = (json.loads(self.rfile.read(n) or "{}")).get("key")
+            src = next((s for s in load_sources() if s["key"] == key), None)
+            if not src: return self._json({"error": "알 수 없는 key"}, 400)
+            if not src.get("latest_check"): return self._json({"error": "자동조회 미지원 출처(수동 입력)"}, 400)
             try:
-                imported = json.loads(self.rfile.read(n) or "{}")
-                if not isinstance(imported.get("layers"), list):
-                    return self._json({"error": "style.json 형식 아님(layers 배열 없음)"}, 400)
-                colors = {**style_objects.current_colors(imported), **style_objects.current_poi_colors(imported)}
+                latest = fetch_latest(src)
             except Exception as e:
-                return self._json({"error": f"style.json 파싱 실패: {e}"}, 400)
-            res = apply_style_theme({k: v for k, v in colors.items() if v})
-            res["colors"] = colors
-            return self._json(res)
+                return self._json({"error": f"조회 실패: {e}"}, 502)
+            if not latest:
+                return self._json({"error": "최신 기준일을 찾지 못함(패턴 불일치/사이트 변경)"}, 404)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            rec["latest"] = latest; rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+            save_versions(ver)
+            return self._json({"ok": True, "key": key, "latest": latest})
+        if self.path.startswith("/api/sources/upload"):
+            return self._upload_stream()
+        if self.path == "/api/sources/validate":   # 업로드 데이터 경량 검증(구조·핵심 컬럼)
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            key = (json.loads(self.rfile.read(n) or "{}")).get("key")
+            if key not in {s["key"] for s in load_sources()}:
+                return self._json({"error": "알 수 없는 key"}, 400)
+            status, msg = _validate_source(key)
+            _set_validation(key, status, msg)
+            return self._json({"ok": True, "key": key, "status": status, "msg": msg})
+        if self.path == "/api/collect/start":
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            sel = (json.loads(self.rfile.read(n) or "{}")).get("selected", [])
+            if not sel: return self._json({"error": "수집할 항목을 선택하세요"}, 400)
+            if _COLLECT_LOCK.locked(): return self._json({"error": "이미 수집 진행 중"}, 409)
+            threading.Thread(target=run_collect, args=(sel,), daemon=True).start()
+            return self._json({"ok": True, "started": sel})
+        if self.path.startswith("/api/collect/upload"):   # 항목별 사용자 정의 파일 업로드 → staged 직접 적재
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            key = (q.get("key") or [""])[0]; name = _safe_relpath((q.get("name") or [""])[0])
+            dest = _item_dest(key)
+            if not dest: return self._json({"error": "알 수 없는 항목"}, 400)
+            if not name: return self._json({"error": "파일명 누락"}, 400)
+            tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
+            tmp = tmpdir / ("up_" + key.replace(":", "_") + "_" + name.replace("/", "_"))
+            nbytes = int(self.headers.get("Content-Length", "0")); written = 0
+            try:
+                with open(tmp, "wb") as o:
+                    rem = nbytes
+                    while rem > 0:
+                        ch = self.rfile.read(min(1 << 20, rem))
+                        if not ch: break
+                        o.write(ch); rem -= len(ch); written += len(ch)
+                STORE_DIR.mkdir(parents=True, exist_ok=True)
+                sha, _ = store_put(tmp)
+                shutil.rmtree(dest, ignore_errors=True); _extract_into(store_path(sha), dest)
+                ver = load_versions(); rec = ver.setdefault(key, {})
+                rec["staged_sig"] = sha; rec["current"] = time.strftime("%Y-%m-%d"); rec["file"] = name
+                save_versions({key: rec})
+            except Exception as e:
+                return self._json({"error": f"적재 실패: {str(e)[:120]}"}, 500)
+            return self._json({"ok": True, "key": key, "size": written, "sha": sha[:8]})
+        if self.path == "/api/collect/check":   # 항목별(하위 포함) 최신일 조회
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            key = (json.loads(self.rfile.read(n) or "{}")).get("key")
+            if not key: return self._json({"error": "key 필요"}, 400)
+            try:
+                latest = _collect_latest(key)
+            except Exception as e:
+                return self._json({"error": f"조회 실패: {str(e)[:100]}"}, 502)
+            if not latest: return self._json({"error": "최신일 못 찾음(패턴/차단)"}, 404)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            rec["latest"] = latest; rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+            save_versions({key: rec})
+            return self._json({"ok": True, "key": key, "latest": latest})
+        if self.path in ("/api/profiles/save", "/api/profiles/load", "/api/profiles/rename", "/api/profiles/delete"):
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or "{}")
+            try:
+                if self.path.endswith("/save"): return self._json({"ok": True, "manifest": save_manifest((b.get("name") or "").strip() or None)})
+                if self.path.endswith("/load"): return self._json({"ok": True, **load_manifest(b.get("id"))})
+                if self.path.endswith("/rename"): return self._json({"ok": True, "manifest": rename_manifest(b.get("id"), (b.get("name") or "").strip())})
+                if self.path.endswith("/delete"): gc = delete_manifest(b.get("id")); return self._json({"ok": True, "gc_removed": gc[0], "gc_freed": gc[1]})
+            except Exception as e:
+                return self._json({"error": str(e)[:140]}, 400)
         self.send_error(404)
 
-    def _upload(self):
-        # cgi 모듈이 3.13에서 제거되어 무의존 multipart/form-data 파서를 직접 구현.
-        ctype = self.headers.get("Content-Type", "")
-        m = re.search(r"boundary=([^;]+)", ctype)
-        if "multipart/form-data" not in ctype or not m:
-            return self._json({"error": "multipart 필요"}, 400)
-        boundary = b"--" + m.group(1).strip().strip('"').encode()
+    def _upload_stream(self):
+        # 출처별 raw 바디 스트리밍 업로드 — ?key=<출처>&name=<상대경로>. 청크→디스크(용량 상한 없음, 폴더는 파일당 1요청).
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        key = (q.get("key") or [""])[0]
+        rel = _safe_relpath((q.get("name") or [""])[0])
+        srcmap = {s["key"]: s for s in load_sources()}
+        if key not in srcmap:
+            return self._json({"error": "알 수 없는 key"}, 400)
+        if not srcmap[key].get("build_input"):
+            return self._json({"error": "이 출처는 업로드 미지원"}, 400)
+        if not rel:
+            return self._json({"error": "파일명(name) 누락"}, 400)
+        dest = SOURCES_DIR / key / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
         n = int(self.headers.get("Content-Length", "0"))
-        if n > MAX_UPLOAD:   # 메모리 고갈 방지 — 대용량 원천(내비DB/SHP, 수 GB)은 BUILD_HOME 경로 지정 권장
-            return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과 — 대용량은 BUILD_HOME에 직접 배치"}, 413)
-        body = self.rfile.read(n)
-        saved = []                              # 한 요청에 여러 파일 파트(name="file")를 모두 저장
-        for part in body.split(boundary):
-            if b'name="file"' not in part: continue
-            idx = part.find(b"\r\n\r\n")
-            if idx < 0: continue
-            head = part[:idx].decode("utf-8", "replace")
-            data = part[idx+4:]
-            if data.endswith(b"\r\n"): data = data[:-2]
-            fm = re.search(r'filename="([^"]*)"', head)
-            if not fm or not fm.group(1): continue
-            name = os.path.basename(fm.group(1))   # 경로조작 차단
-            if not name: continue
-            dest = UPLOADS / name
-            with open(dest, "wb") as o: o.write(data)
-            saved.append({"saved": name, "size": dest.stat().st_size, "detected": detect(name)})
-        if not saved: return self._json({"error": "파일 파트 없음"}, 400)
-        return self._json({"files": saved})
+        written = 0
+        try:
+            with open(dest, "wb") as o:
+                remaining = n
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    o.write(chunk); remaining -= len(chunk); written += len(chunk)
+        except Exception as e:
+            return self._json({"error": f"저장 실패: {str(e)[:120]}"}, 500)
+        period = _record_upload(key, rel, written)
+        return self._json({"ok": True, "key": key, "file": rel, "size": written, "period": period})
 
     def _sse(self):
         self.send_response(200)
@@ -365,15 +1192,6 @@ class H(BaseHTTPRequestHandler):
             MGR.unsubscribe(q)
 
 
-def detect(name):
-    n = name.lower()
-    if n.endswith(".7z") or "내비" in name or "navi" in n: return "도로명주소 내비DB"
-    if n.endswith(".zip") or n.endswith(".shp"): return "SHP (GIS건물/전자지도) — EPSG 확인필요"
-    if "상가" in name: return "소상공인 상가정보 CSV"
-    if "인허가" in name or "localdata" in n: return "LOCALDATA 인허가 CSV (EPSG:5174)"
-    if n.endswith(".csv"): return "CSV"
-    if n.endswith(".pbf") or n.endswith(".osm"): return "OSM"
-    return "미상"
 
 
 PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
@@ -382,10 +1200,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <style>
  :root{--bg:#0f1420;--card:#161d2c;--bd:#26304a;--mut:#8d9bb5;--tx:#e8edf5;--ac:#5b9bd5}
  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);
-   font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif}
+   font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif;word-break:keep-all}
  header{padding:16px 22px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
  h1{font-size:17px;margin:0;font-weight:600} .sub{color:var(--mut);font-size:12px}
- .wrap{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:18px;max-width:1100px}
+ .wrap{display:grid;grid-template-columns:480px 1fr;gap:16px;padding:18px;max-width:1560px;margin:0 auto}
+ @media(max-width:1100px){.wrap{grid-template-columns:1fr}}
  .panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
  .panel h2{font-size:13px;margin:0 0 10px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
  label.row{display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer}
@@ -404,37 +1223,63 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .up:hover{border-color:var(--mut)}
  .up.drag{border-color:var(--ac);background:#0c1a2c;color:var(--tx)}
  .up a{color:var(--ac);text-decoration:underline;cursor:pointer}
- .ds{font-size:12px;color:var(--mut)} .ds b{color:var(--tx);font-weight:500}
- .chip{display:inline-block;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
+ .ds{font-size:12px;color:var(--mut);overflow-wrap:anywhere} .ds b{color:var(--tx);font-weight:500} .ds a{white-space:nowrap}
+ .chip{display:inline-block;white-space:nowrap;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
+ .src{background:#10192b;border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-bottom:9px}
+ .src a{color:var(--ac);cursor:pointer;white-space:nowrap}
+ .src-h{font-size:13px;line-height:1.45}
+ .src-act{margin-top:5px;font-size:12px}
+ .src-ver{margin-top:7px;padding-top:7px;border-top:1px solid #1c2438;font-size:11px;line-height:1.7}
+ .src-meta{margin-top:6px;font-size:11px}
+ .mut{color:var(--mut)}
+ .node{padding:9px 2px;border-bottom:1px solid var(--bd)}
+ .nrow{display:flex;align-items:center;gap:7px}
+ .nl{display:flex;align-items:center;gap:6px;flex:1;min-width:0} .nl b{font-weight:500}
+ .nr{display:flex;align-items:center;gap:8px;flex-shrink:0}
+ .nver{font-size:11px;color:var(--mut);margin:3px 0 0 42px} .nver b{color:var(--tx);font-weight:500} .nver a{color:var(--ac);cursor:pointer}
+ .kids{margin:5px 0 0 24px;border-left:1px solid #1c2438}
+ .krow{display:flex;align-items:center;justify-content:space-between;padding:4px 0 4px 12px;font-size:12px}
+ .krow label{display:flex;align-items:center;gap:6px;cursor:pointer;min-width:0}
+ .kr{display:flex;align-items:center;gap:8px} .kr .mut{font-size:10px}
+ .pdetail{margin:6px 2px 2px 18px;padding:9px 11px;background:#0c1018;border:1px solid var(--bd);border-radius:7px;font-size:11px;line-height:1.6}
+ .pdetail a{color:var(--ac)} .pdsec{margin-bottom:7px}
+ .pdh{color:var(--mut);font-size:10px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
+ .pdrow{display:flex;justify-content:space-between;gap:12px;padding:1px 0} .pdrow>span:first-child{color:var(--tx)}
+ .acts{display:flex;gap:8px} .ic{color:var(--mut);cursor:pointer;text-decoration:none;font-size:13px} .ic:hover{color:var(--ac)}
+ .caret{display:inline-block;width:12px;color:var(--mut);cursor:pointer;font-size:13px;text-align:center}
+ .mbadge{font-size:10px;padding:1px 7px;border-radius:6px;background:#0c1018;color:var(--mut)}
+ .mbadge[data-m="자동"]{color:#7fd1ff} .mbadge[data-m="선택"]{color:#7ee0a0}
+ .info{font-size:10px} .dash{color:var(--bd);width:13px;display:inline-block;text-align:center}
 </style>
 <header><div style="width:9px;height:9px;border-radius:99px;background:var(--ac)"></div>
  <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
- <a href="/style" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 스타일 디자인 →</a></header>
+ <a href="/style" target="_blank" rel="noopener" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 스타일 디자인 →</a></header>
 <div class=wrap>
  <div>
-  <div class=panel><h2>데이터 업로드</h2>
-   <div class=up id=dz>
-    <input type=file id=fin multiple style="display:none">
-    <div style="font-size:13px"><b>드래그&드롭</b> 또는 <a id=browse>파일 선택</a></div>
-    <div style="margin-top:5px">여러 개 동시 · 붙여넣기(⌘V) 가능 · SHP·CSV·PBF 자동감지</div></div>
-   <div id=dslist class=ds style="margin-top:10px"></div></div>
-  <div class=panel style="margin-top:14px"><h2>빌드 대상 (정제 체크)</h2>
+  <div class=panel><h2>자동 수집 목록</h2>
+   <div class=sub style="font-size:12px;color:var(--mut);margin-bottom:10px;line-height:1.6">✔ 체크 = 다음 수집 대상 · ☐ 미체크 = 직전 수집분 재사용. 자동(다운로드)·선택(생활편의)·수동(업로드) 혼합. 항목별 업로드·드롭도 가능.</div>
+   <div id=collect class=ds></div>
+   <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+     <button id=collectBtn>⬇ 자동수집 시작 (순차)</button>
+     <button class=ghost id=dlSelBtn>⬇ 다운로드(내 PC로)</button></div></div>
+  <div class=panel style="margin-top:14px"><h2>빌드 프로필 · 이력</h2>
+   <div id=builds class=ds></div></div>
+ </div>
+ <div>
+  <div class=panel><h2>빌드 대상 (정제 체크)</h2>
    <div id=checks></div>
    <div style="display:flex;gap:8px;margin-top:12px">
-     <button id=run>빌드 시작</button>
-     <button class=ghost id=selftest>셀프테스트</button></div></div>
- </div>
- <div class=panel><h2>빌드 진행률</h2><div id=cards></div>
+     <button id=run>빌드 시작</button></div></div>
+  <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
+ </div>
 </div>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
-fetch('/api/datasets').then(r=>r.json()).then(d=>{$('#bh').textContent='BUILD_HOME: '+d.build_home;render(d.datasets)});
-function render(ds){$('#dslist').innerHTML=ds.length?ds.map(x=>`<div>· <b>${x.name}</b> (${(x.size/1048576).toFixed(1)}MB)</div>`).join(''):'<i>업로드된 파일 없음</i>'}
 fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
-  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${['geocode','poi','qc'].includes(t.kind)?'checked':''}> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
+  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" checked> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
 });
 function card(kind,label){if(cards[kind])return;const el=document.createElement('div');el.className='tcard';
  el.innerHTML=`<div class=h><span>${label||kind}</span><span class=st id=st_${kind}>대기</span></div><div class=bar><i id=bar_${kind}></i></div>`;
@@ -447,129 +1292,178 @@ function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHe
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);return}
- setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);};
+ setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
+ if(d.status==='done'){loadBuilds();if(d.kind==='collect')loadCollect();}};
+function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
+function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
+function vbadge(s){if(!s.uploadable)return '';
+  const m={ok:'🟢 검증 OK',warn:'🟡 검증 경고',fail:'🔴 검증 실패',pending:'⏳ 검증 대기'},v=s.validation;
+  const lab=v?(m[v]||v):(s.file?'⏳ 검증 대기':'<span class=mut>미업로드</span>');
+  const btn=s.file?` <a onclick="validateSource('${s.key}')">[${v&&v!=='pending'?'재검증':'검증'}]</a>`:'';
+  return `<div class=src-meta>${lab}${s.validation_msg?` · <span class=mut>${s.validation_msg}</span>`:''}${btn}</div>`;}
+let SRC=[], COL=[];
+function modeChip(it){const m=it.collectable?(it.method==='localdata_facility'?'선택':'자동'):'수동';return `<span class=mbadge data-m="${m}">${m}</span>`;}
+function acts(it){let h='';
+  if(it.url)h+=`<a href="${it.url}" target=_blank rel=noopener title=출처 class=ic>↗</a>`;
+  if(it.collectable||it.current||it.key.includes(':'))h+=`<a onclick="dlItem('${it.key}')" title="개별 다운로드(내 PC)" class=ic>⬇</a>`;
+  if(it.uploadable||it.key.includes(':'))h+=`<a onclick="upItem('${it.key}')" title="개별 업로드" class=ic>⬆</a>`;
+  return `<span class=acts>${h}</span>`;}
+function kidRow(c,pk){return `<div class=krow><label><input type=checkbox class=ck value="${c.key}" onchange="onKid('${pk}')" ${c.default_collect?'checked':''}> ${c.name}</label><span class=kr><span class=mut>수집 ${c.current?fmt(c.current):'—'} · 최신 ${fmt(c.latest)} <a onclick="checkItem('${c.key}',this)">조회</a></span>${acts(c)}</span></div>`;}
+function renderNode(it){const kids=it.children||[],hasKids=kids.length>0;
+  let cb;
+  if(it.method==='localdata_facility')cb=`<input type=checkbox class=pk id=pk_${it.key} onchange="toggleAll('${it.key}',this.checked)">`;
+  else if(it.collectable)cb=`<input type=checkbox class="ck${hasKids?' pk':''}" id=pk_${it.key} value="${it.key}" ${hasKids?`onchange="toggleAll('${it.key}',this.checked)"`:''} ${it.default_collect?'checked':''}>`;
+  else cb='<span class=dash>—</span>';
+  const car=hasKids?`<a onclick="toggleKids('${it.key}')" class=caret id=cr_${it.key}>›</a>`:'<span class=caret></span>';
+  const info=hasKids?(it.method==='localdata_facility'?`${kids.filter(k=>k.default_collect).length}/${kids.length} · facility`:`${kids.length} 시·도`):'';
+  return `<div class=node ${it.uploadable?`data-key="${it.key}"`:''}>
+   <div class=nrow><span class=nl>${cb}${car}<b>${it.name}</b></span><span class=nr>${modeChip(it)}${info?`<span class="mut info">${info}</span>`:''}${acts(it)}</span></div>
+   <div class=nver>현재 <b>${fmt(it.current)}</b> <a onclick="setVer('${it.key}','current')">✎</a> · 최신 <b>${fmt(it.latest)}</b> ${it.auto?`<a onclick="checkLatest('${it.key}',this)">조회</a>`:''} · ${srcStatus(it)}${it.file?` · <span class=mut>📄${it.file}</span>`:''}</div>
+   ${it.uploadable?`<div class=bar id=ub_${it.key} style="display:none"><i id=ubi_${it.key}></i></div>`:''}
+   ${hasKids?`<div id=kids_${it.key} class=kids style="display:none">${kids.map(k=>kidRow(k,it.key)).join('')}</div>`:''}</div>`;}
+function toggleKids(key){const e=document.getElementById('kids_'+key),c=document.getElementById('cr_'+key);if(e){const o=e.style.display==='none';e.style.display=o?'':'none';if(c)c.textContent=o?'⌄':'›';}}
+function toggleAll(key,on){document.querySelectorAll('#kids_'+key+' input.ck').forEach(c=>c.checked=on);syncParent(key);}
+function onKid(key){syncParent(key);}
+function syncParent(key){const p=document.getElementById('pk_'+key);if(!p)return;const ks=[...document.querySelectorAll('#kids_'+key+' input.ck')];if(!ks.length)return;const on=ks.filter(c=>c.checked).length;p.checked=on===ks.length;p.indeterminate=on>0&&on<ks.length;}
+function checkItem(key,a){if(a)a.textContent='…';fetch('/api/collect/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{if(d.error)alert('최신 조회 실패: '+d.error);loadCollect();}).catch(e=>{alert('실패: '+e);loadCollect();});}
+function dlItem(key){window.open('/api/collect/download?key='+encodeURIComponent(key),'_blank');}
+function upItem(key){const inp=document.createElement('input');inp.type='file';inp.multiple=true;inp.onchange=()=>{const fs=[...inp.files];if(!fs.length)return;key.includes(':')?upSub(key,fs):uploadAll(key,fs);};inp.click();}
+async function upSub(key,files){logln('⇧ '+key+' 업로드 '+files.length+'개…');
+  for(const f of files){await new Promise(res=>{const x=new XMLHttpRequest();
+    x.open('POST','/api/collect/upload?key='+encodeURIComponent(key)+'&name='+encodeURIComponent(f.name));
+    x.onload=()=>{try{const d=JSON.parse(x.responseText);logln(d.error?'  ✗ '+d.error:'  ✓ '+f.name+' (sha '+d.sha+')');}catch(_){logln('  ✗ 응답오류 '+x.status);}res();};
+    x.onerror=()=>{logln('  ✗ 네트워크');res();};x.send(f);});}
+  loadCollect();}
+function loadCollect(){Promise.all([fetch('/api/collect/catalog').then(r=>r.json()),fetch('/api/sources').then(r=>r.json())]).then(([cd,sd])=>{
+  if(cd.build_home)$('#bh').textContent='BUILD_HOME: '+cd.build_home;
+  const sv=Object.fromEntries((sd.sources||[]).map(s=>[s.key,s]));
+  COL=(cd.items||[]).map(it=>{const s=sv[it.key]||{};return Object.assign({},it,{url:s.url,status:s.status,latest:s.latest||it.latest,current:s.current||it.current,validation:s.validation,validation_msg:s.validation_msg,file:s.file,auto:s.auto||it.auto});});
+  SRC=COL;
+  $('#collect').innerHTML=COL.map(renderNode).join('');
+  bindDrops();});}
+function startCollect(){let sel=[...document.querySelectorAll('#collect input.ck:checked')].map(x=>x.value).filter(Boolean);
+  if(sel.includes('localdata'))sel=sel.filter(k=>!k.startsWith('localdata:'));
+  if(!sel.length)return alert('수집할 항목을 체크하세요');
+  logln('▶ 자동수집 '+sel.length+'건 순차 시작…');
+  fetch('/api/collect/start',{method:'POST',body:JSON.stringify({selected:sel})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('  큐: '+(d.started||[]).join(', '));});}
+function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
+  if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
+   .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadCollect();});}
+function checkLatest(key,a){if(a)a.textContent='조회중…';
+  fetch('/api/sources/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{
+   if(d.error)alert('최신 조회 실패: '+d.error); loadCollect();}).catch(e=>{alert('실패: '+e);loadCollect();});}
+function pickFiles(key,dir){const inp=document.createElement('input');inp.type='file';inp.multiple=true;
+  if(dir)inp.webkitdirectory=true;
+  inp.onchange=()=>{const fs=[...inp.files];if(fs.length)uploadAll(key,fs);};inp.click();}
+function relName(f){const r=f._rel||f.webkitRelativePath||'';const p=r.split('/').filter(Boolean);
+  return p.length>1?p.slice(1).join('/'):f.name;}   // 폴더 업로드 시 선택폴더명(첫 세그먼트) 제거 → 내부구조 보존
+function setUbar(key,p){const b=$('#ub_'+key),i=$('#ubi_'+key);if(b){b.style.display='';i.style.width=Math.round(p*100)+'%';}}
+function upOne(key,f){return new Promise((res,rej)=>{const x=new XMLHttpRequest();
+  x.open('POST','/api/sources/upload?key='+encodeURIComponent(key)+'&name='+encodeURIComponent(relName(f)));
+  x.upload.onprogress=e=>{if(e.lengthComputable)setUbar(key,e.loaded/e.total);};
+  x.onload=()=>{try{const d=JSON.parse(x.responseText);d.error?rej(d.error):res(d);}catch(_){rej('응답오류 '+x.status);}};
+  x.onerror=()=>rej('네트워크 오류');x.send(f);});}
+async function uploadAll(key,files){if(!files.length)return;
+  const total=files.reduce((a,f)=>a+(f.size||0),0)||1;
+  logln('⇧ '+key+' 업로드 '+files.length+'개 ('+gb(total)+') …');
+  let done=0,doneB=0;
+  for(const f of files){try{await upOne(key,f);}catch(e){logln('  ✗ '+relName(f)+' — '+e);}
+    done++;doneB+=(f.size||0);setUbar(key,doneB/total);}
+  logln('  ✓ '+key+' 업로드 완료 ('+done+'/'+files.length+') — 검증 중…');
+  await validateSource(key,true);setUbar(key,1);
+  setTimeout(()=>{const b=$('#ub_'+key);if(b)b.style.display='none';},900);loadCollect();}
+function validateSource(key,quiet){return fetch('/api/sources/validate',{method:'POST',body:JSON.stringify({key})})
+  .then(r=>r.json()).then(d=>{if(d.error){logln('✗ '+key+' 검증 실패: '+d.error);return;}
+    const ic={ok:'🟢',warn:'🟡',fail:'🔴'}[d.status]||'•';
+    logln(ic+' '+key+' 검증: '+d.status+(d.msg?' — '+d.msg:''));if(!quiet)loadCollect();})
+  .catch(e=>logln('✗ '+key+' 검증 오류: '+e));}
+function bindDrops(){document.querySelectorAll('.node[data-key]').forEach(el=>{const key=el.getAttribute('data-key');
+  ['dragenter','dragover'].forEach(ev=>el.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.style.borderColor='var(--ac)';}));
+  ['dragleave','dragend','drop'].forEach(ev=>el.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.style.borderColor='';}));
+  el.addEventListener('drop',e=>gatherFiles(e.dataTransfer).then(fs=>uploadAll(key,fs)));});}
+function gb(n){return (n/1073741824).toFixed(2)+'GB';}
+let CUR_BUNDLE={},PROF=[],PROF_PG=0,PROF_NQ='',PROF_FROM='',PROF_TO='';
+function loadBuilds(){Promise.all([fetch('/api/builds').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json())]).then(([d,pd])=>{CUR_BUNDLE=d;PROF=pd.profiles||[];buildProfPanel();});}
+function buildProfPanel(){const c=CUR_BUNDLE.current_bundle||{};
+  const dl=c.exists?`<a href="/api/download/bundle" style="color:var(--ac)">⬇ 현재 번들 (${gb(c.size)})</a>`:'<i class=mut>번들 없음 — 빌드/패키징을 먼저</i>';
+  const hist=(CUR_BUNDLE.builds||[]).map(b=>`<div style="font-size:11px;padding:3px 0;color:var(--mut)"><b style="color:var(--tx)">${b.version}</b> · ${(b.built_at||'').replace('T',' ').slice(0,16)} · ${gb(b.bundle_bytes||0)}${b.qc?' · QC '+b.qc:''}</div>`).join('');
+  $('#builds').innerHTML=`<div style="margin-bottom:8px">${dl}</div>
+   <div style="display:flex;align-items:center;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><input id=profQ placeholder="이름 검색…" style="flex:1;min-width:130px;background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:5px 8px;font-size:12px"><span id=profCnt class=mut style="font-size:11px"></span></div>
+   <div style="display:flex;align-items:center;gap:5px;margin:0 0 6px;font-size:11px;color:var(--mut);flex-wrap:wrap"><span>📅 빌드일</span><input type=date id=profFrom style="background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:3px 6px;font-size:11px;color-scheme:dark"><span>~</span><input type=date id=profTo style="background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:3px 6px;font-size:11px;color-scheme:dark"><a onclick="clearProfDate()" class=ic title="날짜 초기화">✕</a></div>
+   <div id=profRows></div><div id=profPager></div>
+   ${hist?`<div class=mut style="font-size:11px;margin:10px 0 2px">패키징 이력</div>${hist}`:''}`;
+  const qi=$('#profQ');qi.value=PROF_NQ;qi.oninput=e=>{PROF_NQ=e.target.value;PROF_PG=0;renderProfRows();};
+  const ff=$('#profFrom'),ft=$('#profTo');ff.value=PROF_FROM;ft.value=PROF_TO;
+  ff.onchange=e=>{PROF_FROM=e.target.value;PROF_PG=0;renderProfRows();};ft.onchange=e=>{PROF_TO=e.target.value;PROF_PG=0;renderProfRows();};
+  renderProfRows();}
+function profMatch(p){const nq=PROF_NQ.trim().toLowerCase();
+  if(nq && !(p.name||'').toLowerCase().includes(nq) && !(p.git||'').toLowerCase().includes(nq)) return false;
+  const c=(p.created||'').slice(0,10);   // YYYY-MM-DD 빌드 생성일
+  if(PROF_FROM && c<PROF_FROM) return false;
+  if(PROF_TO && c>PROF_TO) return false;
+  return true;}
+function renderProfRows(){const PS=5,active=!!(PROF_NQ.trim()||PROF_FROM||PROF_TO);
+  const filt=PROF.filter(profMatch);
+  const pages=Math.max(1,Math.ceil(filt.length/PS));PROF_PG=Math.max(0,Math.min(PROF_PG,pages-1));
+  const page=filt.slice(PROF_PG*PS,PROF_PG*PS+PS);
+  if($('#profCnt'))$('#profCnt').textContent=filt.length+'개';
+  $('#profRows').innerHTML=page.map(p=>`<div class=node style="padding:7px 2px" id=pf_${p.id}>
+     <div class=nrow><span class=nl><a onclick="toggleDetail('${p.id}')" class=caret id=pc_${p.id}>›</a><b class=pname onclick="toggleDetail('${p.id}')" style="cursor:pointer">${p.name}</b></span><span class=nr>
+       <a onclick="editProfile('${p.id}')" class=ic title=이름수정>✎</a>
+       <a onclick="loadProfile('${p.id}')" class=ic title="불러오기 (이 파일집합으로 복원)">📂</a>
+       ${p.has_bundle?`<a href="/api/profiles/bundle?id=${p.id}" class=ic title="번들 다운로드">⬇</a>`:''}
+       <a onclick="delProfile('${p.id}')" class=ic title=삭제>✕</a></span></div>
+     <div class=nver>${p.created}${p.git?' · '+p.git:''} · 소스 ${Object.keys(p.sources||{}).length}${p.bundle_bytes?' · 번들 '+gb(p.bundle_bytes):''}</div>
+     <div id=pd_${p.id} class=pdetail style="display:none">${profDetailHtml(p)}</div></div>`).join('')||`<i class=mut>${active?'검색/필터 결과 없음':'저장된 프로필 없음 — 빌드(패키징) 완료 시 자동저장'}</i>`;
+  const cur=PROF_PG+1,nums=pageList(cur,pages).map(n=>n==='…'?'<span class=mut>…</span>':`<a onclick="profGoto(${n})" style="cursor:pointer;padding:1px 6px;border-radius:5px;${n===cur?'color:#06121f;background:var(--ac);font-weight:600':'color:var(--mut)'}">${n}</a>`).join(' ');
+  $('#profPager').innerHTML=pages>1?`<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;font-size:12px;flex-wrap:wrap">${cur>1?'<a onclick="profPage(-1)" class=ic>‹ 이전</a>':'<span class=mut style="opacity:.35">‹ 이전</span>'} ${nums} ${cur<pages?'<a onclick="profPage(1)" class=ic>다음 ›</a>':'<span class=mut style="opacity:.35">다음 ›</span>'}</div>`:'';}
+function pageList(cur,total){const win=2,set=new Set([1,total]);for(let i=cur-win;i<=cur+win;i++)if(i>=1&&i<=total)set.add(i);const arr=[...set].filter(n=>n>=1&&n<=total).sort((a,b)=>a-b),out=[];let prev=0;for(const n of arr){if(n-prev>1)out.push('…');out.push(n);prev=n;}return out;}
+function profPage(d){PROF_PG+=d;renderProfRows();}
+function profGoto(n){PROF_PG=n-1;renderProfRows();}
+function clearProfDate(){PROF_FROM='';PROF_TO='';const ff=$('#profFrom'),ft=$('#profTo');if(ff)ff.value='';if(ft)ft.value='';PROF_PG=0;renderProfRows();}
+function keyName(k){const i=k.indexOf(':'),sk=i<0?k:k.slice(0,i),sub=i<0?'':k.slice(i+1);const top=(COL||[]).find(c=>c.key===sk);if(!sub)return top?top.name:sk;const kid=((top&&top.children)||[]).find(c=>c.key===k);return (top?top.name:sk)+' · '+(kid?kid.name:sub);}
+function profDetailHtml(p){
+  const srcs=Object.entries(p.sources||{}).map(([k,s])=>`<div class=pdrow><span>${keyName(k)}</span><span class=mut>${s.current?fmt(s.current):'—'}${s.file?' · '+s.file:''}${s.sha?' · sha '+String(s.sha).slice(0,8):''}</span></div>`).join('')||'<span class=mut>기록된 소스 없음</span>';
+  const tg=(p.targets||[]).length?(p.targets).map(t=>lbl(t)).join(', '):'<span class=mut>기록 없음 (수동 저장 프로필)</span>';
+  const bundle=p.bundle_bytes?`보관됨 (${gb(p.bundle_bytes)}) · <a href="/api/profiles/bundle?id=${p.id}">다운로드</a> <span class=mut>· BUILD_HOME/manifests/${p.id}/cuvia-map-bundle.tgz</span>`:'<span class=mut>없음 (빌드/패키징 완료 시 보관)</span>';
+  return `<div class=pdsec><div class=pdh>소스 파일 버전 (빌드에 쓴 것)</div>${srcs}</div>
+   <div class=pdsec><div class=pdh>빌드 정제 체크</div><div>${tg}</div></div>
+   <div class=pdsec><div class=pdh>번들</div><div>${bundle}</div></div>
+   <div class=mut style="font-size:10px">id ${p.id}${p.qc?' · QC '+p.qc:''}</div>`;}
+function toggleDetail(id){const e=document.getElementById('pd_'+id),c=document.getElementById('pc_'+id);if(e){const o=e.style.display==='none';e.style.display=o?'':'none';if(c)c.textContent=o?'⌄':'›';}}
+function editProfile(id){const el=document.querySelector('#pf_'+id+' .pname');if(!el)return;const cur=el.textContent;
+  el.innerHTML=`<input id=ed_${id} value="${cur.replace(/"/g,'&quot;')}" style="background:#0c1018;border:1px solid var(--ac);border-radius:5px;color:var(--tx);padding:2px 6px;font-size:13px;width:72%">`;
+  const inp=document.getElementById('ed_'+id);inp.focus();inp.select();let done=false;
+  const save=()=>{if(done)return;done=true;const n=inp.value.trim();if(!n||n===cur){renderProfRows();return;}
+    fetch('/api/profiles/rename',{method:'POST',body:JSON.stringify({id,name:n})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadBuilds();});};
+  inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();save();}else if(e.key==='Escape'){done=true;renderProfRows();}};inp.onblur=save;}
+function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원할까요? (현재 staged 덮어씀)'))return;
+  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect();});}
+function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
+loadCollect(); loadBuilds();
+$('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정');
+const TSRC={localdata:['localdata'],facility:['facility'],geocode:['juso_navi','sangga','localdata','facility'],buildings:['building_db']};
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
- if(!t.length)return alert('대상을 선택하세요'); fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>logln('▶ 큐: '+d.queued.join(', ')));};
-$('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));
-function uploadFiles(files){
- const fs=[...(files||[])]; if(!fs.length)return;
- const fd=new FormData(); fs.forEach(f=>fd.append('file',f));
- logln('⇧ 업로드('+fs.length+'): '+fs.map(f=>f.name).join(', '));
- fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-   if(d.error)return logln('✗ '+d.error);
-   (d.files||[]).forEach(x=>logln('✓ 저장: '+x.saved+' · '+(x.size/1048576).toFixed(1)+'MB · '+x.detected));
-   fetch('/api/datasets').then(r=>r.json()).then(x=>render(x.datasets));
- }).catch(e=>logln('✗ 업로드 실패: '+e));}
-const dz=$('#dz');
-$('#browse').onclick=()=>$('#fin').click();
-dz.onclick=e=>{if(e.target.id!=='browse')$('#fin').click()};
-$('#fin').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
-['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.add('drag')}));
-['dragleave','dragend','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.remove('drag')}));
-dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer&&e.dataTransfer.files));
-document.addEventListener('paste',e=>{const f=e.clipboardData&&e.clipboardData.files;if(f&&f.length)uploadFiles(f);});
-</script></html>"""
-
-
-STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>스타일 디자인 — CUVIA</title>
-<link rel=stylesheet href="/vendor/maplibre/maplibre-gl.css">
-<style>
- body{margin:0;background:#0f1420;color:#e8edf5;font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif;height:100vh;overflow:hidden}
- .top{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid #26304a}
- .top a{color:#8d9bb5;text-decoration:none;font-size:13px} h1{font-size:15px;margin:0;font-weight:600}
- .main{display:flex;height:calc(100vh - 50px)}
- .side{width:310px;border-right:1px solid #26304a;overflow:auto;padding:12px 16px;flex:none}
- #map{flex:1;height:100%}
- .row{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid #1a2233}
- .row label{flex:1;font-size:13px}
- input[type=color]{width:36px;height:28px;border:1px solid #26304a;border-radius:6px;background:none;padding:0;cursor:pointer}
- input[type=text]{width:82px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 7px;font:12px ui-monospace,Menlo,monospace}
- button{background:#5b9bd5;color:#06121f;border:0;border-radius:8px;padding:8px 15px;font-weight:600;cursor:pointer}
- button.g{background:transparent;color:#e8edf5;border:1px solid #26304a}
- .st{font-size:12px;color:#8d9bb5}
- .hint{font-size:11px;color:#5f6b80;margin-top:14px;line-height:1.6}
- .tb{display:flex;flex-direction:column;gap:7px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #26304a}
- .tbrow{display:flex;align-items:center;gap:6px} .tbrow>span{font-size:11px;color:#8d9bb5;width:40px;flex:none}
- .mini{background:#1a2233;color:#cfe0ff;border:1px solid #26304a;border-radius:6px;padding:6px 9px;font-size:12px;font-weight:500;cursor:pointer;flex:1}
- .mini:hover{border-color:#5b9bd5}
- h2{font-size:11px;color:#8d9bb5;margin:14px 0 5px;font-weight:600;letter-spacing:.04em}
- select{background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 7px;font-size:12px;max-width:188px}
-</style>
-<div class=top>
- <a href="/">← 대시보드</a>
- <h1>스타일 디자인 · 객체별 색상</h1>
- <button class=g id=reset style="margin-left:auto">되돌리기</button>
- <button id=save>저장 & 적용</button>
- <span class=st id=status></span>
-</div>
-<div class=main>
- <div class=side>
-   <div class=tb>
-     <div class=tbrow><span>프리셋</span><button class=mini id=pl>화이트</button><button class=mini id=pd>다크</button></div>
-     <div class=tbrow><span>파일</span><button class=mini id=exp>내보내기</button><button class=mini id=imp>가져오기</button></div>
-   </div>
-   <input type=file id=impf accept=".json,application/json" style="display:none">
-   <h2>객체</h2><div id=rows></div>
-   <h2>시설(POI) 업종 대분류별</h2><div id=poirows></div>
-   <p class=hint>색을 바꾸면 미리보기에 즉시 반영. 팔레트(색칸 클릭) 또는 #색상값 입력 모두 가능.
-   <br>프리셋=화이트/다크 한 벌 적용 · 내보내기=style.json 다운로드 · 가져오기=style.json의 색 적용.
-   <br>‘저장 & 적용’ → style.json 기록 + 타일서버 재시작(영구 반영).</p>
- </div>
- <div id=map></div>
-</div>
-<script src="/vendor/maplibre/maplibre-gl.js"></script>
-<script>
- const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, TPORT=8080;
- fetch('/api/style/objects').then(r=>r.json()).then(d=>{
-   OBJ=d.objects; POI=d.poi_groups||[]; PRE=d.presets||{}; POILAYER=d.poi_layer||'poi-dot';
-   TPORT=d.tile_port;
-   $('#rows').innerHTML=OBJ.map(row).join('');
-   $('#poirows').innerHTML=POI.map(row).join('');
-   OBJ.forEach(o=>{ INIT[o.key]=o.color; wire(o,v=>apply(o,v)); });
-   POI.forEach(o=>{ INIT[o.key]=o.color; wire(o,()=>applyPoi()); });
-   map=new maplibregl.Map({container:'map',
-     style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
-     center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
-   map.addControl(new maplibregl.NavigationControl());
- }).catch(e=>$('#status').textContent='객체 로드 실패: '+e);
- function row(o){return `<div class=row><label>${o.label}</label>
-   <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
-   <input type=color id=c_${o.key} value="${o.color}"></div>`;}
- function wire(o,fn){const c=$('#c_'+o.key),h=$('#h_'+o.key);
-   c.oninput=()=>{h.value=c.value; fn(c.value)};
-   h.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(h.value)){c.value=h.value; fn(h.value)}};}
- function setColor(k,v){const c=$('#c_'+k),h=$('#h_'+k); if(c){c.value=v;h.value=v;}}
- function apply(o,color){ if(!map||!map.isStyleLoaded())return;
-   o.targets.forEach(t=>{ try{map.setPaintProperty(t[0],t[1],color)}catch(e){} }); }
- function poiExpr(){ const e=['match',['get','cat1']]; let fb='#9aa6b2';
-   POI.forEach(g=>{ const v=$('#c_'+g.key).value; if(!g.cats||!g.cats.length){fb=v;return;} e.push(g.cats.slice(),v); });
-   e.push(fb); return e; }
- function applyPoi(){ if(!map||!map.isStyleLoaded())return; try{map.setPaintProperty(POILAYER,'circle-color',poiExpr())}catch(e){} }
- function preset(name){ const p=PRE[name]||{};
-   OBJ.forEach(o=>{ if(p[o.key]){setColor(o.key,p[o.key]); apply(o,p[o.key]);} });
-   $('#status').textContent=name+' 프리셋 적용(미저장)'; }
- $('#pl').onclick=()=>preset('light'); $('#pd').onclick=()=>preset('dark');
- $('#reset').onclick=()=>{ OBJ.forEach(o=>{setColor(o.key,INIT[o.key]); apply(o,INIT[o.key]);});
-   POI.forEach(o=>setColor(o.key,INIT[o.key])); applyPoi(); };
- $('#exp').onclick=()=>location.href='/api/style/export';
- $('#imp').onclick=()=>$('#impf').click();
- $('#impf').onchange=e=>{const f=e.target.files[0]; if(!f)return; e.target.value='';
-   $('#status').textContent='가져오는 중…';
-   f.text().then(t=>fetch('/api/style/import',{method:'POST',headers:{'Content-Type':'application/json'},body:t}))
-    .then(r=>r.json()).then(d=>{ if(!d.ok){$('#status').textContent='✗ '+(d.error||'오류');return;}
-      OBJ.forEach(o=>{const v=d.colors[o.key]; if(v){setColor(o.key,v); apply(o,v);}});
-      POI.forEach(o=>{const v=d.colors[o.key]; if(v)setColor(o.key,v);}); applyPoi();
-      $('#status').textContent=`✓ 가져옴 ${d.applied}개 · 타일서버 ${d.reloaded}`;
-    }).catch(err=>$('#status').textContent='✗ 실패: '+err); };
- $('#save').onclick=()=>{
-   const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value); POI.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
-   $('#status').textContent='적용 중…';
-   fetch('/api/style',{method:'POST',body:JSON.stringify({theme})}).then(r=>r.json()).then(d=>{
-     $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
-   }).catch(e=>$('#status').textContent='✗ 실패: '+e);
- };
+ if(!t.length)return alert('대상을 선택하세요');
+ const need=new Set();t.forEach(k=>(TSRC[k]||[]).forEach(s=>need.add(s)));
+ const byKey=Object.fromEntries(SRC.map(s=>[s.key,s]));
+ [...need].forEach(k=>{const s=byKey[k];if(s&&s.validation&&s.validation!=='ok')logln('⚠ '+(s.name||k)+' 검증 '+s.validation+' — 그대로 빌드(경고)');});
+ const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음',partial:'⚠ 일부만 적재(오류)','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
+ fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
+   (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
+   logln('▶ 큐: '+d.queued.join(', '));loadCollect();});};
+// 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
+function gatherFiles(dt){
+ const items=dt&&dt.items;
+ if(!items||!items.length||!items[0].webkitGetAsEntry) return Promise.resolve([...((dt&&dt.files)||[])]);
+ const entries=[...items].map(it=>it.webkitGetAsEntry&&it.webkitGetAsEntry()).filter(Boolean), out=[];
+ const walk=en=>new Promise(res=>{
+   if(en.isFile) en.file(f=>{try{f._rel=en.fullPath;}catch(_){}out.push(f);res();},()=>res());
+   else if(en.isDirectory){const rd=en.createReader(),acc=[];
+     (function batch(){rd.readEntries(es=>{if(!es.length){Promise.all(acc.map(walk)).then(res);return;}acc.push(...es);batch();},()=>res());})();}
+   else res();});
+ return Promise.all(entries.map(walk)).then(()=>out);
+}
 </script></html>"""
 
 

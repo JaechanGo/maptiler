@@ -1,10 +1,8 @@
-// 베이스 지도 초기화. 게이트웨이(단일 도메인) 경유면 same-origin(상대경로), 직접 포트 접속(:8081)이면
-// 같은 호스트의 :8080 사용. ?server=http://host:port 로 재지정 가능.
+// 베이스 지도 초기화. 기본은 same-origin(상대경로) — 게이트웨이(reverse proxy) 뒤라면 포트 무관하게
+// /styles 가 그대로 동작한다. 게이트웨이 없이 데모를 직접 포트로 띄웠다면 ?server=http://host:8080 지정.
 const params = new URLSearchParams(location.search);
-// 게이트웨이(reverse proxy) 경유 판별 — 80/443/8088 이면 /styles 등을 same-origin 으로 호출.
-const VIA_GATEWAY = ['', '80', '443', '8088'].includes(location.port);
 // 주의: ?server= 값은 검증 없이 URL로 사용된다. 공개망에서 재사용 시 allowlist 검증 필요.
-const TILESERVER = params.get('server') || (VIA_GATEWAY ? '' : `http://${location.hostname}:8080`);
+const TILESERVER = params.get('server') || '';
 
 const map = new maplibregl.Map({
   container: 'map',

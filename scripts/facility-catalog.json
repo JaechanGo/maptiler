@@ -1,0 +1,21 @@
+{
+  "_comment": "생활편의시설(공공) 수집 카탈로그 — file.localdata.go.kr 우회. 다운로드 URL = base + paths[*] (localdata 데이터파일받기 버튼의 data-download-urls 원본). kind=facility 로 별도 적재(상가/인허가 biz 와 분리). default=목록 기본 체크. role: poi(라벨)/icon(아이콘용)/dup(상가·인허가 중복)/noise(라벨 부적합). dedup_vs_biz=상가·인허가와 상호+좌표 교차 dedup 대상. 스키마는 종류마다 달라 cleaner(11b)가 컬럼 휴리스틱 자동탐지.",
+  "base": "https://file.localdata.go.kr",
+  "expected_ext": [".csv", ".zip"],
+  "items": [
+    {"key": "public_restroom", "name": "공중화장실", "paths": ["/file/download/public_restroom_info/info"], "default": true, "role": "poi"},
+    {"key": "kiosk", "name": "무인민원발급기", "paths": ["/file/download/kiosk_info/certificate_info", "/file/download/kiosk_info/installation_info"], "default": true, "role": "poi"},
+    {"key": "bicycle_parking", "name": "자전거보관소", "paths": ["/file/download/bicycle_parking_info/info"], "default": true, "role": "poi"},
+    {"key": "civil_defense_shelter", "name": "민방위대피시설", "paths": ["/file/download/civil_defense_shelter_info/info"], "default": true, "role": "poi"},
+    {"key": "free_wifi", "name": "무료와이파이", "paths": ["/file/download/free_wifi_info/info"], "default": false, "role": "icon"},
+    {"key": "emergency_call_box", "name": "안전비상벨", "paths": ["/file/download/emergency_call_box_info/info"], "default": false, "role": "icon"},
+    {"key": "fishing_spot", "name": "낚시터", "paths": ["/file/download/fishing_spot_info/info"], "default": false, "role": "poi", "dedup_vs_biz": true},
+    {"key": "car_wash", "name": "세차장", "paths": ["/file/download/car_wash_info/info"], "default": false, "role": "poi", "dedup_vs_biz": true},
+    {"key": "protected_tree", "name": "보호수", "paths": ["/file/download/protected_tree_info/info"], "default": false, "role": "poi"},
+    {"key": "excellent_restaurant", "name": "모범음식점", "paths": ["/file/download/excellent_restaurant_info/info"], "default": false, "role": "dup"},
+    {"key": "cctv", "name": "CCTV", "paths": ["/file/download/cctv_info/info"], "default": false, "role": "noise"},
+    {"key": "speed_bump", "name": "과속방지턱", "paths": ["/file/download/speed_bump_info/info"], "default": false, "role": "noise"},
+    {"key": "dust_emission_business", "name": "비산먼지발생사업", "paths": ["/file/download/dust_emission_business_info/info"], "default": false, "role": "noise"},
+    {"key": "household_waste", "name": "생활쓰레기배출", "paths": ["/file/download/household_waste_info/info"], "default": false, "role": "noise"}
+  ]
+}

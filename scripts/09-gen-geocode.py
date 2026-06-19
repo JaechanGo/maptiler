@@ -10,7 +10,7 @@
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
 """
-import argparse, io, math, os, pathlib, re, sqlite3, sys, time, unicodedata
+import argparse, io, json, math, os, pathlib, re, sqlite3, sys, time, unicodedata
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SIDO = ["seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","sejong","gyunggi",
@@ -35,6 +35,8 @@ def utmk_to_wgs84(E,N):
 
 def norm(s): return re.sub(r"\s+"," ",unicodedata.normalize("NFC",s or "")).strip()
 def rnorm(s): return re.sub(r"[.\s]","",unicodedata.normalize("NFC",s or ""))
+_BIZ_PUNCT=re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
+def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()  # 12-build-poi.sh _nrm와 동일 — biz 중복(대표) 판정 키
 def search_text(name, is_station):
     name=norm(name); v={name, name.replace(' ','')}
     if is_station:
@@ -46,7 +48,7 @@ SCHEMA = """
   PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1048576; PRAGMA temp_store=MEMORY;
   CREATE TABLE places(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, subtype TEXT,
     sido TEXT,sigungu TEXT,emd TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
-    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT, lon REAL,lat REAL);
+    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT,cat2 TEXT, source TEXT,is_primary INTEGER, lon REAL,lat REAL);
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
   CREATE VIRTUAL TABLE place_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
@@ -87,7 +89,7 @@ def add_juso(db, src, only, state):
             if not (124<=lon<=132 and 33<=lat<=39): continue
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,None,None,jdict.get(mgt),None,lon,lat))
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,None,None,jdict.get(mgt),None,None,'navi',1,lon,lat))
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -104,7 +106,7 @@ def add_osm(db, osm_path, state):
     for name,typ,sub,lon,lat in o.execute("SELECT name,type,subtype,lon,lat FROM places"):
         if lon is None or lat is None: continue
         pid+=1
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,lon,lat))
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,'osm',1,lon,lat))
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -125,20 +127,25 @@ def add_biz(db, csvdir, state):
     # 소상공인 상가(상권)정보 CSV(시도별) → kind='biz'. 경도/위도 이미 WGS84.
     import csv, glob
     pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
-    for path in sorted(glob.glob(os.path.join(csvdir,"*.csv"))):
+    for path in sorted(glob.glob(os.path.join(csvdir,"**","*.csv"), recursive=True)):
+        base = os.path.basename(path)   # 출처·종류 구분(파일명)
+        if base == 'facility_clean.csv': src, kind = 'facility', 'facility'   # 생활편의시설 — biz 와 분리 적재
+        elif base == 'localdata_clean.csv': src, kind = 'localdata', 'biz'
+        else: src, kind = 'sangga', 'biz'
         with open(path, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
                 try: lon=float(row.get("경도") or 0); lat=float(row.get("위도") or 0)
                 except ValueError: continue
                 if not (124<=lon<=132 and 33<=lat<=39): continue
                 nm=(row.get("상호명") or "").strip()
-                if not nm: continue
+                if not nm or nm in ("업소명없음", "상호명없음", "-", "."): continue   # 원본 플레이스홀더 제외
                 biz=(row.get("상권업종소분류명") or "").strip()
                 sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip(); emd=(row.get("행정동명") or "").strip()
                 phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None
                 cat1=(row.get("상권업종대분류명") or "").strip() or None
+                cat2=(row.get("상권업종중분류명") or "").strip() or None
                 pid+=1
-                pb.append((pid,'biz',nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,None,cat1,round(lon,6),round(lat,6)))
+                pb.append((pid,kind,nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,None,cat1,cat2,src,0,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -147,9 +154,27 @@ def add_biz(db, csvdir, state):
 
 def _flush(db,pb,fb,rb):
     if not pb: return
-    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
+    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
     db.executemany("INSERT INTO places_fts(rowid,name,region,road,bld) VALUES(?,?,?,?,?)",fb)
     db.executemany("INSERT INTO place_rtree VALUES(?,?,?,?,?)",rb)
+
+def write_taxonomy(db, out_path):
+    """biz의 대>중>소 분류 트리를 style/poi-taxonomy.json 으로 재생성(스튜디오 티어/아이콘 목록용)."""
+    import collections
+    tree = collections.OrderedDict(); cnt = collections.Counter()
+    q = ("SELECT cat1,cat2,subtype,count(*) c FROM places WHERE kind IN ('biz','facility') AND cat1 IS NOT NULL "
+         "GROUP BY cat1,cat2,subtype ORDER BY cat1, c DESC")
+    for cat1, cat2, sub, c in db.execute(q):
+        cnt[cat1] += c
+        t = tree.setdefault(cat1, collections.OrderedDict())
+        m = t.setdefault(cat2 or "(기타)", [])
+        if sub and sub not in m:
+            m.append(sub)
+    ordered = collections.OrderedDict(sorted(tree.items(), key=lambda kv: -cnt[kv[0]]))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({"cat1_order": list(ordered.keys()), "tree": ordered}, ensure_ascii=False),
+                        encoding="utf-8")
+
 
 def main():
     ap=argparse.ArgumentParser()
@@ -168,6 +193,19 @@ def main():
     add_juso(db, pathlib.Path(args.src), only, state)
     add_osm(db, args.osm, state)
     if args.poi_csv_dir: add_biz(db, args.poi_csv_dir, state)
+    # biz 중복(상가↔LOCALDATA 같은 점포) 표시용 대표 선정 — 출처(source)는 모두 보존하되,
+    # 정규화상호 + 좌표3자리(≈90~110m) 그룹당 1건만 is_primary=1. 우선순위 LOCALDATA>sangga, 동률은 작은 id.
+    db.create_function("nrm", 1, biznrm)
+    db.execute("""UPDATE places SET is_primary=1 WHERE id IN (
+        SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY nrm(name), round(lon,3), round(lat,3)
+            ORDER BY CASE source WHEN 'localdata' THEN 0 WHEN 'sangga' THEN 1 ELSE 2 END, id) rn
+          FROM places WHERE kind='biz') WHERE rn=1)""")
+    # 생활편의시설(kind='facility')은 biz 와 별도 — 전부 표시(is_primary=1). 단 낚시터·세차장은 상가/인허가(biz) 와 겹치면 숨김.
+    db.execute("UPDATE places SET is_primary=1 WHERE kind='facility'")
+    db.execute("""UPDATE places SET is_primary=0 WHERE kind='facility' AND subtype IN ('낚시터','세차장')
+        AND EXISTS (SELECT 1 FROM places b WHERE b.kind='biz' AND b.is_primary=1
+          AND nrm(b.name)=nrm(places.name) AND round(b.lon,3)=round(places.lon,3) AND round(b.lat,3)=round(places.lat,3))""")
     db.execute("CREATE TABLE meta(k TEXT,v TEXT)")
     db.executemany("INSERT INTO meta VALUES(?,?)", [("places",str(state["pid"])),("srid","4326"),
         ("source","내비게이션용DB 2026.05 + OSM"),("built_s",f"{time.time()-t0:.0f}")])
@@ -175,6 +213,13 @@ def main():
     db.commit(); db.close(); tmp.replace(out)
     sz=out.stat().st_size/1048576
     print("="*56); print(f"OK: {out}  총 {state['pid']:,}건 · {sz:.0f}MB · {time.time()-t0:.0f}s")
+    # 카테고리 분류 트리(스튜디오 티어/아이콘 목록용) — 빌드마다 최신 카테고리로 재생성
+    try:
+        rdb = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
+        write_taxonomy(rdb, ROOT / "style" / "poi-taxonomy.json"); rdb.close()
+        print(f"  taxonomy → {ROOT / 'style' / 'poi-taxonomy.json'}")
+    except Exception as e:
+        print(f"  (taxonomy 재생성 스킵: {e})", file=sys.stderr)
 
 if __name__=="__main__":
     main()

@@ -27,8 +27,8 @@ services:
     image: nginx:1.31.1-alpine
     platform: linux/amd64
     restart: unless-stopped
-    ports:
-      - "8081:80"
+    # 호스트 포트 미노출 — 데모는 게이트웨이(/ , /demo/) 경유로만 접근.
+    # 단독 :8081 은 /styles·/data·/geocode 프록시가 없어 타일/검색이 동작하지 않으므로 노출하지 않는다.
     volumes:
       - ../demo:/usr/share/nginx/html/demo:ro
       - ../vendor:/usr/share/nginx/html/vendor:ro
