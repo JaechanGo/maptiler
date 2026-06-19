@@ -35,6 +35,11 @@ def utmk_to_wgs84(E,N):
 
 def norm(s): return re.sub(r"\s+"," ",unicodedata.normalize("NFC",s or "")).strip()
 def rnorm(s): return re.sub(r"[.\s]","",unicodedata.normalize("NFC",s or ""))
+_DORO_RE = re.compile(r"(\S*(?:대로|로|길))\s+(\d+)(?:-(\d+))?")
+def parse_doro(s):
+    # 도로명주소 → (도로명, 도로명정규화=rnorm, 건물본번, 건물부번). 상세주소(층/호)·미파싱은 무시. navi 조인키(rnorm·본/부번)와 동형.
+    m = _DORO_RE.search(norm(s).split(",")[0])
+    return (m.group(1), rnorm(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else (None,None,None,None)
 _BIZ_PUNCT=re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
 def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()  # 12-build-poi.sh _nrm와 동일 — biz 중복(대표) 판정 키
 def search_text(name, is_station):
@@ -48,7 +53,7 @@ SCHEMA = """
   PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1048576; PRAGMA temp_store=MEMORY;
   CREATE TABLE places(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, subtype TEXT,
     sido TEXT,sigungu TEXT,emd TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
-    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT,cat2 TEXT, source TEXT,is_primary INTEGER, lon REAL,lat REAL);
+    bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT,bcode TEXT,hcode TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT,cat2 TEXT, source TEXT,is_primary INTEGER, lon REAL,lat REAL);
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
   CREATE VIRTUAL TABLE place_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
@@ -89,7 +94,7 @@ def add_juso(db, src, only, state):
             if not (124<=lon<=132 and 33<=lat<=39): continue
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,None,None,jdict.get(mgt),None,None,'navi',1,lon,lat))
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jdict.get(mgt),None,None,'navi',1,lon,lat))  # bcode=c[0](법정동코드)·hcode=c[13](행정동코드)
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -106,7 +111,7 @@ def add_osm(db, osm_path, state):
     for name,typ,sub,lon,lat in o.execute("SELECT name,type,subtype,lon,lat FROM places"):
         if lon is None or lat is None: continue
         pid+=1
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,'osm',1,lon,lat))
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,'osm',1,lon,lat))
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -144,8 +149,10 @@ def add_biz(db, csvdir, state):
                 phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None
                 cat1=(row.get("상권업종대분류명") or "").strip() or None
                 cat2=(row.get("상권업종중분류명") or "").strip() or None
+                road,rn,mno,sno = parse_doro(row.get("도로명주소") or "")   # ER 건물키 조인·검색용(11/11b가 보존, 없으면 None)
+                jibun_txt=(row.get("지번주소") or "").strip() or None
                 pid+=1
-                pb.append((pid,kind,nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,None,cat1,cat2,src,0,round(lon,6),round(lat,6)))
+                pb.append((pid,kind,nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -154,7 +161,7 @@ def add_biz(db, csvdir, state):
 
 def _flush(db,pb,fb,rb):
     if not pb: return
-    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
+    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
     db.executemany("INSERT INTO places_fts(rowid,name,region,road,bld) VALUES(?,?,?,?,?)",fb)
     db.executemany("INSERT INTO place_rtree VALUES(?,?,?,?,?)",rb)
 
@@ -183,6 +190,8 @@ def main():
     ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
     ap.add_argument("--only")
     ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
+    ap.add_argument("--dedup", choices=["legacy","er"], default="legacy",
+                    help="biz 표시용 중복제거: legacy=정규화상호+좌표3자리 1패스(기본), er=엔티티해상도(dedup_er.py: 셀이웃 블로킹+등급가중점수+union-find)")
     args=ap.parse_args()
     only=set(args.only.split(",")) if args.only else None
     out=pathlib.Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
@@ -193,18 +202,39 @@ def main():
     add_juso(db, pathlib.Path(args.src), only, state)
     add_osm(db, args.osm, state)
     if args.poi_csv_dir: add_biz(db, args.poi_csv_dir, state)
-    # biz 중복(상가↔LOCALDATA 같은 점포) 표시용 대표 선정 — 출처(source)는 모두 보존하되,
-    # 정규화상호 + 좌표3자리(≈90~110m) 그룹당 1건만 is_primary=1. 우선순위 LOCALDATA>sangga, 동률은 작은 id.
-    db.create_function("nrm", 1, biznrm)
-    db.execute("""UPDATE places SET is_primary=1 WHERE id IN (
-        SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
-            PARTITION BY nrm(name), round(lon,3), round(lat,3)
-            ORDER BY CASE source WHEN 'localdata' THEN 0 WHEN 'sangga' THEN 1 ELSE 2 END, id) rn
-          FROM places WHERE kind='biz') WHERE rn=1)""")
+    # biz 중복(상가↔LOCALDATA 같은 점포) 표시용 대표 선정 — 출처(source)는 모두 보존하되 그룹당 1건만 is_primary=1.
+    db.create_function("nrm", 1, biznrm)   # facility 충돌숨김(아래)에서도 사용 → dedup 방식과 무관하게 등록
+    if args.dedup == "er":
+        # 엔티티해상도: (선택)건물키 backfill → 셀이웃 블로킹 + 등급가중점수 + 주소/좌표 TF + union-find (dedup_er.py).
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        from dedup_er import dedup_er
+        # navi 조인 backfill: biz 행에 건물키(bd_mgt_sn) — sido+sigungu+road_norm+본/부번 일치 navi addr 의 최근접값.
+        # 미파싱·미일치는 NULL 유지(dedup_er가 좌표밀도 TF로 폴백). 부분인덱스 후 상관서브쿼리(수백만행→수분), 끝나면 인덱스 제거.
+        db.execute("CREATE INDEX IF NOT EXISTS idx_addr_key ON places(sido,sigungu,road_norm,main_no,sub_no) WHERE kind='addr'")
+        db.execute("""UPDATE places SET bd_mgt_sn=(
+            SELECT a.bd_mgt_sn FROM places a WHERE a.kind='addr'
+              AND a.sido=places.sido AND a.sigungu=places.sigungu
+              AND a.road_norm=places.road_norm AND a.main_no=places.main_no AND a.sub_no=places.sub_no
+            ORDER BY abs(a.lon-places.lon)+abs(a.lat-places.lat) LIMIT 1)
+          WHERE kind='biz' AND road_norm IS NOT NULL AND main_no IS NOT NULL""")
+        db.execute("DROP INDEX IF EXISTS idx_addr_key")
+        nbiz = db.execute("SELECT count(*) FROM places WHERE kind='biz'").fetchone()[0]
+        nmat = db.execute("SELECT count(*) FROM places WHERE kind='biz' AND bd_mgt_sn IS NOT NULL").fetchone()[0]
+        print(f"  [backfill] biz 건물키(bd_mgt_sn) 매칭 {nmat:,}/{nbiz:,} ({100*nmat/max(nbiz,1):.0f}%)", file=sys.stderr)
+        dedup_er(db)
+    else:
+        # legacy: 정규화상호 + 좌표3자리(≈90~110m) 그룹당 1건만 is_primary=1. 우선순위 LOCALDATA>sangga, 동률은 작은 id.
+        db.execute("""UPDATE places SET is_primary=1 WHERE id IN (
+            SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY nrm(name), round(lon,3), round(lat,3)
+                ORDER BY CASE source WHEN 'localdata' THEN 0 WHEN 'sangga' THEN 1 ELSE 2 END, id) rn
+              FROM places WHERE kind='biz') WHERE rn=1)""")
     # 생활편의시설(kind='facility')은 biz 와 별도 — 전부 표시(is_primary=1). 단 낚시터·세차장은 상가/인허가(biz) 와 겹치면 숨김.
     db.execute("UPDATE places SET is_primary=1 WHERE kind='facility'")
+    # 충돌숨김은 '어떤 biz 행이든' 동일 nrm+좌표면 적용(b.is_primary 조건 제거) — ER 대표가 이름다른 출처로
+    # 승급돼도 견고. nrm(=biznrm)은 corp/branch 미제거라 legacy/er 양쪽에서 동일 동작.
     db.execute("""UPDATE places SET is_primary=0 WHERE kind='facility' AND subtype IN ('낚시터','세차장')
-        AND EXISTS (SELECT 1 FROM places b WHERE b.kind='biz' AND b.is_primary=1
+        AND EXISTS (SELECT 1 FROM places b WHERE b.kind='biz'
           AND nrm(b.name)=nrm(places.name) AND round(b.lon,3)=round(places.lon,3) AND round(b.lat,3)=round(places.lat,3))""")
     db.execute("CREATE TABLE meta(k TEXT,v TEXT)")
     db.executemany("INSERT INTO meta VALUES(?,?)", [("places",str(state["pid"])),("srid","4326"),
