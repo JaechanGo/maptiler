@@ -1,23 +1,28 @@
 {
-  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio의 '데이터 출처/버전' 패널이 사용. period_fmt=기준일 형식(YYYYMM 등). url은 다운로드/신청 페이지. 최신성 자동조회는 latest_api 채우면 활성(미설정 시 수동).",
+  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '데이터 출처/버전' 패널이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동(url 생략 시 위 url 사용, pick=max|first). 없으면 수동.",
   "sources": [
     {
-      "key": "juso_addr",
-      "name": "도로명주소 DB (주소·위치정보)",
+      "key": "juso_navi",
+      "name": "도로명주소 내비게이션용DB 전체분",
       "category": "주소",
       "url": "https://business.juso.go.kr/addrlink/main.do",
       "period_fmt": "YYYYMM",
       "cycle": "월",
-      "note": "도로명주소·지번·건물 위치(내비DB 원천)"
+      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 목록의 '내비게이션용DB'(SN 28). match_build_*.txt 사용",
+      "_latest_hint": "juso 목록 API엔 날짜 없음 — DB별 파일목록 API(SN 28)를 알면 latest_check 추가 가능. 현재 수동"
     },
     {
       "key": "sangga",
       "name": "소상공인시장진흥공단 상가(상권)정보",
       "category": "상가",
       "url": "https://www.data.go.kr/data/15083033/fileData.do",
-      "period_fmt": "YYYYMM",
+      "period_fmt": "YYYY-MM-DD",
       "cycle": "분기",
-      "note": "상호·업종(POI/상가)"
+      "note": "상호·업종(POI/상가). data.go.kr 수정일 기준",
+      "latest_check": {
+        "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "first"
+      }
     },
     {
       "key": "localdata",
@@ -26,7 +31,7 @@
       "url": "https://www.localdata.go.kr/",
       "period_fmt": "YYYYMMDD",
       "cycle": "일",
-      "note": "지자체 인허가(업소) 전체분"
+      "note": "지자체 인허가(업소) 전체분. 자동조회 미지원(localdata.go.kr 로그인/세션·API키 필요로 단순 GET 불가) — 현재 수동 등록"
     },
     {
       "key": "building_db",
@@ -35,29 +40,24 @@
       "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "월(일 변경분)",
-      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터",
+      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18",
       "latest_check": {
         "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "max"
       }
     },
     {
-      "key": "hdong",
-      "name": "행정동 경계 (행정구역)",
-      "category": "경계",
-      "url": "http://data.nsdi.go.kr/",
-      "period_fmt": "YYYYMM",
-      "cycle": "수시",
-      "note": "국가공간정보포털 행정경계(동 라벨)"
-    },
-    {
       "key": "osm",
-      "name": "OpenStreetMap (남한)",
+      "name": "OpenStreetMap (남한, geofabrik)",
       "category": "OSM",
       "url": "https://download.geofabrik.de/asia/south-korea.html",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "일",
-      "note": "도로·수계·POI 보강 (geofabrik south-korea-latest)"
+      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf",
+      "latest_check": {
+        "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "first"
+      }
     }
   ]
 }
