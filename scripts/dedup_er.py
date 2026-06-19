@@ -137,15 +137,11 @@ DBUCKET = 4             # 좌표밀도 버킷 소수4자리 ≈ 11m
 MAX_CELL = 1200         # 셀당 비교후보 상한(과밀셀 폭주 방지) — 셀중심 거리순 절단, 누락분 로그
 _REP_PRIORITY = {"localdata": 0, "sangga": 1}
 _STEP = 10**(-DBUCKET)
+_BIZ_SELECT = ("SELECT id,name,lon,lat,COALESCE(source,''),COALESCE(phone,''),COALESCE(bd_mgt_sn,'') "
+               "FROM places WHERE kind='biz' AND lon IS NOT NULL AND lat IS NOT NULL")
 
-def dedup_er(db, log=lambda m: print(m, file=sys.stderr), emit_review=False):
-    """places(kind='biz')에 대해 ER 군집화 → is_primary 설정. emit_review=True면 REVIEW 쌍을 dedup_review 테이블에."""
-    rows = db.execute(
-        "SELECT id,name,lon,lat,COALESCE(source,''),COALESCE(phone,''),COALESCE(bd_mgt_sn,'') "
-        "FROM places WHERE kind='biz' AND lon IS NOT NULL AND lat IS NOT NULL").fetchall()
-    if not rows:
-        log("  [dedup_er] biz 행 없음"); return
-    # 1패스 사전계산: 좌표밀도 버킷, 전화빈도, 레코드 캐시(core/trigram 포함), 그리드
+def _build_records(rows):
+    """biz 행 → (R: id→사전계산 dict, grid: 셀→[id]). 좌표밀도·전화빈도·건물공유·corenrm/trigram 1패스 캐시."""
     bucket = {}; phone_n = {}
     for rid, name, lon, lat, source, phone, bld in rows:
         bk = (round(lon, DBUCKET), round(lat, DBUCKET)); bucket[bk] = bucket.get(bk, 0) + 1
@@ -158,25 +154,61 @@ def dedup_er(db, log=lambda m: print(m, file=sys.stderr), emit_review=False):
     R = {}; grid = {}; bld_cores = {}
     for rid, name, lon, lat, source, phone, bld in rows:
         core = corenrm(name); pd = _digits(phone)
-        R[rid] = {"lon": lon, "lat": lat, "source": source, "pd": pd, "rep": is_rep(phone),
+        R[rid] = {"name": name, "lon": lon, "lat": lat, "source": source, "pd": pd, "rep": is_rep(phone),
                   "branch": branch_of(name), "core": core, "tris": _trigrams(core) if core else None,
                   "dens": dens9(lon, lat), "pshare": phone_n.get(pd, 0) if pd else 0, "bld": bld}
         if bld: bld_cores.setdefault(bld, set()).add(core)
         grid.setdefault((int(lon/CELL), int(lat/CELL)), []).append(rid)
     for rid in R:                                  # 건물키 공유 distinct상호 수(주소 TF) 사전계산
         R[rid]["bldshare"] = len(bld_cores[R[rid]["bld"]]) if R[rid]["bld"] else 0
+    return R, grid
+
+def _cell_cands(grid, cx, cy, R):
+    """셀 (cx,cy)의 3×3 이웃 후보 id 목록 + 과밀셀 거리순 절단분(capped). dedup_er/export 공용."""
+    cand = []
+    for nx in (cx-1, cx, cx+1):
+        for ny in (cy-1, cy, cy+1):
+            cand += grid.get((nx, ny), [])
+    capped = 0
+    if len(cand) > MAX_CELL:                       # 셀중심 거리순 절단(P3) — 가까운 후보 우선보존
+        cxc, cyc = (cx+0.5)*CELL, (cy+0.5)*CELL
+        cand.sort(key=lambda r: haversine_m(R[r]["lon"], R[r]["lat"], cxc, cyc))
+        capped = len(cand) - MAX_CELL
+        cand = cand[:MAX_CELL]
+    return cand, capped
+
+def export_pairs(db, min_pr=0.5):
+    """골든셋 라벨링용: dedup_er와 동일 스코어링으로 후보쌍 중 Pr≥min_pr 인 것을 features와 함께 반환."""
+    rows = db.execute(_BIZ_SELECT).fetchall()
+    if not rows: return []
+    R, grid = _build_records(rows); out = []
+    for (cx, cy), ids in grid.items():
+        cand, _ = _cell_cands(grid, cx, cy, R)
+        for i in ids:
+            a = R[i]
+            for j in cand:
+                if j <= i: continue
+                b = R[j]; dec, pr = _decide(a, b)
+                if pr < min_pr: continue
+                sim = _sim_tris(a["tris"], b["tris"]) if (a["core"] and b["core"]) else 0.0
+                out.append({"id_a": i, "id_b": j, "decision": dec, "pr": round(pr, 4),
+                            "name_sim": round(sim, 3),
+                            "dist_m": round(haversine_m(a["lon"], a["lat"], b["lon"], b["lat"]), 1),
+                            "phone_eq": int(bool(a["pd"]) and a["pd"] == b["pd"]),
+                            "same_bld": int(bool(a["bld"]) and a["bld"] == b["bld"]),
+                            "name_a": a["name"], "src_a": a["source"], "name_b": b["name"], "src_b": b["source"]})
+    return out
+
+def dedup_er(db, log=lambda m: print(m, file=sys.stderr), emit_review=False):
+    """places(kind='biz')에 대해 ER 군집화 → is_primary 설정. emit_review=True면 REVIEW 쌍을 dedup_review 테이블에."""
+    rows = db.execute(_BIZ_SELECT).fetchall()
+    if not rows:
+        log("  [dedup_er] biz 행 없음"); return
+    R, grid = _build_records(rows)
     uf = _UF(R.keys()); n_pairs = n_auto = n_review = n_capped = 0
     prhist = [0]*10; rev = []
     for (cx, cy), ids in grid.items():
-        cand = []
-        for nx in (cx-1, cx, cx+1):
-            for ny in (cy-1, cy, cy+1):
-                cand += grid.get((nx, ny), [])
-        if len(cand) > MAX_CELL:                   # 셀중심 거리순 절단(P3) — 가까운 후보 우선보존
-            cxc, cyc = (cx+0.5)*CELL, (cy+0.5)*CELL
-            cand.sort(key=lambda r: haversine_m(R[r]["lon"], R[r]["lat"], cxc, cyc))
-            n_capped += len(cand) - MAX_CELL
-            cand = cand[:MAX_CELL]
+        cand, cap = _cell_cands(grid, cx, cy, R); n_capped += cap
         for i in ids:
             ri = R[i]
             for j in cand:                         # union 멱등 → 이웃셀 중복방문 무해(전역 seen 불필요, P2)
