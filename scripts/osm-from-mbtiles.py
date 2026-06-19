@@ -5,7 +5,8 @@ scripts/07-gen-geocode.py 의 extract_mbtiles 로직 재현 — iCloud evict된 
 """
 import gzip, math, os, sqlite3, sys, re, unicodedata
 
-MB = "/Users/jaechango_cudo/Library/Mobile Documents/com~apple~CloudDocs/maptiler/tiles/korea.mbtiles"
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo 루트(이식성 — Mac 절대경로 하드코딩 제거)
+MB = os.environ.get("KOREA_MBTILES") or os.path.join(_ROOT, "tiles/korea.mbtiles")
 OUT = os.path.expanduser("~/geocode-build/osm.sqlite")
 EXTENT = 4096; Z = 14
 

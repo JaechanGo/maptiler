@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+mkdir -p tiles data/osm   # 클린 clone 호스트 대비(출력 디렉토리)
 # -Xmx: 한국 규모는 12g면 충분. 더 큰 지역(대륙/행성)은 머신 RAM에 맞춰 상향할 것.
 java -Xmx12g -jar planetiler/planetiler.jar \
   --osm_path="data/osm/south-korea.osm.pbf" \
