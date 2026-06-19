@@ -30,12 +30,16 @@
     },
     {
       "key": "building_db",
-      "name": "GIS건물통합정보 (건물DB 전체분)",
+      "name": "GIS건물통합정보 (건물DB)",
       "category": "건물",
-      "url": "https://www.data.go.kr/tcs/dss/selectDataSetList.do?keyword=GIS%EA%B1%B4%EB%AC%BC%ED%86%B5%ED%95%A9%EC%A0%95%EB%B3%B4",
-      "period_fmt": "YYYYMM",
-      "cycle": "월",
-      "note": "건물 외곽·층수(3D 건물). data.go.kr / 국가공간정보포털"
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "월(일 변경분)",
+      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터",
+      "latest_check": {
+        "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "max"
+      }
     },
     {
       "key": "hdong",

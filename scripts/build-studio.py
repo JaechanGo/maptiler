@@ -8,7 +8,7 @@
 기동:  python3 scripts/build-studio.py            # http://localhost:8090
        BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
 """
-import json, os, pathlib, queue, subprocess, threading, time, re
+import json, os, pathlib, queue, subprocess, threading, time, re, ssl, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import style_objects
 
@@ -46,6 +46,26 @@ def save_versions(v):
 
 def load_builds():
     return _load_json(DIST / "builds.json", [])
+
+def _norm(x):
+    return re.sub(r"\D", "", str(x or ""))   # 기준일 비교용 — 숫자만(202605 vs 2026-06-18 호환)
+
+def fetch_latest(source):
+    """레지스트리의 latest_check(url/regex/pick)로 외부 페이지에서 최신 기준일 추출. 실패 시 None.
+    URL/정규식은 신뢰된 data-sources.json 출처라 사용자 입력이 아님(SSRF 무관)."""
+    lc = source.get("latest_check")
+    if not lc:
+        return None
+    url = lc.get("url") or source.get("url"); rx = lc.get("regex")
+    if not url or not rx:
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    # 공공 사이트(VWorld 등) 인증서 체인 이슈 회피 — 공개 메타데이터 조회 전용
+    html = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    vals = re.findall(rx, html)
+    if not vals:
+        return None
+    return max(vals) if lc.get("pick", "max") == "max" else vals[0]
 
 # 원천데이터 기본 경로(업로드/환경변수로 덮어쓸 수 있음)
 SRC_JUSO = os.environ.get("SRC_JUSO", "/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
@@ -312,8 +332,8 @@ class H(BaseHTTPRequestHandler):
                 v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
                 status = "unknown"
                 if cur and lat:
-                    status = "update" if str(lat) > str(cur) else "current"
-                out.append({**s, "current": cur, "latest": lat,
+                    status = "update" if _norm(lat) > _norm(cur) else "current"
+                out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
                             "checked_at": v.get("checked_at"), "status": status})
             return self._json({"sources": out})
         if self.path == "/api/download/bundle":
@@ -356,6 +376,23 @@ class H(BaseHTTPRequestHandler):
                 rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
             save_versions(ver)
             return self._json({"ok": True, key: rec})
+        if self.path == "/api/sources/check":   # 외부 출처에서 최신 기준일 자동조회(latest_check 설정 시)
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            key = (json.loads(self.rfile.read(n) or "{}")).get("key")
+            src = next((s for s in load_sources() if s["key"] == key), None)
+            if not src: return self._json({"error": "알 수 없는 key"}, 400)
+            if not src.get("latest_check"): return self._json({"error": "자동조회 미지원 출처(수동 입력)"}, 400)
+            try:
+                latest = fetch_latest(src)
+            except Exception as e:
+                return self._json({"error": f"조회 실패: {e}"}, 502)
+            if not latest:
+                return self._json({"error": "최신 기준일을 찾지 못함(패턴 불일치/사이트 변경)"}, 404)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            rec["latest"] = latest; rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+            save_versions(ver)
+            return self._json({"ok": True, "key": key, "latest": latest})
         if self.path == "/api/upload":
             return self._upload()
         if self.path == "/api/style":
@@ -524,11 +561,14 @@ function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
   $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:7px 0;border-bottom:1px solid var(--bd)">
    <div>· <b>${s.name}</b> <span class=chip>${s.category}</span> <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a></div>
    <div style="font-size:11px;margin-top:3px">현재 <b>${s.current||'−'}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
-    · 최신 <b>${s.latest||'−'}</b> <a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>
+    · 최신 <b>${s.latest||'−'}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)" style="cursor:pointer;color:var(--ac)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>`}
     · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div></div>`).join('');});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}
+function checkLatest(key,a){if(a)a.textContent='조회중…';
+  fetch('/api/sources/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{
+   if(d.error)alert('최신 조회 실패: '+d.error); loadSources();}).catch(e=>{alert('실패: '+e);loadSources();});}
 function gb(n){return (n/1073741824).toFixed(2)+'GB';}
 function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
   const c=d.current_bundle||{};
