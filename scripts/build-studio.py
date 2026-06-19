@@ -555,6 +555,13 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .up a{color:var(--ac);text-decoration:underline;cursor:pointer}
  .ds{font-size:12px;color:var(--mut);overflow-wrap:anywhere} .ds b{color:var(--tx);font-weight:500} .ds a{white-space:nowrap}
  .chip{display:inline-block;white-space:nowrap;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
+ .src{background:#10192b;border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-bottom:9px}
+ .src a{color:var(--ac);cursor:pointer;white-space:nowrap}
+ .src-h{font-size:13px;line-height:1.45}
+ .src-act{margin-top:5px;font-size:12px}
+ .src-ver{margin-top:7px;padding-top:7px;border-top:1px solid #1c2438;font-size:11px;line-height:1.7}
+ .src-meta{margin-top:6px;font-size:11px}
+ .mut{color:var(--mut)}
 </style>
 <header><div style="width:9px;height:9px;border-radius:99px;background:var(--ac)"></div>
  <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
@@ -604,14 +611,11 @@ function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
   if(d.build_home)$('#bh').textContent='BUILD_HOME: '+d.build_home;
-  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:8px 0;border-bottom:1px solid var(--bd)">
-   <div>· <b>${s.name}</b> <span class=chip>${s.category}</span>
-     <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a>
-     ${s.uploadable?`<a onclick="uploadSource('${s.key}')" style="cursor:pointer;color:var(--ac)">⬆ 업로드</a>`:'<span style="color:var(--mut);font-size:11px">⬆ 업로드 미지원(오프라인 재빌드)</span>'}</div>
-   <div style="font-size:11px;margin-top:3px">현재 <b>${fmt(s.current)}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
-    · 최신 <b>${fmt(s.latest)}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)" style="cursor:pointer;color:var(--ac)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>`}
-    · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div>
-   ${s.file?`<div style="font-size:11px;color:var(--mut);margin-top:2px">📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:(s.uploadable?'<div style="font-size:11px;color:#7a4">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>':'')}</div>`).join('');});}
+  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div class=src>
+   <div class=src-h><b>${s.name}</b> <span class=chip>${s.category}</span></div>
+   <div class=src-act><a href="${s.url}" target=_blank rel=noopener>다운로드 ↗</a> · ${s.uploadable?`<a onclick="uploadSource('${s.key}')">⬆ 업로드</a>`:`<span class=mut>⬆ 업로드 미지원(오프라인 재빌드)</span>`}</div>
+   <div class=src-ver>현재 <b>${fmt(s.current)}</b> <a onclick="setVer('${s.key}','current')">[수정]</a> · 최신 <b>${fmt(s.latest)}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')">[확인]</a>`} · ${srcStatus(s)}${s.checked_at?` <span class=mut>(${s.checked_at})</span>`:''}</div>
+   ${s.file?`<div class=src-meta>📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:(s.uploadable?`<div class=src-meta style="color:#c8a24a">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>`:'')}</div>`).join('');});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}
