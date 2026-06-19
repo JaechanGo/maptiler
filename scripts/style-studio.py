@@ -31,7 +31,15 @@ VALID_KEYS = {o["key"] for o in style_objects.OBJECTS} | {g["key"] for g in styl
 def apply_style_theme(theme):
     # 유효 키 + #rrggbb + 설치된 글꼴만 통과(주입 방지) → style/theme.json → build_style → tileserver 재시작
     theme = theme or {}
-    clean = {k: v for k, v in theme.items() if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v)}
+    # 기존 theme.json 위에 병합 — 부분 저장(색만)이 fonts/zoom 을 지우지 않게
+    try:
+        clean = json.loads((ROOT / "style" / "theme.json").read_text(encoding="utf-8"))
+        if not isinstance(clean, dict): clean = {}
+    except Exception:
+        clean = {}
+    for k, v in theme.items():
+        if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v):
+            clean[k] = v
     fonts = theme.get("fonts")
     if isinstance(fonts, dict):
         avail = set(style_objects.available_fonts(str(ROOT / "style/glyphs")))
@@ -39,6 +47,9 @@ def apply_style_theme(theme):
               if (k == "all" or k in style_objects.FONT_LABELS) and isinstance(v, str) and v in avail}
         if cf:
             clean["fonts"] = cf
+    zc = style_objects.sanitize_zoom(theme.get("zoom"))   # 노출 줌(레이어 minzoom/maxzoom)
+    if zc:
+        clean["zoom"] = zc
     (ROOT / "style").mkdir(exist_ok=True)
     (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []
@@ -97,11 +108,12 @@ class H(BaseHTTPRequestHandler):
             try:
                 style = json.loads((ROOT / "style/style.json").read_text(encoding="utf-8"))
                 cur = style_objects.current_colors(style); poi = style_objects.current_poi_colors(style)
-                fonts_cur = style_objects.current_fonts(style)
+                fonts_cur = style_objects.current_fonts(style); zoom_cur = style_objects.current_zoom(style)
             except Exception:
-                cur = {}; poi = {}; fonts_cur = {}
+                cur = {}; poi = {}; fonts_cur = {}; zoom_cur = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
-                     "color": cur.get(o["key"]) or "#888888"} for o in style_objects.OBJECTS]
+                     "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {}}
+                    for o in style_objects.OBJECTS]
             groups = [{"key": g["key"], "label": g["label"], "cats": g["cats"],
                        "color": poi.get(g["key"]) or g["default"]} for g in style_objects.POI_GROUPS]
             labels = {o["key"]: o["label"] for o in style_objects.OBJECTS}
@@ -162,6 +174,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .row label{flex:1;font-size:13px}
  input[type=color]{width:36px;height:28px;border:1px solid #26304a;border-radius:6px;background:none;padding:0;cursor:pointer}
  input[type=text]{width:82px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 7px;font:12px ui-monospace,Menlo,monospace}
+ input.zn{width:42px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 6px;font:12px ui-monospace,Menlo,monospace;text-align:center}
  button{background:#5b9bd5;color:#06121f;border:0;border-radius:8px;padding:8px 15px;font-weight:600;cursor:pointer}
  button.g{background:transparent;color:#e8edf5;border:1px solid #26304a}
  .st{font-size:12px;color:#8d9bb5}
@@ -187,6 +200,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <input type=file id=impf accept=".json,application/json" style="display:none">
    <h2>객체</h2><div id=rows></div>
    <h2>시설(POI) 업종 대분류별</h2><div id=poirows></div>
+   <h2>노출 레벨(줌) · min–max</h2><div id=zoomrows></div>
    <p class=hint>색을 바꾸면 미리보기에 즉시 반영. 팔레트(색칸 클릭) 또는 #색상값 입력 모두 가능.
    <br>‘저장 & 적용’ → style.json 기록 + 타일서버 재시작(영구 반영).</p>
  </div>
@@ -194,15 +208,17 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, TPORT=8080;
+ const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, INITZ={}, TPORT=8080;
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
    OBJ=d.objects; POI=d.poi_groups||[]; PRE=d.presets||{}; POILAYER=d.poi_layer||'poi-dot'; TPORT=d.tile_port;
    $('#rows').innerHTML=OBJ.map(row).join('');
    $('#poirows').innerHTML=POI.map(row).join('');
+   $('#zoomrows').innerHTML=OBJ.map(zrow).join('');
    OBJ.forEach(o=>{ INIT[o.key]=o.color; wire(o,v=>apply(o,v)); });
    POI.forEach(o=>{ INIT[o.key]=o.color; wire(o,()=>applyPoi()); });
+   OBJ.forEach(o=>{ INITZ[o.key]={min:(o.zoom||{}).min??'',max:(o.zoom||{}).max??''}; wireZoom(o); });
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
      center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
@@ -221,12 +237,23 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    POI.forEach(g=>{ const v=$('#c_'+g.key).value; if(!g.cats||!g.cats.length){fb=v;return;} e.push(g.cats.slice(),v); });
    e.push(fb); return e; }
  function applyPoi(){ if(!map||!map.isStyleLoaded())return; try{map.setPaintProperty(POILAYER,'circle-color',poiExpr())}catch(e){} }
+ function zrow(o){const z=o.zoom||{};return `<div class=row><label>${o.label}</label>
+   <input type=number class=zn id=zmin_${o.key} min=0 max=24 placeholder=0 value="${z.min??''}">
+   <span style="color:#8d9bb5">–</span>
+   <input type=number class=zn id=zmax_${o.key} min=0 max=24 placeholder=24 value="${z.max??''}"></div>`;}
+ function wireZoom(o){['zmin_','zmax_'].forEach(p=>{const e=$('#'+p+o.key); if(e)e.oninput=()=>applyZoom(o);});}
+ function applyZoom(o){ if(!map||!map.isStyleLoaded())return;
+   const mn=$('#zmin_'+o.key).value, mx=$('#zmax_'+o.key).value, lo=mn===''?0:+mn, hi=mx===''?24:+mx;
+   o.targets.forEach(t=>{try{map.setLayerZoomRange(t[0], lo, Math.max(lo,hi))}catch(e){}}); }
+ function zoomChanged(){const z={}; OBJ.forEach(o=>{const mn=$('#zmin_'+o.key).value, mx=$('#zmax_'+o.key).value, i=INITZ[o.key]||{};
+   if(String(mn)!==String(i.min)||String(mx)!==String(i.max)) z[o.key]={min:mn===''?null:+mn, max:mx===''?null:+mx};}); return z;}
  function preset(name){ const p=PRE[name]||{};
    OBJ.forEach(o=>{ if(p[o.key]){setColor(o.key,p[o.key]); apply(o,p[o.key]);} });
    $('#status').textContent=name+' 프리셋 적용(미저장)'; }
  $('#pl').onclick=()=>preset('light'); $('#pd').onclick=()=>preset('dark');
  $('#reset').onclick=()=>{ OBJ.forEach(o=>{setColor(o.key,INIT[o.key]); apply(o,INIT[o.key]);});
-   POI.forEach(o=>setColor(o.key,INIT[o.key])); applyPoi(); };
+   POI.forEach(o=>setColor(o.key,INIT[o.key])); applyPoi();
+   OBJ.forEach(o=>{const i=INITZ[o.key]||{}; $('#zmin_'+o.key).value=i.min; $('#zmax_'+o.key).value=i.max; applyZoom(o);}); };
  $('#exp').onclick=()=>location.href='/api/style/export';
  $('#imp').onclick=()=>$('#impf').click();
  $('#impf').onchange=e=>{const f=e.target.files[0]; if(!f)return; e.target.value='';
@@ -239,6 +266,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
     }).catch(err=>$('#status').textContent='✗ 실패: '+err); };
  $('#save').onclick=()=>{
    const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value); POI.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
+   const z=zoomChanged(); if(Object.keys(z).length) theme.zoom=z;
    $('#status').textContent='적용 중…';
    post('/api/style',JSON.stringify({theme})).then(r=>r.json()).then(d=>{
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));

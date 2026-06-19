@@ -291,7 +291,11 @@ VALID_KEYS = {o["key"] for o in style_objects.OBJECTS} | {g["key"] for g in styl
 def apply_style_theme(theme):
     # 유효 키 + #rrggbb 만 통과(주입 방지) → style/theme.json 저장 → build_style → tileserver 재시작
     theme = theme or {}
-    clean = {k: v for k, v in theme.items() if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v)}
+    clean = _load_json(ROOT / "style" / "theme.json", {})   # 기존 위에 병합(부분 저장이 fonts/zoom 보존)
+    if not isinstance(clean, dict): clean = {}
+    for k, v in theme.items():
+        if k in VALID_KEYS and isinstance(v, str) and HEXRE.match(v):
+            clean[k] = v
     fonts = theme.get("fonts")
     if isinstance(fonts, dict):   # 글꼴: 설치된 글꼴 + 유효 라벨키만(없는 글꼴 지정 시 글리프 404 방지)
         avail = set(style_objects.available_fonts(str(ROOT / "style/glyphs")))
@@ -299,6 +303,9 @@ def apply_style_theme(theme):
               if (k == "all" or k in style_objects.FONT_LABELS) and isinstance(v, str) and v in avail}
         if cf:
             clean["fonts"] = cf
+    zc = style_objects.sanitize_zoom(theme.get("zoom"))
+    if zc:
+        clean["zoom"] = zc
     (ROOT / "style").mkdir(exist_ok=True)
     (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []

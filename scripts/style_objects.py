@@ -175,7 +175,59 @@ def apply_theme(style, theme):
         n += len(poi_theme)
     # 글꼴(layout text-font)
     n += apply_fonts(style, theme.get("fonts") or {})
+    # 노출 줌(레이어 minzoom/maxzoom)
+    n += apply_zoom(style, theme.get("zoom") or {})
     return n
+
+
+def apply_zoom(style, zcfg):
+    """zcfg({key:{min,max}}) → 객체 대상 레이어들의 minzoom/maxzoom 설정(None이면 해제). 반환: 적용 수."""
+    if not zcfg:
+        return 0
+    idx = _index(style); objs = {o["key"]: o for o in OBJECTS}; n = 0
+    for key, z in zcfg.items():
+        o = objs.get(key)
+        if not o or not isinstance(z, dict):
+            continue
+        for layer_id, _ in o["targets"]:
+            L = idx.get(layer_id)
+            if L is None:
+                continue
+            for prop, val in (("minzoom", z.get("min")), ("maxzoom", z.get("max"))):
+                if val is None:
+                    L.pop(prop, None)
+                else:
+                    L[prop] = val
+            n += 1
+    return n
+
+
+def sanitize_zoom(zoom):
+    """theme['zoom'] 정제(주입 방지) — 유효 객체키 + min/max(0~24 정수 또는 None)만."""
+    if not isinstance(zoom, dict):
+        return {}
+    keys = {o["key"] for o in OBJECTS}; out = {}
+    for k, z in zoom.items():
+        if k not in keys or not isinstance(z, dict):
+            continue
+        zz = {}
+        for b in ("min", "max"):
+            v = z.get(b)
+            if v is None:
+                zz[b] = None
+            elif isinstance(v, (int, float)) and 0 <= v <= 24:
+                zz[b] = int(v)
+        out[k] = zz
+    return out
+
+
+def current_zoom(style):
+    """각 객체의 현재 minzoom/maxzoom(첫 대상 레이어 기준). 미설정이면 None."""
+    idx = _index(style); out = {}
+    for o in OBJECTS:
+        L = idx.get(o["targets"][0][0], {})
+        out[o["key"]] = {"min": L.get("minzoom"), "max": L.get("maxzoom")}
+    return out
 
 
 def current_colors(style):
