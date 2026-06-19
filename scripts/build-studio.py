@@ -531,7 +531,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <style>
  :root{--bg:#0f1420;--card:#161d2c;--bd:#26304a;--mut:#8d9bb5;--tx:#e8edf5;--ac:#5b9bd5}
  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);
-   font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif}
+   font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif;word-break:keep-all}
  header{padding:16px 22px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
  h1{font-size:17px;margin:0;font-weight:600} .sub{color:var(--mut);font-size:12px}
  .wrap{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:18px;max-width:1200px;margin:0 auto}
@@ -553,8 +553,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .up:hover{border-color:var(--mut)}
  .up.drag{border-color:var(--ac);background:#0c1a2c;color:var(--tx)}
  .up a{color:var(--ac);text-decoration:underline;cursor:pointer}
- .ds{font-size:12px;color:var(--mut)} .ds b{color:var(--tx);font-weight:500}
- .chip{display:inline-block;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
+ .ds{font-size:12px;color:var(--mut);overflow-wrap:anywhere} .ds b{color:var(--tx);font-weight:500} .ds a{white-space:nowrap}
+ .chip{display:inline-block;white-space:nowrap;font-size:11px;color:#7fd1ff;background:#0c1018;border-radius:6px;padding:1px 7px;margin-left:6px}
 </style>
 <header><div style="width:9px;height:9px;border-radius:99px;background:var(--ac)"></div>
  <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
