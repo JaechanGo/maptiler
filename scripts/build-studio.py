@@ -571,8 +571,9 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   <div class=panel><h2>데이터 출처 · 업로드</h2>
    <div class=up id=dz>
     <input type=file id=fin multiple style="display:none">
-    <div style="font-size:13px"><b>드래그&드롭</b> 또는 <a id=browse>파일 선택</a></div>
-    <div style="margin-top:5px">파일명으로 출처 <b>자동 분류</b> → 해당 출처에 적재(빌드 반영)<br>여러 개 동시 · 붙여넣기(⌘V) 가능</div></div>
+    <input type=file id=fdir webkitdirectory multiple style="display:none">
+    <div style="font-size:13px"><b>드래그&드롭</b>(폴더째 가능) 또는 <a id=browse>파일</a> · <a id=browsedir>폴더</a> 선택</div>
+    <div style="margin-top:5px">파일명으로 출처 <b>자동 분류</b> → 해당 출처에 적재(빌드 반영)<br>여러 개·폴더째 · 붙여넣기(⌘V) 가능</div></div>
    <div id=sources class=ds style="margin-top:12px"></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
    <div id=builds class=ds></div></div>
@@ -655,12 +656,26 @@ function uploadFiles(files){
    loadSources();
  }).catch(e=>logln('✗ 업로드 실패: '+e));}
 const dz=$('#dz');
+// 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). 미지원 브라우저는 평문 files로 폴백.
+function gatherFiles(dt){
+ const items=dt&&dt.items;
+ if(!items||!items.length||!items[0].webkitGetAsEntry) return Promise.resolve([...((dt&&dt.files)||[])]);
+ const entries=[...items].map(it=>it.webkitGetAsEntry&&it.webkitGetAsEntry()).filter(Boolean), out=[];
+ const walk=en=>new Promise(res=>{
+   if(en.isFile) en.file(f=>{out.push(f);res();},()=>res());
+   else if(en.isDirectory){const rd=en.createReader(),acc=[];
+     (function batch(){rd.readEntries(es=>{if(!es.length){Promise.all(acc.map(walk)).then(res);return;}acc.push(...es);batch();},()=>res());})();}
+   else res();});
+ return Promise.all(entries.map(walk)).then(()=>out);
+}
 $('#browse').onclick=()=>$('#fin').click();
-dz.onclick=e=>{if(e.target.id!=='browse')$('#fin').click()};
+$('#browsedir').onclick=()=>$('#fdir').click();
+dz.onclick=e=>{if(e.target.id==='browse'||e.target.id==='browsedir')return; $('#fin').click();};
 $('#fin').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
+$('#fdir').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
 ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.add('drag')}));
 ['dragleave','dragend','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.remove('drag')}));
-dz.addEventListener('drop',e=>uploadFiles(e.dataTransfer&&e.dataTransfer.files));
+dz.addEventListener('drop',e=>gatherFiles(e.dataTransfer).then(uploadFiles));
 document.addEventListener('paste',e=>{const f=e.clipboardData&&e.clipboardData.files;if(f&&f.length)uploadFiles(f);});
 </script></html>"""
 
