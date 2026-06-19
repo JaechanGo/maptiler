@@ -534,7 +534,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif}
  header{padding:16px 22px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
  h1{font-size:17px;margin:0;font-weight:600} .sub{color:var(--mut);font-size:12px}
- .wrap{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:18px;max-width:1100px}
+ .wrap{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:18px;max-width:1200px;margin:0 auto}
  .panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
  .panel h2{font-size:13px;margin:0 0 10px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
  label.row{display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer}
@@ -567,16 +567,18 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
     <div style="font-size:13px"><b>드래그&드롭</b> 또는 <a id=browse>파일 선택</a></div>
     <div style="margin-top:5px">파일명으로 출처 <b>자동 분류</b> → 해당 출처에 적재(빌드 반영)<br>여러 개 동시 · 붙여넣기(⌘V) 가능</div></div>
    <div id=sources class=ds style="margin-top:12px"></div></div>
-  <div class=panel style="margin-top:14px"><h2>빌드 대상 (정제 체크)</h2>
+  <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
+   <div id=builds class=ds></div></div>
+ </div>
+ <div>
+  <div class=panel><h2>빌드 대상 (정제 체크)</h2>
    <div id=checks></div>
    <div style="display:flex;gap:8px;margin-top:12px">
      <button id=run>빌드 시작</button>
      <button class=ghost id=selftest>셀프테스트</button></div></div>
-  <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
-   <div id=builds class=ds></div></div>
- </div>
- <div class=panel><h2>빌드 진행률</h2><div id=cards></div>
+  <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
+ </div>
 </div>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
