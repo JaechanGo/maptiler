@@ -177,7 +177,71 @@ def apply_theme(style, theme):
     n += apply_fonts(style, theme.get("fonts") or {})
     # 노출 줌(레이어 minzoom/maxzoom)
     n += apply_zoom(style, theme.get("zoom") or {})
+    # 투명도(opacity)
+    n += apply_opacity(style, theme.get("opacity") or {})
     return n
+
+
+def _opacity_targets():
+    """투명도 편집 대상: {key,label,targets:[[layer_id,opacity_prop],...]}.
+    OBJECTS 색 prop(-color)을 opacity prop(-opacity)으로 매핑 + POI 도트(circle-opacity)."""
+    out = []
+    for o in OBJECTS:
+        props = [[lid, prop.replace("-color", "-opacity")] for lid, prop in o["targets"]]
+        out.append({"key": o["key"], "label": o["label"], "targets": props})
+    out.append({"key": "poidot", "label": "시설 도트", "targets": [[POI_LAYER, "circle-opacity"]]})
+    return out
+
+
+def opacity_objects():
+    """UI/API 용 투명도 대상 목록."""
+    return _opacity_targets()
+
+
+def apply_opacity(style, ocfg):
+    """ocfg({key:0~1}) → 대상 레이어 opacity prop 설정(None이면 해제). 반환: 적용 수."""
+    if not ocfg:
+        return 0
+    idx = _index(style); tmap = {t["key"]: t for t in _opacity_targets()}; n = 0
+    for key, v in ocfg.items():
+        t = tmap.get(key)
+        if not t:
+            continue
+        for layer_id, prop in t["targets"]:
+            L = idx.get(layer_id)
+            if L is None:
+                continue
+            if v is None:
+                L.get("paint", {}).pop(prop, None)
+            else:
+                L.setdefault("paint", {})[prop] = v
+            n += 1
+    return n
+
+
+def current_opacity(style):
+    """각 대상의 현재 opacity(첫 대상 레이어 기준). 미설정이면 1.0(완전 불투명)."""
+    idx = _index(style); out = {}
+    for t in _opacity_targets():
+        layer_id, prop = t["targets"][0]
+        v = idx.get(layer_id, {}).get("paint", {}).get(prop)
+        out[t["key"]] = float(v) if isinstance(v, (int, float)) else 1.0
+    return out
+
+
+def sanitize_opacity(opacity):
+    """theme['opacity'] 정제(주입 방지) — 유효 key + 0~1 float(또는 None)만."""
+    if not isinstance(opacity, dict):
+        return {}
+    keys = {t["key"] for t in _opacity_targets()}; out = {}
+    for k, v in opacity.items():
+        if k not in keys:
+            continue
+        if v is None:
+            out[k] = None
+        elif isinstance(v, (int, float)) and 0 <= v <= 1:
+            out[k] = round(float(v), 3)
+    return out
 
 
 def apply_zoom(style, zcfg):

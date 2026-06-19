@@ -132,7 +132,7 @@ def add_biz(db, csvdir, state):
                 except ValueError: continue
                 if not (124<=lon<=132 and 33<=lat<=39): continue
                 nm=(row.get("상호명") or "").strip()
-                if not nm: continue
+                if not nm or nm in ("업소명없음", "상호명없음", "-", "."): continue   # 원본 플레이스홀더 제외
                 biz=(row.get("상권업종소분류명") or "").strip()
                 sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip(); emd=(row.get("행정동명") or "").strip()
                 phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None

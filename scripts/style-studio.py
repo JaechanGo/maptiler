@@ -50,6 +50,9 @@ def apply_style_theme(theme):
     zc = style_objects.sanitize_zoom(theme.get("zoom"))   # 노출 줌(레이어 minzoom/maxzoom)
     if zc:
         clean["zoom"] = zc
+    oc = style_objects.sanitize_opacity(theme.get("opacity"))   # 투명도(opacity)
+    if oc:
+        clean["opacity"] = oc
     (ROOT / "style").mkdir(exist_ok=True)
     (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []
@@ -109,8 +112,9 @@ class H(BaseHTTPRequestHandler):
                 style = json.loads((ROOT / "style/style.json").read_text(encoding="utf-8"))
                 cur = style_objects.current_colors(style); poi = style_objects.current_poi_colors(style)
                 fonts_cur = style_objects.current_fonts(style); zoom_cur = style_objects.current_zoom(style)
+                opacity_cur = style_objects.current_opacity(style)
             except Exception:
-                cur = {}; poi = {}; fonts_cur = {}; zoom_cur = {}
+                cur = {}; poi = {}; fonts_cur = {}; zoom_cur = {}; opacity_cur = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {}}
                     for o in style_objects.OBJECTS]
@@ -120,7 +124,10 @@ class H(BaseHTTPRequestHandler):
             fonts = {"available": style_objects.available_fonts(str(ROOT / "style/glyphs")),
                      "current": fonts_cur,
                      "labels": [{"key": k, "label": labels.get(k, k)} for k in style_objects.FONT_LABELS]}
+            opa = [{"key": t["key"], "label": t["label"], "targets": t["targets"],
+                    "value": opacity_cur.get(t["key"], 1.0)} for t in style_objects.opacity_objects()]
             return self._json({"objects": objs, "poi_groups": groups, "fonts": fonts,
+                               "opacity_objects": opa,
                                "presets": style_objects.PRESETS, "poi_layer": style_objects.POI_LAYER,
                                "tile_port": TILE_PORT, "auth": bool(STUDIO_TOKEN)})
         if self.path == "/api/style/export":
@@ -175,6 +182,9 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  input[type=color]{width:36px;height:28px;border:1px solid #26304a;border-radius:6px;background:none;padding:0;cursor:pointer}
  input[type=text]{width:82px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 7px;font:12px ui-monospace,Menlo,monospace}
  input.zn{width:42px;background:#0a0e16;border:1px solid #26304a;color:#e8edf5;border-radius:6px;padding:5px 6px;font:12px ui-monospace,Menlo,monospace;text-align:center}
+ .oprow label{flex:0 0 92px}
+ .oprow input[type=range]{flex:1;accent-color:#5b9bd5;margin:0}
+ .opv{font:12px ui-monospace,Menlo,monospace;color:#8d9bb5;width:40px;text-align:right;flex:none}
  button{background:#5b9bd5;color:#06121f;border:0;border-radius:8px;padding:8px 15px;font-weight:600;cursor:pointer}
  button.g{background:transparent;color:#e8edf5;border:1px solid #26304a}
  .st{font-size:12px;color:#8d9bb5}
@@ -200,7 +210,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <input type=file id=impf accept=".json,application/json" style="display:none">
    <h2>객체</h2><div id=rows></div>
    <h2>시설(POI) 업종 대분류별</h2><div id=poirows></div>
-   <h2>노출 레벨(줌) · min–max</h2><div id=zoomrows></div>
+   <h2>노출 레벨(줌) · min–max <span id=zlevel style="color:#5b9bd5;font-weight:500;margin-left:4px">현재 z 14.5</span></h2><div id=zoomrows></div>
+   <h2>투명도(불투명도) %</h2><div id=oprows></div>
    <p class=hint>색을 바꾸면 미리보기에 즉시 반영. 팔레트(색칸 클릭) 또는 #색상값 입력 모두 가능.
    <br>‘저장 & 적용’ → style.json 기록 + 타일서버 재시작(영구 반영).</p>
  </div>
@@ -208,7 +219,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, INITZ={}, TPORT=8080;
+ const $=s=>document.querySelector(s); let OBJ=[], POI=[], PRE={}, POILAYER='poi-dot', map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080;
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -219,10 +230,14 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    OBJ.forEach(o=>{ INIT[o.key]=o.color; wire(o,v=>apply(o,v)); });
    POI.forEach(o=>{ INIT[o.key]=o.color; wire(o,()=>applyPoi()); });
    OBJ.forEach(o=>{ INITZ[o.key]={min:(o.zoom||{}).min??'',max:(o.zoom||{}).max??''}; wireZoom(o); });
+   $('#oprows').innerHTML=(OPA=d.opacity_objects||[]).map(orow).join('');
+   OPA.forEach(o=>{ INITO[o.key]=Math.round((o.value==null?1:o.value)*100); wireOpacity(o); });
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
      center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
    map.addControl(new maplibregl.NavigationControl());
+   const zl=()=>{const e=$('#zlevel'); if(e)e.textContent='현재 z '+map.getZoom().toFixed(1);};
+   map.on('zoom',zl); map.on('load',zl);
  }).catch(e=>$('#status').textContent='객체 로드 실패: '+e);
  function row(o){return `<div class=row><label>${o.label}</label>
    <input type=text id=h_${o.key} value="${o.color}" maxlength=7 spellcheck=false>
@@ -247,13 +262,25 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    o.targets.forEach(t=>{try{map.setLayerZoomRange(t[0], lo, Math.max(lo,hi))}catch(e){}}); }
  function zoomChanged(){const z={}; OBJ.forEach(o=>{const mn=$('#zmin_'+o.key).value, mx=$('#zmax_'+o.key).value, i=INITZ[o.key]||{};
    if(String(mn)!==String(i.min)||String(mx)!==String(i.max)) z[o.key]={min:mn===''?null:+mn, max:mx===''?null:+mx};}); return z;}
+ function orow(o){const p=Math.round((o.value==null?1:o.value)*100);return `<div class="row oprow" id=or_${o.key}><label>${o.label}</label>
+   <input type=range class=op id=o_${o.key} min=0 max=100 step=1 value="${p}">
+   <span class=opv id=ov_${o.key}>${p}%</span></div>`;}
+ function wireOpacity(o){const e=$('#o_'+o.key); if(e)e.oninput=()=>applyOpacity(o);}
+ function applyOpacity(o){ const e=$('#o_'+o.key); if(!e)return; const v=+e.value; const r=$('#ov_'+o.key); if(r)r.textContent=v+'%';
+   if(!map||!map.isStyleLoaded())return;
+   o.targets.forEach(t=>{try{map.setPaintProperty(t[0],t[1],v/100)}catch(e){}}); }
+ function opacityChanged(){const o={}; OPA.forEach(x=>{const p=+$('#o_'+x.key).value; if(p!==INITO[x.key]) o[x.key]=p/100;}); return o;}
  function preset(name){ const p=PRE[name]||{};
    OBJ.forEach(o=>{ if(p[o.key]){setColor(o.key,p[o.key]); apply(o,p[o.key]);} });
    $('#status').textContent=name+' 프리셋 적용(미저장)'; }
  $('#pl').onclick=()=>preset('light'); $('#pd').onclick=()=>preset('dark');
- $('#reset').onclick=()=>{ OBJ.forEach(o=>{setColor(o.key,INIT[o.key]); apply(o,INIT[o.key]);});
-   POI.forEach(o=>setColor(o.key,INIT[o.key])); applyPoi();
-   OBJ.forEach(o=>{const i=INITZ[o.key]||{}; $('#zmin_'+o.key).value=i.min; $('#zmax_'+o.key).value=i.max; applyZoom(o);}); };
+ $('#reset').onclick=()=>{
+   OBJ.forEach(o=>setColor(o.key,INIT[o.key]));
+   POI.forEach(o=>setColor(o.key,INIT[o.key]));
+   OBJ.forEach(o=>{const i=INITZ[o.key]||{}; $('#zmin_'+o.key).value=i.min??''; $('#zmax_'+o.key).value=i.max??'';});
+   OPA.forEach(o=>{const e=$('#o_'+o.key); if(e){e.value=INITO[o.key]; const r=$('#ov_'+o.key); if(r)r.textContent=INITO[o.key]+'%';}});
+   map.setStyle(`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,{diff:false});
+   $('#status').textContent='되돌림 — 서버 스타일 다시 로드'; };
  $('#exp').onclick=()=>location.href='/api/style/export';
  $('#imp').onclick=()=>$('#impf').click();
  $('#impf').onchange=e=>{const f=e.target.files[0]; if(!f)return; e.target.value='';
@@ -267,8 +294,14 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  $('#save').onclick=()=>{
    const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value); POI.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
    const z=zoomChanged(); if(Object.keys(z).length) theme.zoom=z;
+   const op=opacityChanged(); if(Object.keys(op).length) theme.opacity=op;
    $('#status').textContent='적용 중…';
    post('/api/style',JSON.stringify({theme})).then(r=>r.json()).then(d=>{
+     if(d.ok){  // 적용 성공 → 현재값을 새 기준선으로(되돌리기 일관성)
+       OBJ.forEach(o=>INIT[o.key]=$('#c_'+o.key).value); POI.forEach(o=>INIT[o.key]=$('#c_'+o.key).value);
+       OBJ.forEach(o=>{INITZ[o.key]={min:$('#zmin_'+o.key).value,max:$('#zmax_'+o.key).value};});
+       OPA.forEach(o=>{INITO[o.key]=+$('#o_'+o.key).value;});
+     }
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
    }).catch(e=>$('#status').textContent='✗ 실패: '+e);
  };
