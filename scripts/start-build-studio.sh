@@ -25,7 +25,7 @@ if os.fork() > 0: os._exit(0)          # 1차 fork
 os.setsid()                            # 새 세션 리더(프로세스그룹 분리)
 if os.fork() > 0: os._exit(0)          # 2차 fork → 세션리더 아님(터미널 재획득 방지)
 f = open(log, "a"); os.dup2(f.fileno(), 1); os.dup2(f.fileno(), 2)
-os.dup2(open(os.devnull).fileno(), 0)
+dn = open(os.devnull); os.dup2(dn.fileno(), 0)   # 참조 유지(익명 open은 GC로 fd 닫힘→EBADF)
 sys.argv = ["build-studio.py"]
 runpy.run_path(script, run_name="__main__")
 PY

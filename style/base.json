@@ -2,6 +2,7 @@
   "version": 8,
   "name": "CUVIA Base (Dark)",
   "glyphs": "{fontstack}/{range}.pbf",
+  "sprite": "{styleJsonFolder}/sprite",
   "sources": {
     "openmaptiles": {
       "type": "vector",

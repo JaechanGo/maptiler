@@ -8,7 +8,7 @@
 기동:  python3 scripts/build-studio.py            # http://localhost:8090
        BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
 """
-import json, os, pathlib, queue, subprocess, threading, time, re, ssl, urllib.request
+import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -20,10 +20,11 @@ COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-co
 # 기본은 로컬 전용(127.0.0.1). 외부 노출이 필요할 때만 HOST=0.0.0.0 으로 명시. 인증이 없으므로
 # 0.0.0.0 바인딩 시 같은 LAN의 누구나 빌드 실행/업로드가 가능함을 운영자가 인지해야 함.
 HOST = os.environ.get("HOST", "127.0.0.1")
-MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD", str(1024**3)))   # 업로드 본문 상한(기본 1GB) — 초과 413
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
+# 업로드는 raw 바디 스트리밍(청크→디스크)이라 용량 상한 없음 — 대용량 내비DB/건물DB 웹 업로드 지원.
 DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
-DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # 출처별 현재/최신 기준일·파일·이력
+DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON — 최초 1회 DB로 마이그레이션 후 .bak 보존
+DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
 SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
 
@@ -43,11 +44,220 @@ def _load_json(p, default):
 def load_sources():
     return _load_json(SOURCES_FILE, {}).get("sources", [])
 
+# ── 업로드 이력·버전·검증 상태(통합 sqlite) ───────────────────────────
+SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS sources_state(
+  key TEXT PRIMARY KEY, current TEXT, latest TEXT, checked_at TEXT,
+  file TEXT, staged_sig TEXT,
+  validation_status TEXT, validation_msg TEXT, validated_at TEXT);
+CREATE TABLE IF NOT EXISTS upload_history(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, file TEXT, period TEXT,
+  size INTEGER, uploaded_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_hist_key ON upload_history(key, id DESC);
+"""
+_STATE_COLS = ("current", "latest", "checked_at", "file", "staged_sig",
+               "validation_status", "validation_msg", "validated_at")
+_DB_READY = False
+_DB_LOCK = threading.Lock()
+
+
+def _migrate_versions_once(conn):
+    """(구) data-versions.json → DB 최초 1회 이전. json 은 .bak 로 보존."""
+    if conn.execute("SELECT 1 FROM sources_state LIMIT 1").fetchone():
+        return
+    if not DATA_VERSIONS.is_file():
+        return
+    for key, rec in (_load_json(DATA_VERSIONS, {}) or {}).items():
+        conn.execute("INSERT OR REPLACE INTO sources_state(key,current,latest,checked_at,file,staged_sig) "
+                     "VALUES(?,?,?,?,?,?)",
+                     (key, rec.get("current"), rec.get("latest"), rec.get("checked_at"),
+                      rec.get("file"), rec.get("staged_sig")))
+        for h in (rec.get("history") or []):
+            conn.execute("INSERT INTO upload_history(key,file,period,size,uploaded_at) VALUES(?,?,?,?,?)",
+                         (key, h.get("file"), h.get("period"), h.get("size"), h.get("uploaded_at")))
+    conn.commit()
+    try:
+        DATA_VERSIONS.rename(str(DATA_VERSIONS) + ".bak")
+    except Exception:
+        pass
+
+
+def _db():
+    global _DB_READY
+    BUILD_HOME.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    if not _DB_READY:
+        with _DB_LOCK:
+            if not _DB_READY:
+                conn.executescript(SCHEMA_DDL)
+                _migrate_versions_once(conn)
+                _DB_READY = True
+    return conn
+
+
 def load_versions():
-    return _load_json(DATA_VERSIONS, {})
+    """전 출처 상태(현재/최신/검증/staged_sig)+이력(최근10)을 nested dict 로 — 기존 호출부 호환."""
+    c = _db(); out = {}
+    try:
+        for row in c.execute(f"SELECT key,{','.join(_STATE_COLS)} FROM sources_state"):
+            out[row[0]] = {col: val for col, val in zip(_STATE_COLS, row[1:]) if val is not None}
+        for key, file, period, size, uat in c.execute(
+                "SELECT key,file,period,size,uploaded_at FROM upload_history ORDER BY id DESC LIMIT 400"):
+            h = out.setdefault(key, {}).setdefault("history", [])
+            if len(h) < 10:
+                h.append({"file": file, "period": period, "size": size, "uploaded_at": uat})
+    finally:
+        c.close()
+    return out
+
 
 def save_versions(v):
-    DATA_VERSIONS.write_text(json.dumps(v, ensure_ascii=False, indent=2), encoding="utf-8")
+    """상태 컬럼만 upsert(이력은 _record_upload 가 관리). rec 는 load_versions 산출이라 기존값 보존."""
+    c = _db()
+    try:
+        sets = ",".join(f"{col}=excluded.{col}" for col in _STATE_COLS)
+        for key, rec in (v or {}).items():
+            c.execute(f"INSERT INTO sources_state(key,{','.join(_STATE_COLS)}) "
+                      f"VALUES(?,{','.join(['?'] * len(_STATE_COLS))}) "
+                      f"ON CONFLICT(key) DO UPDATE SET {sets}",
+                      [key] + [rec.get(col) for col in _STATE_COLS])
+        c.commit()
+    finally:
+        c.close()
+
+
+def _record_upload(key, name, size):
+    """업로드 1파일 → 이력 append + 상태(file/current) 갱신 + 검증상태 pending 리셋. period 반환."""
+    period = _period_from_name(name)
+    c = _db()
+    try:
+        c.execute("INSERT INTO upload_history(key,file,period,size,uploaded_at) VALUES(?,?,?,?,?)",
+                  (key, name, period, size, time.strftime("%Y-%m-%d %H:%M")))
+        c.execute("INSERT INTO sources_state(key,file,current,validation_status) VALUES(?,?,?, 'pending') "
+                  "ON CONFLICT(key) DO UPDATE SET file=excluded.file, "
+                  "current=COALESCE(excluded.current, sources_state.current), "
+                  "validation_status='pending', validation_msg=NULL, validated_at=NULL",
+                  (key, name, period or None))
+        c.commit()
+    finally:
+        c.close()
+    return period
+
+
+def _set_validation(key, status, msg):
+    c = _db()
+    try:
+        c.execute("INSERT INTO sources_state(key,validation_status,validation_msg,validated_at) "
+                  "VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                  "validation_status=excluded.validation_status, validation_msg=excluded.validation_msg, "
+                  "validated_at=excluded.validated_at",
+                  (key, status, msg, time.strftime("%Y-%m-%d %H:%M")))
+        c.commit()
+    finally:
+        c.close()
+
+
+# ── 업로드 데이터 경량 검증(구조·핵심 컬럼만 — 압축 central directory + 헤더 1줄만 읽어 GB급도 수초) ──
+def _split_hdr(line):
+    return [c.strip().strip('"').strip() for c in (line or "").rstrip("\r\n").split(",")]
+
+
+def _zip_csv_members(path):
+    with zipfile.ZipFile(path) as z:
+        return [n for n in z.namelist() if n.lower().endswith(".csv")]
+
+
+def _zip_header(path, member, encoding):
+    with zipfile.ZipFile(path) as z, z.open(member) as fp:
+        return fp.readline().decode(encoding, "replace")
+
+
+def _v_sangga(files):
+    need = {"상호명", "경도", "위도"}
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    csvs = [f for f in files if f.suffix.lower() == ".csv"]
+    if zips:
+        mem = _zip_csv_members(zips[0])
+        if not mem:
+            return ("fail", "zip 안에 CSV가 없습니다")
+        miss = need - set(_split_hdr(_zip_header(zips[0], mem[0], "utf-8-sig")))
+        return ("ok" if not miss else "warn", f"zip · CSV {len(mem)}개" + ("" if not miss else f" · 컬럼 누락 {sorted(miss)}"))
+    if csvs:
+        with open(csvs[0], encoding="utf-8-sig", errors="replace") as f:
+            miss = need - set(_split_hdr(f.readline()))
+        return ("ok" if not miss else "warn", f"CSV {len(csvs)}개" + ("" if not miss else f" · 컬럼 누락 {sorted(miss)}"))
+    return ("fail", "zip 또는 CSV가 필요합니다")
+
+
+def _v_localdata(files):
+    need = {"사업장명"}; coord = {"좌표정보(X)", "좌표정보(Y)"}
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    csvs = [f for f in files if f.suffix.lower() == ".csv"]
+
+    def judge(cols, ncsv, tag):
+        ok = (need <= cols) and bool(coord & cols)
+        return ("ok" if ok else "warn", f"{tag} · CSV {ncsv}개" + ("" if ok else " · 컬럼 확인필요(사업장명/좌표정보)"))
+    if zips:
+        mem = _zip_csv_members(zips[0])
+        if not mem:
+            return ("fail", "zip 안에 CSV가 없습니다")
+        return judge(set(_split_hdr(_zip_header(zips[0], mem[0], "cp949"))), len(mem), "zip")
+    if csvs:
+        with open(csvs[0], encoding="cp949", errors="replace") as f:
+            return judge(set(_split_hdr(f.readline())), len(csvs), "폴더")
+    return ("fail", "zip 또는 CSV가 필요합니다")
+
+
+def _v_navi(files):
+    z7 = [f for f in files if f.suffix.lower() == ".7z"]
+    mb = [f for f in files if f.name.lower().startswith("match_build")]
+    if z7:
+        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not tool:
+            return ("warn", ".7z 업로드됨 — 7z 미설치로 내용검증 생략(빌드 시 추출)")
+        try:
+            r = subprocess.run([tool, "l", str(z7[0])], capture_output=True, text=True, timeout=180)
+            cnt = len(set(re.findall(r"match_build_\w+\.txt", r.stdout)))
+        except Exception as e:
+            return ("warn", f".7z (목록 확인 실패: {str(e)[:60]})")
+        return ("ok" if cnt else "warn", f".7z · match_build {cnt}개 시도" if cnt else ".7z지만 match_build_*.txt 미발견")
+    if mb:
+        return ("ok", f"match_build_*.txt {len(mb)}개")
+    return ("fail", ".7z 또는 match_build_*.txt 가 필요합니다")
+
+
+def _v_building(files):
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    shps = [f for f in files if f.suffix.lower() == ".shp"]
+    if zips:
+        tot = 0
+        for z in zips:
+            try:
+                with zipfile.ZipFile(z) as zf:
+                    tot += len([n for n in zf.namelist() if n.lower().endswith(".shp")])
+            except Exception:
+                return ("warn", f"zip {len(zips)}개 (일부 열기 실패)")
+        return ("ok" if tot else "warn", f"zip {len(zips)}개 · shp {tot}개" if tot else f"zip {len(zips)}개지만 .shp 없음")
+    if shps:
+        return ("ok", f"shp {len(shps)}개")
+    return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
+
+
+_VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building}
+
+
+def _validate_source(key):
+    sdir = SOURCES_DIR / key
+    files = sorted((f for f in sdir.rglob("*") if f.is_file()), key=lambda p: str(p)) if sdir.is_dir() else []
+    if not files:
+        return ("fail", "업로드된 파일이 없습니다")
+    fn = _VALIDATORS.get(key)
+    if not fn:
+        return ("warn", f"{len(files)}개 파일(검증기 미정의)")
+    try:
+        return fn(files)
+    except Exception as e:
+        return ("fail", f"검증 오류: {str(e)[:120]}")
 
 def load_builds():
     return _load_json(DIST / "builds.json", [])
@@ -93,30 +303,15 @@ def _nonempty_dir(p):
     return p.is_dir() and any(p.iterdir())
 
 
-def detect_key(name):
-    """파일명으로 업로드 가능한 출처 key 추정(불명확하면 None) — 일반 드래그&드롭 자동 분류용."""
-    n = (name or "").lower()
-    if "내비" in name or "navi" in n or n.endswith(".7z"): return "juso_navi"
-    if "상가" in name: return "sangga"
-    if "인허가" in name or "localdata" in n: return "localdata"
-    if "건물" in name or "gis" in n or n.endswith(".shp") or n.endswith(".zip"): return "building_db"
-    return None
-
-
-def _save_source_file(key, name, data):
-    """업로드 파일을 sources/<key>/ 에 저장 + data-versions.json 에 기준일·이력 기록. period 반환."""
-    sdir = SOURCES_DIR / key; sdir.mkdir(parents=True, exist_ok=True)
-    dest = sdir / name
-    with open(dest, "wb") as o: o.write(data)
-    period = _period_from_name(name)
-    ver = load_versions(); rec = ver.setdefault(key, {})
-    entry = {"file": name, "period": period, "size": dest.stat().st_size,
-             "uploaded_at": time.strftime("%Y-%m-%d %H:%M")}
-    rec["file"] = name
-    if period: rec["current"] = period
-    rec["history"] = ([entry] + [h for h in rec.get("history", []) if h.get("file") != name])[:10]
-    save_versions(ver)
-    return period
+def _safe_relpath(name):
+    """업로드 상대경로 정규화 — 폴더 구조(서브디렉토리) 보존 + 경로조작(.. /절대경로) 차단."""
+    parts = []
+    for seg in (name or "").replace("\\", "/").split("/"):
+        seg = seg.strip()
+        if seg in ("", ".", ".."):
+            continue
+        parts.append(seg)
+    return "/".join(parts)
 
 
 def prepare_sources(keys=None):
@@ -131,11 +326,11 @@ def prepare_sources(keys=None):
             continue
         key = s["key"]; dest = BUILD_HOME / bi["dest"]
         srcdir = SOURCES_DIR / key
-        files = sorted((f for f in srcdir.glob("*") if f.is_file()), key=lambda p: p.name) if srcdir.is_dir() else []
+        files = sorted((f for f in srcdir.rglob("*") if f.is_file()), key=lambda p: str(p)) if srcdir.is_dir() else []
         if not files:   # 업로드 없음 → 기존 staged 있으면 재사용(직접 배치 포함)
             report.append({"key": key, "action": "reused" if _nonempty_dir(dest) else "missing", "dest": str(dest)})
             continue
-        sig = ";".join(f"{f.name}:{f.stat().st_size}" for f in files)   # 업로드 집합 변경 시에만 재적재
+        sig = ";".join(f"{f.relative_to(srcdir)}:{f.stat().st_size}" for f in files)   # 업로드 집합 변경 시에만 재적재
         rec = ver.get(key, {})
         if rec.get("staged_sig") == sig and _nonempty_dir(dest):
             report.append({"key": key, "action": "ok", "n": len(files), "dest": str(dest)})
@@ -157,8 +352,9 @@ def prepare_sources(keys=None):
                     r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(f)], capture_output=True, text=True, timeout=3600)
                     if r.returncode != 0: errs.append(f"{f.name}: {(r.stderr or '')[-80:]}")
                     else: n += 1
-                else:
-                    shutil.copy2(f, dest / f.name); n += 1
+                else:   # 폴더 업로드(서브디렉토리 포함) 구조 보존 복사 — localdata 대분류 폴더 등
+                    rel = f.relative_to(srcdir); (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest / rel); n += 1
             ver.setdefault(key, {})["staged_sig"] = sig; save_versions(ver)
             action = "staged" if (n and not errs) else ("partial" if n else "error")
             report.append({"key": key, "action": action, "n": n, "dest": str(dest),
@@ -195,7 +391,6 @@ def TARGETS():
                  "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082"]),
         "package": dict(label="폐쇄망 번들 패키징", dep=None,
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
-        "__selftest__": dict(label="셀프테스트(가짜 진행률)", dep=None, cmd=None),
     }
 
 CANON = ["localdata", "geocode", "buildings", "poi", "qc", "package"]
@@ -263,7 +458,7 @@ class Manager:
             if not t or k in plan: continue
             plan.add(k)
             if t["dep"] and t["dep"] in T: stack.append(t["dep"])
-        ordered = [k for k in CANON if k in plan] + [k for k in plan if k == "__selftest__"]
+        ordered = [k for k in CANON if k in plan]
         # jobs 변형은 subscribe()의 스냅샷과 같은 lock으로 보호(동시 SSE 연결 중 dict 크기변경 크래시 방지).
         # 이미 queued/running 인 kind는 재적재하지 않음(중복 동시 실행 방지). publish/work.put은 lock 밖에서.
         started = []
@@ -293,22 +488,17 @@ class Manager:
         j = self.jobs[kind]; j["status"] = "running"
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
-            if kind == "__selftest__":
-                for i in range(1, 21):
-                    time.sleep(0.25); j["progress"] = i/20
-                    self._emit(kind, f"  셀프테스트 진행 {i*5}% …")
-            else:
-                cmd = TARGETS()[kind]["cmd"]
-                self._emit(kind, "$ " + " ".join(cmd))
-                # PYTHONUNBUFFERED=1 — 파이썬 자식이 파이프로 출력 시 블록버퍼링되어 진행률이
-                # 종료 시점에 몰리는 것을 막아 라인 단위 라이브 스트리밍을 보장.
-                env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, bufsize=1, cwd=str(ROOT), env=env)
-                for line in p.stdout:
-                    self._emit(kind, line.rstrip("\n"))
-                rc = p.wait()
-                if rc != 0: raise RuntimeError(f"종료코드 {rc}")
+            cmd = TARGETS()[kind]["cmd"]
+            self._emit(kind, "$ " + " ".join(cmd))
+            # PYTHONUNBUFFERED=1 — 파이썬 자식이 파이프로 출력 시 블록버퍼링되어 진행률이
+            # 종료 시점에 몰리는 것을 막아 라인 단위 라이브 스트리밍을 보장.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1, cwd=str(ROOT), env=env)
+            for line in p.stdout:
+                self._emit(kind, line.rstrip("\n"))
+            rc = p.wait()
+            if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
         except Exception as e:
             j["status"] = "error"; self._emit(kind, f"[오류] {e}")
@@ -373,7 +563,9 @@ class H(BaseHTTPRequestHandler):
                 out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
                             "uploadable": bool(s.get("build_input")),
                             "checked_at": v.get("checked_at"), "status": status,
-                            "file": v.get("file"), "history": v.get("history", [])})
+                            "file": v.get("file"), "history": v.get("history", []),
+                            "validation": v.get("validation_status"), "validation_msg": v.get("validation_msg"),
+                            "validated_at": v.get("validated_at")})
             return self._json({"sources": out, "build_home": str(BUILD_HOME)})
         if self.path == "/api/download/bundle":
             p = DIST / "cuvia-map-bundle.tgz"
@@ -400,7 +592,7 @@ class H(BaseHTTPRequestHandler):
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
             targets = body.get("targets", [])
-            prep = [] if "__selftest__" in targets else prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
+            prep = prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
             ordered = MGR.enqueue(targets)
             return self._json({"queued": ordered, "prepared": prep})
         if self.path == "/api/sources/version":   # 출처 기준일 수동 등록/갱신(현재/최신)
@@ -434,78 +626,47 @@ class H(BaseHTTPRequestHandler):
             rec["latest"] = latest; rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
             save_versions(ver)
             return self._json({"ok": True, "key": key, "latest": latest})
-        if self.path == "/api/upload":
-            return self._upload()
         if self.path.startswith("/api/sources/upload"):
-            return self._upload_source()
+            return self._upload_stream()
+        if self.path == "/api/sources/validate":   # 업로드 데이터 경량 검증(구조·핵심 컬럼)
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            key = (json.loads(self.rfile.read(n) or "{}")).get("key")
+            if key not in {s["key"] for s in load_sources()}:
+                return self._json({"error": "알 수 없는 key"}, 400)
+            status, msg = _validate_source(key)
+            _set_validation(key, status, msg)
+            return self._json({"ok": True, "key": key, "status": status, "msg": msg})
         self.send_error(404)
 
-    def _upload(self):
-        # 드래그&드롭 일반 업로드 — 파일명으로 출처 자동 분류 → sources/<key>/ 적재(빌드 입력). 무의존 multipart 파서.
-        ctype = self.headers.get("Content-Type", "")
-        m = re.search(r"boundary=([^;]+)", ctype)
-        if "multipart/form-data" not in ctype or not m:
-            return self._json({"error": "multipart 필요"}, 400)
-        boundary = b"--" + m.group(1).strip().strip('"').encode()
-        n = int(self.headers.get("Content-Length", "0"))
-        if n > MAX_UPLOAD:   # 메모리 고갈 방지 — 대용량 원천(내비DB/SHP, 수 GB)은 BUILD_HOME 경로 지정 권장
-            return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과 — 대용량은 BUILD_HOME에 직접 배치"}, 413)
-        body = self.rfile.read(n)
-        srcmap = {s["key"]: s for s in load_sources()}
-        saved = []                              # 한 요청에 여러 파일 파트(name="file")를 모두 자동 분류 적재
-        for part in body.split(boundary):
-            if b'name="file"' not in part: continue
-            idx = part.find(b"\r\n\r\n")
-            if idx < 0: continue
-            head = part[:idx].decode("utf-8", "replace")
-            data = part[idx+4:]
-            if data.endswith(b"\r\n"): data = data[:-2]
-            fm = re.search(r'filename="([^"]*)"', head)
-            if not fm or not fm.group(1): continue
-            name = os.path.basename(fm.group(1))   # 경로조작 차단
-            if not name: continue
-            key = detect_key(name)
-            src = srcmap.get(key) if key else None
-            if not src or not src.get("build_input"):   # 자동인식 실패 → 수동 업로드 안내
-                saved.append({"file": name, "error": "출처 자동인식 실패 — ‘데이터 출처’에서 수동 업로드"})
-                continue
-            period = _save_source_file(key, name, data)
-            saved.append({"file": name, "key": key, "source": src["name"], "period": period})
-        if not saved: return self._json({"error": "파일 파트 없음"}, 400)
-        return self._json({"files": saved})
-
-    def _upload_source(self):
-        # 출처별 업로드 — sources/<key>/ 에 저장 + 기준일(파일명) 기록 + 이력. ?key=<source>
-        import urllib.parse as _up
-        key = _up.parse_qs(_up.urlparse(self.path).query).get("key", [""])[0]
+    def _upload_stream(self):
+        # 출처별 raw 바디 스트리밍 업로드 — ?key=<출처>&name=<상대경로>. 청크→디스크(용량 상한 없음, 폴더는 파일당 1요청).
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        key = (q.get("key") or [""])[0]
+        rel = _safe_relpath((q.get("name") or [""])[0])
         srcmap = {s["key"]: s for s in load_sources()}
         if key not in srcmap:
             return self._json({"error": "알 수 없는 key"}, 400)
         if not srcmap[key].get("build_input"):
-            return self._json({"error": "이 출처는 업로드 미지원 — 변환은 오프라인 재빌드(02·osm-from-mbtiles)로 반영"}, 400)
-        ctype = self.headers.get("Content-Type", "")
-        m = re.search(r"boundary=([^;]+)", ctype)
-        if "multipart/form-data" not in ctype or not m:
-            return self._json({"error": "multipart 필요"}, 400)
-        boundary = b"--" + m.group(1).strip().strip('"').encode()
+            return self._json({"error": "이 출처는 업로드 미지원"}, 400)
+        if not rel:
+            return self._json({"error": "파일명(name) 누락"}, 400)
+        dest = SOURCES_DIR / key / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
         n = int(self.headers.get("Content-Length", "0"))
-        if n > MAX_UPLOAD:
-            return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과"}, 413)
-        body = self.rfile.read(n)
-        sdir = SOURCES_DIR / key; sdir.mkdir(parents=True, exist_ok=True)
-        for part in body.split(boundary):
-            if b'name="file"' not in part: continue
-            idx = part.find(b"\r\n\r\n")
-            if idx < 0: continue
-            head = part[:idx].decode("utf-8", "replace"); data = part[idx+4:]
-            if data.endswith(b"\r\n"): data = data[:-2]
-            fm = re.search(r'filename="([^"]*)"', head)
-            if not fm or not fm.group(1): continue
-            name = os.path.basename(fm.group(1))
-            if not name: continue
-            period = _save_source_file(key, name, data)
-            return self._json({"ok": True, "key": key, "file": name, "period": period})
-        return self._json({"error": "파일 파트 없음"}, 400)
+        written = 0
+        try:
+            with open(dest, "wb") as o:
+                remaining = n
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    o.write(chunk); remaining -= len(chunk); written += len(chunk)
+        except Exception as e:
+            return self._json({"error": f"저장 실패: {str(e)[:120]}"}, 500)
+        period = _record_upload(key, rel, written)
+        return self._json({"ok": True, "key": key, "file": rel, "size": written, "period": period})
 
     def _sse(self):
         self.send_response(200)
@@ -577,12 +738,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <div class=wrap>
  <div>
   <div class=panel><h2>데이터 출처 · 업로드</h2>
-   <div class=up id=dz>
-    <input type=file id=fin multiple style="display:none">
-    <input type=file id=fdir webkitdirectory multiple style="display:none">
-    <div style="font-size:13px"><b>드래그&드롭</b>(폴더째 가능) 또는 <a id=browse>파일</a> · <a id=browsedir>폴더</a> 선택</div>
-    <div style="margin-top:5px">파일명으로 출처 <b>자동 분류</b> → 해당 출처에 적재(빌드 반영)<br>여러 개·폴더째 · 붙여넣기(⌘V) 가능</div></div>
-   <div id=sources class=ds style="margin-top:12px"></div></div>
+   <div class=sub style="font-size:12px;color:var(--mut);margin-bottom:10px;line-height:1.6">출처별로 <b>zip 또는 폴더</b>를 업로드하면 자동 검증 후 빌드합니다. 용량 제한 없음(대용량 스트리밍). 카드에 <b>드래그&드롭</b>도 가능.</div>
+   <div id=sources class=ds></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
    <div id=builds class=ds></div></div>
  </div>
@@ -590,8 +747,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   <div class=panel><h2>빌드 대상 (정제 체크)</h2>
    <div id=checks></div>
    <div style="display:flex;gap:8px;margin-top:12px">
-     <button id=run>빌드 시작</button>
-     <button class=ghost id=selftest>셀프테스트</button></div></div>
+     <button id=run>빌드 시작</button></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
  </div>
@@ -601,7 +757,7 @@ const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
 fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
-  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${['geocode','poi','qc'].includes(t.kind)?'checked':''}> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
+  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" checked> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
 });
 function card(kind,label){if(cards[kind])return;const el=document.createElement('div');el.className='tcard';
  el.innerHTML=`<div class=h><span>${label||kind}</span><span class=st id=st_${kind}>대기</span></div><div class=bar><i id=bar_${kind}></i></div>`;
@@ -618,26 +774,58 @@ es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.status==='done')loadBuilds();};
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
+function vbadge(s){if(!s.uploadable)return '';
+  const m={ok:'🟢 검증 OK',warn:'🟡 검증 경고',fail:'🔴 검증 실패',pending:'⏳ 검증 대기'},v=s.validation;
+  const lab=v?(m[v]||v):(s.file?'⏳ 검증 대기':'<span class=mut>미업로드</span>');
+  const btn=s.file?` <a onclick="validateSource('${s.key}')">[${v&&v!=='pending'?'재검증':'검증'}]</a>`:'';
+  return `<div class=src-meta>${lab}${s.validation_msg?` · <span class=mut>${s.validation_msg}</span>`:''}${btn}</div>`;}
+let SRC=[];
 function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
   if(d.build_home)$('#bh').textContent='BUILD_HOME: '+d.build_home;
-  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div class=src>
+  SRC=d.sources||[];
+  $('#sources').innerHTML=SRC.map(s=>`<div class=src ${s.uploadable?`data-key="${s.key}"`:''}>
    <div class=src-h><b>${s.name}</b> <span class=chip>${s.category}</span></div>
-   <div class=src-act><a href="${s.url}" target=_blank rel=noopener>다운로드 ↗</a> · ${s.uploadable?`<a onclick="uploadSource('${s.key}')">⬆ 업로드</a>`:`<span class=mut>⬆ 업로드 미지원(오프라인 재빌드)</span>`}</div>
+   <div class=src-act><a href="${s.url}" target=_blank rel=noopener>다운로드 ↗</a>${s.uploadable?` · <a onclick="pickFiles('${s.key}',false)">⬆ 파일/zip</a> · <a onclick="pickFiles('${s.key}',true)">📁 폴더</a> <span class=mut>· 드롭 가능</span>`:` · <span class=mut>업로드 미지원(오프라인 재빌드)</span>`}</div>
+   ${s.uploadable?`<div class=bar id=ub_${s.key} style="display:none;margin-top:6px"><i id=ubi_${s.key}></i></div>`:''}
    <div class=src-ver>현재 <b>${fmt(s.current)}</b> <a onclick="setVer('${s.key}','current')">[수정]</a> · 최신 <b>${fmt(s.latest)}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')">[확인]</a>`} · ${srcStatus(s)}${s.checked_at?` <span class=mut>(${s.checked_at})</span>`:''}</div>
-   ${s.file?`<div class=src-meta>📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:(s.uploadable?`<div class=src-meta style="color:#c8a24a">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>`:'')}</div>`).join('');});}
+   ${s.file?`<div class=src-meta>📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:''}
+   ${vbadge(s)}</div>`).join('');
+  bindDrops();});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}
 function checkLatest(key,a){if(a)a.textContent='조회중…';
   fetch('/api/sources/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{
    if(d.error)alert('최신 조회 실패: '+d.error); loadSources();}).catch(e=>{alert('실패: '+e);loadSources();});}
-function uploadSource(key){const inp=document.createElement('input');inp.type='file';
-  inp.onchange=()=>{const f=inp.files[0];if(!f)return;const fd=new FormData();fd.append('file',f);
-    logln('⇧ '+key+' 업로드: '+f.name+' …');
-    fetch('/api/sources/upload?key='+encodeURIComponent(key),{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-      if(d.error)logln('✗ '+d.error); else logln('✓ '+key+' ← '+d.file+(d.period?' (기준일 '+d.period+')':''));
-      loadSources();}).catch(e=>logln('✗ 업로드 실패: '+e));};
-  inp.click();}
+function pickFiles(key,dir){const inp=document.createElement('input');inp.type='file';inp.multiple=true;
+  if(dir)inp.webkitdirectory=true;
+  inp.onchange=()=>{const fs=[...inp.files];if(fs.length)uploadAll(key,fs);};inp.click();}
+function relName(f){const r=f._rel||f.webkitRelativePath||'';const p=r.split('/').filter(Boolean);
+  return p.length>1?p.slice(1).join('/'):f.name;}   // 폴더 업로드 시 선택폴더명(첫 세그먼트) 제거 → 내부구조 보존
+function setUbar(key,p){const b=$('#ub_'+key),i=$('#ubi_'+key);if(b){b.style.display='';i.style.width=Math.round(p*100)+'%';}}
+function upOne(key,f){return new Promise((res,rej)=>{const x=new XMLHttpRequest();
+  x.open('POST','/api/sources/upload?key='+encodeURIComponent(key)+'&name='+encodeURIComponent(relName(f)));
+  x.upload.onprogress=e=>{if(e.lengthComputable)setUbar(key,e.loaded/e.total);};
+  x.onload=()=>{try{const d=JSON.parse(x.responseText);d.error?rej(d.error):res(d);}catch(_){rej('응답오류 '+x.status);}};
+  x.onerror=()=>rej('네트워크 오류');x.send(f);});}
+async function uploadAll(key,files){if(!files.length)return;
+  const total=files.reduce((a,f)=>a+(f.size||0),0)||1;
+  logln('⇧ '+key+' 업로드 '+files.length+'개 ('+gb(total)+') …');
+  let done=0,doneB=0;
+  for(const f of files){try{await upOne(key,f);}catch(e){logln('  ✗ '+relName(f)+' — '+e);}
+    done++;doneB+=(f.size||0);setUbar(key,doneB/total);}
+  logln('  ✓ '+key+' 업로드 완료 ('+done+'/'+files.length+') — 검증 중…');
+  await validateSource(key,true);setUbar(key,1);
+  setTimeout(()=>{const b=$('#ub_'+key);if(b)b.style.display='none';},900);loadSources();}
+function validateSource(key,quiet){return fetch('/api/sources/validate',{method:'POST',body:JSON.stringify({key})})
+  .then(r=>r.json()).then(d=>{if(d.error){logln('✗ '+key+' 검증 실패: '+d.error);return;}
+    const ic={ok:'🟢',warn:'🟡',fail:'🔴'}[d.status]||'•';
+    logln(ic+' '+key+' 검증: '+d.status+(d.msg?' — '+d.msg:''));if(!quiet)loadSources();})
+  .catch(e=>logln('✗ '+key+' 검증 오류: '+e));}
+function bindDrops(){document.querySelectorAll('.src[data-key]').forEach(el=>{const key=el.getAttribute('data-key');
+  ['dragenter','dragover'].forEach(ev=>el.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.style.borderColor='var(--ac)';}));
+  ['dragleave','dragend','drop'].forEach(ev=>el.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.style.borderColor='';}));
+  el.addEventListener('drop',e=>gatherFiles(e.dataTransfer).then(fs=>uploadAll(key,fs)));});}
 function gb(n){return (n/1073741824).toFixed(2)+'GB';}
 function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
   const c=d.current_bundle||{};
@@ -646,45 +834,28 @@ function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
    <b>${b.version}</b> · ${(b.built_at||'').replace('T',' ').slice(0,16)} · ${gb(b.bundle_bytes||0)}${b.git?' · '+b.git:''}${b.qc?' · QC '+b.qc:''}</div>`).join('')||'<i>이력 없음</i>';
   $('#builds').innerHTML=`<div style="margin-bottom:8px">${dl}</div>${rows}`;});}
 loadSources(); loadBuilds();
+const TSRC={localdata:['localdata'],geocode:['juso_navi','sangga','localdata'],buildings:['building_db']};
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('대상을 선택하세요');
+ const need=new Set();t.forEach(k=>(TSRC[k]||[]).forEach(s=>need.add(s)));
+ const byKey=Object.fromEntries(SRC.map(s=>[s.key,s]));
+ [...need].forEach(k=>{const s=byKey[k];if(s&&s.validation!=='ok')logln('⚠ '+(s.name||k)+' 검증 '+(s.validation||'안 됨')+' — 그대로 빌드(경고)');});
  const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음',partial:'⚠ 일부만 적재(오류)','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
  fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
    (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
    logln('▶ 큐: '+d.queued.join(', '));loadSources();});};
-$('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));
-function uploadFiles(files){
- const fs=[...(files||[])]; if(!fs.length)return;
- const fd=new FormData(); fs.forEach(f=>fd.append('file',f));
- logln('⇧ 업로드('+fs.length+'): '+fs.map(f=>f.name).join(', '));
- fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-   if(d.error)return logln('✗ '+d.error);
-   (d.files||[]).forEach(x=> x.error ? logln('⚠ '+x.file+' — '+x.error)
-     : logln('✓ '+x.source+' ← '+x.file+(x.period?' (기준일 '+x.period+')':'')));
-   loadSources();
- }).catch(e=>logln('✗ 업로드 실패: '+e));}
-const dz=$('#dz');
-// 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). 미지원 브라우저는 평문 files로 폴백.
+// 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;
  if(!items||!items.length||!items[0].webkitGetAsEntry) return Promise.resolve([...((dt&&dt.files)||[])]);
  const entries=[...items].map(it=>it.webkitGetAsEntry&&it.webkitGetAsEntry()).filter(Boolean), out=[];
  const walk=en=>new Promise(res=>{
-   if(en.isFile) en.file(f=>{out.push(f);res();},()=>res());
+   if(en.isFile) en.file(f=>{try{f._rel=en.fullPath;}catch(_){}out.push(f);res();},()=>res());
    else if(en.isDirectory){const rd=en.createReader(),acc=[];
      (function batch(){rd.readEntries(es=>{if(!es.length){Promise.all(acc.map(walk)).then(res);return;}acc.push(...es);batch();},()=>res());})();}
    else res();});
  return Promise.all(entries.map(walk)).then(()=>out);
 }
-$('#browse').onclick=()=>$('#fin').click();
-$('#browsedir').onclick=()=>$('#fdir').click();
-dz.onclick=e=>{if(e.target.id==='browse'||e.target.id==='browsedir')return; $('#fin').click();};
-$('#fin').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
-$('#fdir').onchange=e=>{uploadFiles(e.target.files);e.target.value='';};
-['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.add('drag')}));
-['dragleave','dragend','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();dz.classList.remove('drag')}));
-dz.addEventListener('drop',e=>gatherFiles(e.dataTransfer).then(uploadFiles));
-document.addEventListener('paste',e=>{const f=e.clipboardData&&e.clipboardData.files;if(f&&f.length)uploadFiles(f);});
 </script></html>"""
 
 
