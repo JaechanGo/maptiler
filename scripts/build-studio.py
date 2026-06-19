@@ -24,6 +24,28 @@ MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD", str(1024**3)))   # 업로드 본�
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
 UPLOADS = BUILD_HOME / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
+DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
+DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # 출처별 현재/최신 기준일(수동·향후 API)
+SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
+
+
+def _load_json(p, default):
+    try:
+        return json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+def load_sources():
+    return _load_json(SOURCES_FILE, {}).get("sources", [])
+
+def load_versions():
+    return _load_json(DATA_VERSIONS, {})
+
+def save_versions(v):
+    DATA_VERSIONS.write_text(json.dumps(v, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_builds():
+    return _load_json(DIST / "builds.json", [])
 
 # 원천데이터 기본 경로(업로드/환경변수로 덮어쓸 수 있음)
 SRC_JUSO = os.environ.get("SRC_JUSO", "/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
@@ -279,6 +301,36 @@ class H(BaseHTTPRequestHandler):
             for f in sorted(UPLOADS.glob("*")):
                 ds.append({"name": f.name, "size": f.stat().st_size})
             return self._json({"datasets": ds, "build_home": str(BUILD_HOME)})
+        if self.path == "/api/builds":
+            p = DIST / "cuvia-map-bundle.tgz"
+            cur = {"exists": p.is_file(), "size": (p.stat().st_size if p.is_file() else 0)}
+            return self._json({"builds": load_builds(), "current_bundle": cur, "dist": str(DIST)})
+        if self.path == "/api/sources":
+            ver = load_versions()
+            out = []
+            for s in load_sources():
+                v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
+                status = "unknown"
+                if cur and lat:
+                    status = "update" if str(lat) > str(cur) else "current"
+                out.append({**s, "current": cur, "latest": lat,
+                            "checked_at": v.get("checked_at"), "status": status})
+            return self._json({"sources": out})
+        if self.path == "/api/download/bundle":
+            p = DIST / "cuvia-map-bundle.tgz"
+            if not p.is_file():
+                return self.send_error(404)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition", 'attachment; filename="cuvia-map-bundle.tgz"')
+            self.send_header("Content-Length", str(p.stat().st_size)); self.end_headers()
+            with open(p, "rb") as f:                       # 청크 스트리밍(3GB도 메모리 적재 X)
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk: break
+                    try: self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError): break
+            return
         if self.path == "/api/events":
             return self._sse()
         self.send_error(404)
@@ -290,6 +342,20 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or "{}")
             ordered = MGR.enqueue(body.get("targets", []))
             return self._json({"queued": ordered})
+        if self.path == "/api/sources/version":   # 출처 기준일 수동 등록/갱신(현재/최신)
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or "{}")
+            key = b.get("key"); field = b.get("field"); val = (b.get("value") or "").strip()
+            valid = {s["key"] for s in load_sources()}
+            if key not in valid or field not in ("current", "latest"):
+                return self._json({"error": "잘못된 key/field"}, 400)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            rec[field] = val
+            if field == "latest":
+                rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M")
+            save_versions(ver)
+            return self._json({"ok": True, key: rec})
         if self.path == "/api/upload":
             return self._upload()
         if self.path == "/api/style":
@@ -423,6 +489,10 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div style="display:flex;gap:8px;margin-top:12px">
      <button id=run>빌드 시작</button>
      <button class=ghost id=selftest>셀프테스트</button></div></div>
+  <div class=panel style="margin-top:14px"><h2>데이터 출처 &amp; 버전</h2>
+   <div id=sources class=ds></div></div>
+  <div class=panel style="margin-top:14px"><h2>빌드 이력</h2>
+   <div id=builds class=ds></div></div>
  </div>
  <div class=panel><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
@@ -447,7 +517,26 @@ function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHe
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);return}
- setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);};
+ setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
+ if(d.status==='done')loadBuilds();};
+function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
+function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
+  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:7px 0;border-bottom:1px solid var(--bd)">
+   <div>· <b>${s.name}</b> <span class=chip>${s.category}</span> <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a></div>
+   <div style="font-size:11px;margin-top:3px">현재 <b>${s.current||'−'}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
+    · 최신 <b>${s.latest||'−'}</b> <a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>
+    · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div></div>`).join('');});}
+function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
+  if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
+   .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}
+function gb(n){return (n/1073741824).toFixed(2)+'GB';}
+function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
+  const c=d.current_bundle||{};
+  const dl=c.exists?`<a href="/api/download/bundle" style="color:var(--ac)">⬇ 현재 번들 다운로드 (${gb(c.size)})</a>`:'<i>번들 없음 — 빌드/패키징을 먼저</i>';
+  const rows=(d.builds||[]).map(b=>`<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--bd)">
+   <b>${b.version}</b> · ${(b.built_at||'').replace('T',' ').slice(0,16)} · ${gb(b.bundle_bytes||0)}${b.git?' · '+b.git:''}${b.qc?' · QC '+b.qc:''}</div>`).join('')||'<i>이력 없음</i>';
+  $('#builds').innerHTML=`<div style="margin-bottom:8px">${dl}</div>${rows}`;});}
+loadSources(); loadBuilds();
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('대상을 선택하세요'); fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>logln('▶ 큐: '+d.queued.join(', ')));};
 $('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));

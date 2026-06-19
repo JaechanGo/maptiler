@@ -1,0 +1,59 @@
+{
+  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio의 '데이터 출처/버전' 패널이 사용. period_fmt=기준일 형식(YYYYMM 등). url은 다운로드/신청 페이지. 최신성 자동조회는 latest_api 채우면 활성(미설정 시 수동).",
+  "sources": [
+    {
+      "key": "juso_addr",
+      "name": "도로명주소 DB (주소·위치정보)",
+      "category": "주소",
+      "url": "https://business.juso.go.kr/addrlink/main.do",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "note": "도로명주소·지번·건물 위치(내비DB 원천)"
+    },
+    {
+      "key": "sangga",
+      "name": "소상공인시장진흥공단 상가(상권)정보",
+      "category": "상가",
+      "url": "https://www.data.go.kr/data/15083033/fileData.do",
+      "period_fmt": "YYYYMM",
+      "cycle": "분기",
+      "note": "상호·업종(POI/상가)"
+    },
+    {
+      "key": "localdata",
+      "name": "LOCALDATA 인허가 전체분",
+      "category": "인허가",
+      "url": "https://www.localdata.go.kr/",
+      "period_fmt": "YYYYMMDD",
+      "cycle": "일",
+      "note": "지자체 인허가(업소) 전체분"
+    },
+    {
+      "key": "building_db",
+      "name": "GIS건물통합정보 (건물DB 전체분)",
+      "category": "건물",
+      "url": "https://www.data.go.kr/tcs/dss/selectDataSetList.do?keyword=GIS%EA%B1%B4%EB%AC%BC%ED%86%B5%ED%95%A9%EC%A0%95%EB%B3%B4",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "note": "건물 외곽·층수(3D 건물). data.go.kr / 국가공간정보포털"
+    },
+    {
+      "key": "hdong",
+      "name": "행정동 경계 (행정구역)",
+      "category": "경계",
+      "url": "http://data.nsdi.go.kr/",
+      "period_fmt": "YYYYMM",
+      "cycle": "수시",
+      "note": "국가공간정보포털 행정경계(동 라벨)"
+    },
+    {
+      "key": "osm",
+      "name": "OpenStreetMap (남한)",
+      "category": "OSM",
+      "url": "https://download.geofabrik.de/asia/south-korea.html",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "일",
+      "note": "도로·수계·POI 보강 (geofabrik south-korea-latest)"
+    }
+  ]
+}

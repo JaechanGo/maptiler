@@ -126,6 +126,34 @@ tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 rm -rf "$STAGE"
+
+# 빌드 버전관리 — 매니페스트를 builds.json(최근 50건)에 추가. Build Studio '빌드 이력'이 읽음.
+DIST="$DIST" BUILD_HOME="$BUILD_HOME" \
+  VER="$(date +%Y%m%d-%H%M%S)" AT="$(date -Iseconds 2>/dev/null || date)" \
+  SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')" \
+  python3 - <<'PY' || echo "  (매니페스트 기록 건너뜀)"
+import json, os
+dist = os.environ["DIST"]
+idx = os.path.join(dist, "builds.json")
+def sz(p): return os.path.getsize(p) if os.path.exists(p) else 0
+# 현재 데이터 기준일 스냅샷(있으면)
+dv = os.path.join(os.environ.get("BUILD_HOME", ""), "data-versions.json")
+srcs = {}
+if os.path.exists(dv):
+    try: srcs = {k: v.get("current") for k, v in json.load(open(dv)).items() if v.get("current")}
+    except Exception: pass
+entry = {"version": os.environ["VER"], "built_at": os.environ["AT"], "git": os.environ["SHA"],
+         "bundle_bytes": sz(os.path.join(dist, "cuvia-map-bundle.tgz")),
+         "images_bytes": sz(os.path.join(dist, "images.tar")), "sources": srcs}
+builds = []
+if os.path.exists(idx):
+    try: builds = json.load(open(idx))
+    except Exception: builds = []
+builds.insert(0, entry)
+json.dump(builds[:50], open(idx, "w"), ensure_ascii=False, indent=2)
+print(f"  매니페스트: {entry['version']} → {idx}")
+PY
+
 ls -lh "$DIST"
 if [ -n "${SKIP_IMAGES:-}" ]; then
   echo "반입 대상: $DIST/cuvia-map-bundle.tgz  (이미지는 서버에서 docker compose pull)"
