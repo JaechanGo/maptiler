@@ -25,8 +25,15 @@ MAX_CTRL = 256 * 1024                                           # 제어 API(JSO
 UPLOADS = BUILD_HOME / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
 DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
-DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # 출처별 현재/최신 기준일(수동·향후 API)
+DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # 출처별 현재/최신 기준일·파일·이력
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
+SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
+
+
+def _period_from_name(name):
+    """파일명에서 기준일 추출 — 20260618 / 202605 우선. 예: 202605_내비게이션용DB_전체분.7z → 202605"""
+    m = re.search(r"(?<!\d)(\d{8}|\d{6})(?!\d)", name or "")
+    return m.group(1) if m else ""
 
 
 def _load_json(p, default):
@@ -56,13 +63,22 @@ def fetch_latest(source):
     lc = source.get("latest_check")
     if not lc:
         return None
-    url = lc.get("url") or source.get("url"); rx = lc.get("regex")
-    if not url or not rx:
+    url = lc.get("url") or source.get("url")
+    if not url or (lc.get("type") != "json" and not lc.get("regex")):
         return None
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,*/*"})
     # 공공 사이트(VWorld 등) 인증서 체인 이슈 회피 — 공개 메타데이터 조회 전용
-    html = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
-    vals = re.findall(rx, html)
+    body = urllib.request.urlopen(req, timeout=20, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    if lc.get("type") == "json":   # JSON API — json_path(점표기) 리스트에서 filter 후 field 추출
+        node = json.loads(body)
+        for seg in (lc.get("json_path") or "").split("."):
+            node = node.get(seg, {}) if isinstance(node, dict) else {}
+        rows = node if isinstance(node, list) else []
+        flt = lc.get("filter") or {}
+        vals = [str(r.get(lc["field"])) for r in rows
+                if isinstance(r, dict) and r.get(lc["field"]) and all(r.get(k) == v for k, v in flt.items())]
+    else:
+        vals = re.findall(lc.get("regex", ""), body)
     if not vals:
         return None
     return max(vals) if lc.get("pick", "max") == "max" else vals[0]
@@ -331,10 +347,12 @@ class H(BaseHTTPRequestHandler):
             for s in load_sources():
                 v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
                 status = "unknown"
-                if cur and lat:
-                    status = "update" if _norm(lat) > _norm(cur) else "current"
+                if cur and lat:   # 공통 정밀도로 비교(YYYYMM vs YYYYMMDD 동월 오판 방지)
+                    a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
+                    status = ("update" if b[:k] > a[:k] else "current") if k else "unknown"
                 out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
-                            "checked_at": v.get("checked_at"), "status": status})
+                            "checked_at": v.get("checked_at"), "status": status,
+                            "file": v.get("file"), "history": v.get("history", [])})
             return self._json({"sources": out})
         if self.path == "/api/download/bundle":
             p = DIST / "cuvia-map-bundle.tgz"
@@ -395,6 +413,8 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "key": key, "latest": latest})
         if self.path == "/api/upload":
             return self._upload()
+        if self.path.startswith("/api/sources/upload"):
+            return self._upload_source()
         if self.path == "/api/style":
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -443,6 +463,45 @@ class H(BaseHTTPRequestHandler):
             saved.append({"saved": name, "size": dest.stat().st_size, "detected": detect(name)})
         if not saved: return self._json({"error": "파일 파트 없음"}, 400)
         return self._json({"files": saved})
+
+    def _upload_source(self):
+        # 출처별 업로드 — sources/<key>/ 에 저장 + 기준일(파일명) 기록 + 이력. ?key=<source>
+        import urllib.parse as _up
+        key = _up.parse_qs(_up.urlparse(self.path).query).get("key", [""])[0]
+        if key not in {s["key"] for s in load_sources()}:
+            return self._json({"error": "알 수 없는 key"}, 400)
+        ctype = self.headers.get("Content-Type", "")
+        m = re.search(r"boundary=([^;]+)", ctype)
+        if "multipart/form-data" not in ctype or not m:
+            return self._json({"error": "multipart 필요"}, 400)
+        boundary = b"--" + m.group(1).strip().strip('"').encode()
+        n = int(self.headers.get("Content-Length", "0"))
+        if n > MAX_UPLOAD:
+            return self._json({"error": f"업로드 상한 {MAX_UPLOAD//1024//1024}MB 초과"}, 413)
+        body = self.rfile.read(n)
+        sdir = SOURCES_DIR / key; sdir.mkdir(parents=True, exist_ok=True)
+        for part in body.split(boundary):
+            if b'name="file"' not in part: continue
+            idx = part.find(b"\r\n\r\n")
+            if idx < 0: continue
+            head = part[:idx].decode("utf-8", "replace"); data = part[idx+4:]
+            if data.endswith(b"\r\n"): data = data[:-2]
+            fm = re.search(r'filename="([^"]*)"', head)
+            if not fm or not fm.group(1): continue
+            name = os.path.basename(fm.group(1))
+            if not name: continue
+            dest = sdir / name
+            with open(dest, "wb") as o: o.write(data)
+            period = _period_from_name(name)
+            ver = load_versions(); rec = ver.setdefault(key, {})
+            entry = {"file": name, "period": period, "size": dest.stat().st_size,
+                     "uploaded_at": time.strftime("%Y-%m-%d %H:%M")}
+            rec["file"] = name
+            if period: rec["current"] = period
+            rec["history"] = ([entry] + [h for h in rec.get("history", []) if h.get("file") != name])[:10]
+            save_versions(ver)
+            return self._json({"ok": True, "key": key, "file": name, "period": period})
+        return self._json({"error": "파일 파트 없음"}, 400)
 
     def _sse(self):
         self.send_response(200)
@@ -556,19 +615,30 @@ es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);return}
  setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
  if(d.status==='done')loadBuilds();};
+function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function loadSources(){fetch('/api/sources').then(r=>r.json()).then(d=>{
-  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:7px 0;border-bottom:1px solid var(--bd)">
-   <div>· <b>${s.name}</b> <span class=chip>${s.category}</span> <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a></div>
-   <div style="font-size:11px;margin-top:3px">현재 <b>${s.current||'−'}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
-    · 최신 <b>${s.latest||'−'}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)" style="cursor:pointer;color:var(--ac)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>`}
-    · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div></div>`).join('');});}
+  $('#sources').innerHTML=(d.sources||[]).map(s=>`<div style="padding:8px 0;border-bottom:1px solid var(--bd)">
+   <div>· <b>${s.name}</b> <span class=chip>${s.category}</span>
+     <a href="${s.url}" target=_blank rel=noopener style="color:var(--ac)">다운로드 ↗</a>
+     <a onclick="uploadSource('${s.key}')" style="cursor:pointer;color:var(--ac)">⬆ 업로드</a></div>
+   <div style="font-size:11px;margin-top:3px">현재 <b>${fmt(s.current)}</b> <a onclick="setVer('${s.key}','current')" style="cursor:pointer;color:var(--ac)">[수정]</a>
+    · 최신 <b>${fmt(s.latest)}</b> ${s.auto?`<a onclick="checkLatest('${s.key}',this)" style="cursor:pointer;color:var(--ac)">[최신 조회]</a>`:`<a onclick="setVer('${s.key}','latest')" style="cursor:pointer;color:var(--ac)">[확인]</a>`}
+    · ${srcStatus(s)}${s.checked_at?` <span style="color:var(--mut)">(${s.checked_at})</span>`:''}</div>
+   ${s.file?`<div style="font-size:11px;color:var(--mut);margin-top:2px">📄 ${s.file}${(s.history&&s.history.length>1)?` · 이력 ${s.history.length}`:''}</div>`:'<div style="font-size:11px;color:#7a4">⚠ 업로드 안 됨 — 빌드 시 직전 데이터 사용</div>'}</div>`).join('');});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadSources();});}
 function checkLatest(key,a){if(a)a.textContent='조회중…';
   fetch('/api/sources/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{
    if(d.error)alert('최신 조회 실패: '+d.error); loadSources();}).catch(e=>{alert('실패: '+e);loadSources();});}
+function uploadSource(key){const inp=document.createElement('input');inp.type='file';
+  inp.onchange=()=>{const f=inp.files[0];if(!f)return;const fd=new FormData();fd.append('file',f);
+    logln('⇧ '+key+' 업로드: '+f.name+' …');
+    fetch('/api/sources/upload?key='+encodeURIComponent(key),{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+      if(d.error)logln('✗ '+d.error); else logln('✓ '+key+' ← '+d.file+(d.period?' (기준일 '+d.period+')':''));
+      loadSources();}).catch(e=>logln('✗ 업로드 실패: '+e));};
+  inp.click();}
 function gb(n){return (n/1073741824).toFixed(2)+'GB';}
 function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
   const c=d.current_bundle||{};
