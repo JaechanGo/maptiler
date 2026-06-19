@@ -125,7 +125,7 @@ def add_biz(db, csvdir, state):
     # 소상공인 상가(상권)정보 CSV(시도별) → kind='biz'. 경도/위도 이미 WGS84.
     import csv, glob
     pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
-    for path in sorted(glob.glob(os.path.join(csvdir,"*.csv"))):
+    for path in sorted(glob.glob(os.path.join(csvdir,"**","*.csv"), recursive=True)):
         with open(path, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
                 try: lon=float(row.get("경도") or 0); lat=float(row.get("위도") or 0)

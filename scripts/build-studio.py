@@ -120,41 +120,49 @@ def _save_source_file(key, name, data):
 
 
 def prepare_sources(keys=None):
-    """업로드한 출처 파일(sources/<key>/)을 빌드 입력 경로(build_input.dest)로 적재.
-    zip=stdlib 추출 / 7z=CLI(있으면) / 그외=복사. 새 업로드가 없으면 기존 staged 재사용(직전 데이터)."""
+    """sources/<key>/ 의 '모든' 업로드 파일을 build_input.dest 로 적재(누적).
+    확장자별: .zip=stdlib 추출 / .7z=CLI(있으면) / 그외(.csv·.txt·.shp 등)=복사.
+    업로드가 없으면 기존 staged 재사용(직전 빌드분 또는 BUILD_HOME 직접 배치 데이터)."""
     import shutil, zipfile
     ver = load_versions(); report = []
     for s in load_sources():
         bi = s.get("build_input")
         if not bi or (keys is not None and s["key"] not in keys):
             continue
-        key = s["key"]; rec = ver.get(key, {})
-        dest = BUILD_HOME / bi["dest"]; fname = rec.get("file")
-        src = (SOURCES_DIR / key / fname) if fname else None
-        if not src or not src.is_file():   # 업로드 없음 → 기존 staged 있으면 재사용
+        key = s["key"]; dest = BUILD_HOME / bi["dest"]
+        srcdir = SOURCES_DIR / key
+        files = sorted((f for f in srcdir.glob("*") if f.is_file()), key=lambda p: p.name) if srcdir.is_dir() else []
+        if not files:   # 업로드 없음 → 기존 staged 있으면 재사용(직접 배치 포함)
             report.append({"key": key, "action": "reused" if _nonempty_dir(dest) else "missing", "dest": str(dest)})
             continue
-        if rec.get("staged_file") == fname and _nonempty_dir(dest):   # 이미 적재됨
-            report.append({"key": key, "action": "ok", "file": fname, "dest": str(dest)})
+        sig = ";".join(f"{f.name}:{f.stat().st_size}" for f in files)   # 업로드 집합 변경 시에만 재적재
+        rec = ver.get(key, {})
+        if rec.get("staged_sig") == sig and _nonempty_dir(dest):
+            report.append({"key": key, "action": "ok", "n": len(files), "dest": str(dest)})
             continue
         try:
-            ex = bi.get("extract")
-            if ex in ("zip", "7z"):
-                shutil.rmtree(dest, ignore_errors=True); dest.mkdir(parents=True, exist_ok=True)
-                if ex == "zip":
-                    with zipfile.ZipFile(src) as z: z.extractall(dest)
-                else:
-                    tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+            shutil.rmtree(dest, ignore_errors=True); dest.mkdir(parents=True, exist_ok=True)
+            tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+            n = 0; errs = []
+            for f in files:
+                ext = f.suffix.lower()
+                if ext == ".zip":
+                    try:
+                        with zipfile.ZipFile(f) as z: z.extractall(dest); n += 1
+                    except Exception as e:
+                        errs.append(f"{f.name}: zip {str(e)[:50]}")
+                elif ext == ".7z":
                     if not tool:
-                        report.append({"key": key, "action": "no-tool", "file": fname,
-                                       "msg": "7z 추출도구 없음 — 서버에 p7zip 설치 또는 압축해제 후 배치"}); continue
-                    r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(src)], capture_output=True, text=True, timeout=3600)
-                    if r.returncode != 0:
-                        report.append({"key": key, "action": "error", "msg": (r.stderr or "")[-200:]}); continue
-            else:
-                dest.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest / fname)
-            ver.setdefault(key, {})["staged_file"] = fname; save_versions(ver)
-            report.append({"key": key, "action": "staged", "file": fname, "dest": str(dest)})
+                        errs.append(f"{f.name}: 7z 도구 없음(p7zip 설치 또는 압축해제 후 배치)"); continue
+                    r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(f)], capture_output=True, text=True, timeout=3600)
+                    if r.returncode != 0: errs.append(f"{f.name}: {(r.stderr or '')[-80:]}")
+                    else: n += 1
+                else:
+                    shutil.copy2(f, dest / f.name); n += 1
+            ver.setdefault(key, {})["staged_sig"] = sig; save_versions(ver)
+            action = "staged" if (n and not errs) else ("partial" if n else "error")
+            report.append({"key": key, "action": action, "n": n, "dest": str(dest),
+                           "msg": "; ".join(errs)[:200] if errs else None})
         except Exception as e:
             report.append({"key": key, "action": "error", "msg": str(e)[:200]})
     return report
@@ -172,7 +180,7 @@ def TARGETS():
     return {
         "localdata": dict(label="인허가 정제 (LOCALDATA→상가포맷)", dep=None,
             cmd=[py, str(ROOT/"scripts/11-build-localdata.py"), SRC_LOCALDATA,
-                 str(BUILD_HOME/"localdata/localdata_clean.csv")]),
+                 str(BUILD_HOME/"poi-all/localdata_clean.csv")]),   # 09가 읽는 poi-all 에 직접 출력(geocoder 반영)
         "geocode": dict(label="통합 지오코딩 인덱스", dep="localdata",
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
@@ -640,9 +648,9 @@ function loadBuilds(){fetch('/api/builds').then(r=>r.json()).then(d=>{
 loadSources(); loadBuilds();
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('대상을 선택하세요');
- const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
+ const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음',partial:'⚠ 일부만 적재(오류)','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
  fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
-   (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.file?' ('+p.file+')':'')+(p.msg?' — '+p.msg:'')));
+   (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
    logln('▶ 큐: '+d.queued.join(', '));loadSources();});};
 $('#selftest').onclick=()=>fetch('/api/build',{method:'POST',body:JSON.stringify({targets:['__selftest__']})}).then(r=>r.json()).then(d=>logln('▶ '+d.queued.join(', ')));
 function uploadFiles(files){
