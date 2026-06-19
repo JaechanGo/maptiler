@@ -1,0 +1,25 @@
+{
+  "_comment": "인허가 지역별 전체분 — file.localdata.go.kr. 전체=all_path, 시·도별=region_path(orgCode). localdata '인허가정보_지역별' 버튼 data-download-url 확정값(2026-06 캡처). 다운로드 host 는 한국 IP 필요(해외/데이터센터 차단).",
+  "base": "https://file.localdata.go.kr",
+  "all_path": "/file/download-all",
+  "region_path": "/file/download-all?orgCode={orgCode}_ALL",
+  "regions": [
+    {"orgCode": "6110000", "name": "서울특별시"},
+    {"orgCode": "6260000", "name": "부산광역시"},
+    {"orgCode": "6270000", "name": "대구광역시"},
+    {"orgCode": "6280000", "name": "인천광역시"},
+    {"orgCode": "6290000", "name": "광주광역시"},
+    {"orgCode": "6300000", "name": "대전광역시"},
+    {"orgCode": "6310000", "name": "울산광역시"},
+    {"orgCode": "5690000", "name": "세종특별자치시"},
+    {"orgCode": "6410000", "name": "경기도"},
+    {"orgCode": "6530000", "name": "강원특별자치도"},
+    {"orgCode": "6430000", "name": "충청북도"},
+    {"orgCode": "6440000", "name": "충청남도"},
+    {"orgCode": "6540000", "name": "전북특별자치도"},
+    {"orgCode": "6460000", "name": "전라남도"},
+    {"orgCode": "6470000", "name": "경상북도"},
+    {"orgCode": "6480000", "name": "경상남도"},
+    {"orgCode": "6500000", "name": "제주특별자치도"}
+  ]
+}

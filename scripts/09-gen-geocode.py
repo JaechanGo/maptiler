@@ -128,7 +128,10 @@ def add_biz(db, csvdir, state):
     import csv, glob
     pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
     for path in sorted(glob.glob(os.path.join(csvdir,"**","*.csv"), recursive=True)):
-        src = 'localdata' if os.path.basename(path)=='localdata_clean.csv' else 'sangga'   # 출처 구분(파일명)
+        base = os.path.basename(path)   # 출처·종류 구분(파일명)
+        if base == 'facility_clean.csv': src, kind = 'facility', 'facility'   # 생활편의시설 — biz 와 분리 적재
+        elif base == 'localdata_clean.csv': src, kind = 'localdata', 'biz'
+        else: src, kind = 'sangga', 'biz'
         with open(path, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
                 try: lon=float(row.get("경도") or 0); lat=float(row.get("위도") or 0)
@@ -142,7 +145,7 @@ def add_biz(db, csvdir, state):
                 cat1=(row.get("상권업종대분류명") or "").strip() or None
                 cat2=(row.get("상권업종중분류명") or "").strip() or None
                 pid+=1
-                pb.append((pid,'biz',nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,None,cat1,cat2,src,0,round(lon,6),round(lat,6)))
+                pb.append((pid,kind,nm,biz,sido,sgg,emd,None,None,None,None,biz,None,None,None,phone,opened,None,cat1,cat2,src,0,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -159,7 +162,7 @@ def write_taxonomy(db, out_path):
     """biz의 대>중>소 분류 트리를 style/poi-taxonomy.json 으로 재생성(스튜디오 티어/아이콘 목록용)."""
     import collections
     tree = collections.OrderedDict(); cnt = collections.Counter()
-    q = ("SELECT cat1,cat2,subtype,count(*) c FROM places WHERE kind='biz' AND cat1 IS NOT NULL "
+    q = ("SELECT cat1,cat2,subtype,count(*) c FROM places WHERE kind IN ('biz','facility') AND cat1 IS NOT NULL "
          "GROUP BY cat1,cat2,subtype ORDER BY cat1, c DESC")
     for cat1, cat2, sub, c in db.execute(q):
         cnt[cat1] += c
@@ -198,6 +201,11 @@ def main():
             PARTITION BY nrm(name), round(lon,3), round(lat,3)
             ORDER BY CASE source WHEN 'localdata' THEN 0 WHEN 'sangga' THEN 1 ELSE 2 END, id) rn
           FROM places WHERE kind='biz') WHERE rn=1)""")
+    # 생활편의시설(kind='facility')은 biz 와 별도 — 전부 표시(is_primary=1). 단 낚시터·세차장은 상가/인허가(biz) 와 겹치면 숨김.
+    db.execute("UPDATE places SET is_primary=1 WHERE kind='facility'")
+    db.execute("""UPDATE places SET is_primary=0 WHERE kind='facility' AND subtype IN ('낚시터','세차장')
+        AND EXISTS (SELECT 1 FROM places b WHERE b.kind='biz' AND b.is_primary=1
+          AND nrm(b.name)=nrm(places.name) AND round(b.lon,3)=round(places.lon,3) AND round(b.lat,3)=round(places.lat,3))""")
     db.execute("CREATE TABLE meta(k TEXT,v TEXT)")
     db.executemany("INSERT INTO meta VALUES(?,?)", [("places",str(state["pid"])),("srid","4326"),
         ("source","내비게이션용DB 2026.05 + OSM"),("built_s",f"{time.time()-t0:.0f}")])

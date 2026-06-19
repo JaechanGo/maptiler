@@ -1,5 +1,5 @@
 {
-  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '데이터 출처/버전' 패널이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동(url 생략 시 위 url 사용, pick=max|first). 없으면 수동.",
+  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '자동 수집 목록'이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동. collect{method,...} 있으면 자동수집(file.localdata/data.go.kr/geofabrik 우회). default_collect=목록 기본 체크. build_input 있으면 업로드/적재 지원. 날짜 표기는 yyyy-mm-dd 표준.",
   "sources": [
     {
       "key": "juso_navi",
@@ -8,7 +8,7 @@
       "url": "https://business.juso.go.kr/addrlink/main.do",
       "period_fmt": "YYYYMM",
       "cycle": "월",
-      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용",
+      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용. 수동 업로드.",
       "latest_check": {
         "type": "json",
         "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
@@ -40,27 +40,61 @@
       "url": "https://www.data.go.kr/data/15083033/fileData.do",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "분기",
-      "note": "상호·업종(POI/상가). data.go.kr 수정일 기준",
+      "note": "상호·업종(POI/상가). 자동 다운로드: selectFileDataDownload.do(atchFileId 획득) → cmm/cmm/fileDownload.do(파일 스트림). data.go.kr 미차단. poi-all/sangga 에 zip 추출, 09가 glob.",
       "latest_check": {
         "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
         "pick": "first"
       },
+      "collect": {
+        "method": "datago_filedown",
+        "publicDataPk": "15083033",
+        "publicDataDetailPk": "uddi:6a450671-390c-4b6d-979c-fa056a627084",
+        "detail_url": "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do"
+      },
+      "default_collect": true,
       "build_input": {
-        "dest": "poi-all",
+        "dest": "poi-all/sangga",
         "extract": null,
         "into": "dir"
       }
     },
     {
       "key": "localdata",
-      "name": "LOCALDATA 인허가 전체분",
+      "name": "인허가 지역별 전체분",
       "category": "인허가",
       "url": "https://www.localdata.go.kr/",
-      "period_fmt": "YYYYMMDD",
+      "period_fmt": "YYYY-MM-DD",
       "cycle": "일",
-      "note": "지자체 인허가(업소) 전체분. 자동조회 미지원(localdata.go.kr 로그인/세션·API키 필요로 단순 GET 불가) — 현재 수동 등록",
+      "note": "지방행정 인허가(업소) 전국 전체분. file.localdata.go.kr 우회(한국 IP 호스트). 하위=17 시·도(orgCode_ALL, localdata-regions.json). URL 확정(2026-06 캡처): /file/download-all, 시·도=?orgCode=<code>_ALL.",
+      "collect": {
+        "method": "localdata_all",
+        "base": "https://file.localdata.go.kr",
+        "path": "/file/download-all",
+        "region_path": "/file/download-all?orgCode={orgCode}_ALL",
+        "regions": "localdata-regions.json"
+      },
+      "default_collect": true,
       "build_input": {
         "dest": "staged/localdata",
+        "extract": null,
+        "into": "dir"
+      }
+    },
+    {
+      "key": "facility",
+      "name": "생활편의시설(공공)",
+      "category": "생활편의",
+      "url": "https://www.localdata.go.kr/",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "공중화장실·무인민원발급기 등 14종. file.localdata.go.kr 우회. kind=facility 로 별도 적재(상가/인허가 biz 분리). 14종·슬러그=facility-catalog.json. 종류 선택 다운로드.",
+      "collect": {
+        "method": "localdata_facility",
+        "catalog": "facility-catalog.json"
+      },
+      "default_collect": true,
+      "build_input": {
+        "dest": "staged/facility",
         "extract": null,
         "into": "dir"
       }
@@ -72,7 +106,7 @@
       "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "월(일 변경분)",
-      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18",
+      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드.",
       "latest_check": {
         "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "max"
@@ -90,10 +124,22 @@
       "url": "https://download.geofabrik.de/asia/south-korea.html",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "일",
-      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf. 최신 조회는 가능하나, .pbf→벡터타일/osm.sqlite 변환은 오프라인 재빌드(02·osm-from-mbtiles)로만 반영되므로 여기서는 업로드 미지원(build_input 없음).",
+      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf 직접 다운로드(차단 없음). 거의 안 바뀌어 기본 미체크(직전 OSM 재사용), 체크 시에만 .pbf 재다운로드+변환(planetiler→korea.mbtiles, osm.sqlite, 동 라벨). 변환은 무거움(Java·~1GB 보조데이터·수십분).",
       "latest_check": {
         "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
         "pick": "first"
+      },
+      "collect": {
+        "method": "geofabrik",
+        "url": "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf",
+        "dest": "data/osm/south-korea.osm.pbf",
+        "build_targets": ["osm_vector", "osm_sqlite", "dong"]
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "data/osm",
+        "extract": null,
+        "into": "file"
       }
     }
   ]

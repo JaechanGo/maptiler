@@ -15,13 +15,13 @@ SKIP_NAMES = {"업소명없음", "상호명없음", "-", "."}   # 원본 상가�
 # 빌드시점 GROUP BY 제거 — 같은 점포라도 출처별 전건을 보존(스타일에서 출처 토글 가능).
 # 중복 제거는 09-gen-geocode.py가 DB에서 is_primary=1 로 표시; 스타일 기본 필터가 대표만 표출.
 with open(sys.argv[2], "w", encoding="utf-8") as f:
-    for name, sub, cat1, cat2, source, is_primary, lon, lat in db.execute(
-            "SELECT name,subtype,cat1,cat2,source,is_primary,lon,lat FROM places WHERE kind='biz'"):
+    for kind, name, sub, cat1, cat2, source, is_primary, lon, lat in db.execute(
+            "SELECT kind,name,subtype,cat1,cat2,source,is_primary,lon,lat FROM places WHERE kind IN ('biz','facility')"):
         if lon is None or lat is None: continue
         if not name or name.strip() in SKIP_NAMES: continue
         f.write(json.dumps({"type":"Feature",
             "properties":{"name":name,"cat":sub or "","cat1":cat1 or "","cat2":cat2 or "",
-                          "source":source or "","is_primary":int(is_primary or 0)},
+                          "kind":kind or "","source":source or "","is_primary":int(is_primary or 0)},
             "geometry":{"type":"Point","coordinates":[round(lon,6),round(lat,6)]}},
             ensure_ascii=False) + "\n"); n += 1
 print(f"  {n:,} features", file=sys.stderr)
@@ -30,6 +30,6 @@ PY
 echo "[2/2] tippecanoe → $OUT (z11–17, 줌별 솎기 / 클러스터 제거 — 확대 시 라벨 표출)"
 tippecanoe -o "$OUT" -l poi -Z11 -z17 \
   --drop-densest-as-needed \
-  -y name -y cat -y cat1 -y cat2 -y source -y is_primary --maximum-tile-bytes=700000 --quiet --force "$JL"
+  -y name -y cat -y cat1 -y cat2 -y kind -y source -y is_primary --maximum-tile-bytes=700000 --quiet --force "$JL"
 rm -f "$JL"
 echo "OK: $OUT ($(du -h "$OUT"|cut -f1))"
