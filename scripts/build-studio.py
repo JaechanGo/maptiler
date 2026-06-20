@@ -1578,6 +1578,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  header{padding:16px 22px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
  h1{font-size:17px;margin:0;font-weight:600} .sub{color:var(--mut);font-size:12px}
  .wrap{display:grid;grid-template-columns:480px 1fr;gap:16px;padding:18px;max-width:1560px;margin:0 auto}
+ .wrap>div{min-width:0}
  @media(max-width:1100px){.wrap{grid-template-columns:1fr}}
  .panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
  .panel h2{font-size:13px;margin:0 0 10px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
@@ -1594,7 +1595,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  button.ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
  button:disabled{opacity:.5;cursor:default}
  pre{background:#0a0e16;border:1px solid var(--bd);border-radius:9px;padding:10px;height:230px;
-   overflow:auto;font:11px/1.45 ui-monospace,Menlo,monospace;color:#bcd;white-space:pre-wrap;margin:10px 0 0}
+   overflow:auto;font:11px/1.45 ui-monospace,Menlo,monospace;color:#bcd;white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0 0}
  .up{border:1.5px dashed var(--bd);border-radius:9px;padding:18px 12px;text-align:center;color:var(--mut);font-size:12px;cursor:pointer;transition:.15s}
  .up:hover{border-color:var(--mut)}
  .up.drag{border-color:var(--ac);background:#0c1a2c;color:var(--tx)}
