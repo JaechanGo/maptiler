@@ -227,17 +227,22 @@ def _v_navi(files):
 
 
 def _v_building(files):
+    # 건물 SHP zip — 시도별 zip 직접, 또는 17개 시도 zip 을 한 번 더 묶은 중첩 zip(zip-of-zips) 모두 허용(빌드 시 재귀추출).
     zips = [f for f in files if f.suffix.lower() == ".zip"]
     shps = [f for f in files if f.suffix.lower() == ".shp"]
     if zips:
-        tot = 0
+        tot = nested = 0
         for z in zips:
             try:
                 with zipfile.ZipFile(z) as zf:
-                    tot += len([n for n in zf.namelist() if n.lower().endswith(".shp")])
+                    names = zf.namelist()
+                    tot += sum(1 for n in names if n.lower().endswith(".shp"))
+                    nested += sum(1 for n in names if n.lower().endswith(".zip"))
             except Exception:
                 return ("warn", f"zip {len(zips)}개 (일부 열기 실패)")
-        return ("ok" if tot else "warn", f"zip {len(zips)}개 · shp {tot}개" if tot else f"zip {len(zips)}개지만 .shp 없음")
+        if tot:    return ("ok", f"zip {len(zips)}개 · shp {tot}개")
+        if nested: return ("ok", f"zip {len(zips)}개 · 중첩 zip {nested}개(시도별 묶음 — 빌드 시 재귀추출)")
+        return ("warn", f"zip {len(zips)}개지만 .shp/중첩 zip 없음")
     if shps:
         return ("ok", f"shp {len(shps)}개")
     return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
