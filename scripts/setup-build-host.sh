@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 빌드 호스트 준비 — 내비DB(.7z) 추출용 p7zip 설치 + planetiler.jar 부트스트랩 + 빌드 툴체인 점검.
+# 빌드 호스트 준비 — p7zip 설치 + Java 21 설치(타 서비스 17 불간섭) + planetiler.jar 부트스트랩 + 툴체인 점검.
 # OS/패키지매니저 자동감지: Ubuntu·Debian(apt) / RHEL·Rocky·CentOS·BlueOnyx(dnf|yum+EPEL) / macOS(brew).
 #   ./scripts/setup-build-host.sh
 # (폐쇄망 서빙 서버는 불필요 — 빌드는 인터넷 빌드 호스트에서만 7z가 필요)
@@ -7,7 +7,7 @@ set -uo pipefail
 have(){ command -v "$1" >/dev/null 2>&1; }
 SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 
-echo "── [1/3] p7zip(7z) ──────────────────────────────"
+echo "── [1/4] p7zip(7z) ──────────────────────────────"
 if have 7z || have 7za || have 7zr; then
   echo "✓ 이미 설치됨: $(command -v 7z 7za 7zr 2>/dev/null | head -1)"
 elif have apt-get; then
@@ -33,7 +33,41 @@ if have 7z || have 7za || have 7zr; then echo "✓ 7z 사용 가능 → 내비DB
 else echo "✗ 7z 여전히 없음 — 위 메시지 확인(권한/네트워크) 또는 .txt 직접배치"; fi
 
 echo
-echo "── [2/3] planetiler.jar (OSM 벡터타일 빌드) ──────"
+echo "── [2/4] Java 21 (planetiler 런타임) ─────────────"
+# planetiler v0.8.0~ 는 Java 21+ 필요(이전 v0.7.0 까지가 Java 17). 기존 Java 17 등 타 서비스는
+# 건드리지 않고(전역 alternatives 변경 안 함) 21을 '나란히' 설치만 한다 — 빌드는 02-gen-vector.sh 가
+# 이 21을 자동 선택(PLANETILER_JAVA 로 덮어쓰기 가능). pgdg* 죽은 repo 는 [1/4] 와 동일하게 제외.
+java21_path(){   # 21+ JVM 의 java 경로 출력(없으면 빈 문자열). 기본 java 가 21+ 면 그걸 사용.
+  if have java && java -version 2>&1 | grep -qE 'version "(2[1-9]|[3-9][0-9])'; then command -v java; return; fi
+  for d in /usr/lib/jvm/*21* /usr/lib/jvm/*2[2-9]* /usr/lib/jvm/jre-21* \
+           /opt/homebrew/opt/openjdk@21 /usr/local/opt/openjdk@21; do
+    [ -x "$d/bin/java" ] && { echo "$d/bin/java"; return; }
+  done
+}
+J="$(java21_path)"
+if [ -n "$J" ]; then
+  echo "✓ 이미 있음: $("$J" -version 2>&1 | head -1)  ($J)"
+elif have apt-get; then
+  echo "→ apt: openjdk-21-jre-headless"; $SUDO apt-get update -qq && $SUDO apt-get install -y openjdk-21-jre-headless
+elif have dnf; then
+  echo "→ dnf: java-21-openjdk-headless"; $SUDO dnf install -y --disablerepo='pgdg*' java-21-openjdk-headless
+elif have yum; then
+  echo "→ yum: java-21-openjdk-headless"; $SUDO yum install -y --disablerepo='pgdg*' java-21-openjdk-headless
+elif have brew; then
+  echo "→ brew: openjdk@21"; brew install openjdk@21
+else
+  echo "✗ 패키지 매니저 미발견 — Java 21+ 수동 설치 필요(Adoptium Temurin 등)"
+fi
+J="$(java21_path)"
+if [ -n "$J" ]; then
+  echo "✓ Java 21+ 준비: $J"
+  echo "  (전역 기본 java 는 변경 안 함 — 빌드만 이 21을 사용. 강제 지정: PLANETILER_JAVA=$J)"
+else
+  echo "✗ Java 21+ 확보 실패 — OSM 벡터타일(osm_vector) 빌드 불가(UnsupportedClassVersionError)"
+fi
+
+echo
+echo "── [3/4] planetiler.jar (OSM 벡터타일 빌드) ──────"
 # .gitignore 제외 벤더 바이너리(~90MB) — clone 호스트엔 없으므로 공식 릴리스에서 부트스트랩.
 # 02-gen-vector.sh 가 'java -jar planetiler/planetiler.jar' 로 사용. 없으면 osm_vector 빌드 불가.
 # 재현성 위해 PLANETILER_URL 로 특정 버전 고정 가능(미지정 시 latest).
@@ -64,12 +98,12 @@ else
 fi
 
 echo
-echo "── [3/3] 빌드 툴체인 점검(없으면 안내) ───────────"
+echo "── [4/4] 빌드 툴체인 점검(없으면 안내) ───────────"
 for t in python3 java ogr2ogr gdaltransform tippecanoe tile-join; do
   if have "$t"; then echo "  ✓ $t"; else echo "  ✗ $t (없음 — 해당 빌드 단계에 필요)"; fi
 done
 echo
-echo "툴체인 설치 예(필요 시):"
-echo "  Ubuntu : $SUDO apt-get install -y gdal-bin default-jre   # tippecanoe/tile-join 은 소스 빌드"
-echo "  RHEL   : $SUDO dnf install -y gdal java-17-openjdk        # tippecanoe 는 소스 빌드"
+echo "툴체인 설치 예(필요 시 · gdal/tippecanoe 등. Java 21 은 위 [2/4] 가 처리):"
+echo "  Ubuntu : $SUDO apt-get install -y gdal-bin              # tippecanoe/tile-join 은 소스 빌드"
+echo "  RHEL   : $SUDO dnf install -y gdal                      # tippecanoe 는 소스 빌드"
 echo "  macOS  : brew install gdal tippecanoe openjdk"
