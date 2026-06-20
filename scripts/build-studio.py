@@ -479,9 +479,11 @@ def _safe_relpath(name):
     return "/".join(parts)
 
 
-def _unzip_recursive(path, dest, depth=4):
-    """zip 추출 + 내부 중첩 zip 재귀 추출(zip-of-zips: 법정동 LSMD 시도별 묶음 등). 내부 zip은 풀고 제거."""
+def _unzip_recursive(path, dest, depth=4, on=None):
+    """zip 추출 + 내부 중첩 zip 재귀 추출(zip-of-zips: 법정동 LSMD 시도별 묶음 등). 내부 zip은 풀고 제거.
+    on(line): 진행 로그 콜백(있으면 추출 단위로 호출 — 큰 zip 적재 중 라이브 표시)."""
     dest = pathlib.Path(dest)
+    if on: on(f"   {pathlib.Path(path).name} 추출…")
     with zipfile.ZipFile(path) as z:
         z.extractall(dest)
     for _ in range(depth):
@@ -490,6 +492,7 @@ def _unzip_recursive(path, dest, depth=4):
             break
         for inner in inners:
             try:
+                if on: on(f"     ↳ {inner.name} 추출…")
                 with zipfile.ZipFile(inner) as z:
                     z.extractall(inner.parent)
                 inner.unlink()
@@ -497,11 +500,17 @@ def _unzip_recursive(path, dest, depth=4):
                 pass
 
 
-def prepare_sources(keys=None):
+def prepare_sources(keys=None, emit=None):
     """sources/<key>/ 의 '모든' 업로드 파일을 build_input.dest 로 적재(누적).
     확장자별: .zip=stdlib 추출 / .7z=CLI(있으면) / .tar·.tgz·.txz=stdlib 추출 / 그외(.csv·.txt·.shp 등)=복사.
-    업로드가 없으면 기존 staged 재사용(직전 빌드분 또는 BUILD_HOME 직접 배치 데이터)."""
+    업로드가 없으면 기존 staged 재사용(직전 빌드분 또는 BUILD_HOME 직접 배치 데이터).
+    emit(line): 적재 진행 로그 콜백 — 큰 소스(navi .7z·building_db 2GB) 추출이 빌드 큐 앞에서 동기로
+    돌며 무출력이라 멈춘 듯 보이던 문제 해소(있으면 소스/추출 단위로 라이브 표시)."""
     import shutil, tarfile, zipfile
+    def _say(msg):
+        if emit:
+            try: emit(msg)
+            except Exception: pass
     ver = load_versions(); report = []
     for s in load_sources():
         bi = s.get("build_input")
@@ -519,6 +528,7 @@ def prepare_sources(keys=None):
             report.append({"key": key, "action": "ok", "n": len(files), "dest": str(dest)})
             continue
         try:
+            _say(f"⬆ {s.get('name', key)} 적재 중… ({len(files)}개)")
             shutil.rmtree(dest, ignore_errors=True); dest.mkdir(parents=True, exist_ok=True)
             tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
             n = 0; errs = []
@@ -526,17 +536,19 @@ def prepare_sources(keys=None):
                 ext = f.suffix.lower()
                 if ext == ".zip":
                     try:
-                        _unzip_recursive(f, dest); n += 1   # 중첩 zip(zip-of-zips: 법정동 시도별 묶음)도 재귀 추출
+                        _unzip_recursive(f, dest, on=_say); n += 1   # 중첩 zip(zip-of-zips: 법정동 시도별 묶음)도 재귀 추출
                     except Exception as e:
                         errs.append(f"{f.name}: zip {str(e)[:50]}")
                 elif ext == ".7z":
                     if not tool:
                         errs.append(f"{f.name}: 7z 없음 — scripts/setup-build-host.sh 실행(p7zip 설치) 후 재빌드, 또는 .txt 직접배치"); continue
+                    _say(f"   {f.name} 추출(.7z, 수십초 소요)…")
                     r = subprocess.run([tool, "x", "-y", f"-o{dest}", str(f)], capture_output=True, text=True, timeout=3600)
                     if r.returncode != 0: errs.append(f"{f.name}: {(r.stderr or '')[-80:]}")
                     else: n += 1
                 elif ext == ".tar" or f.name.lower().endswith((".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
                     try:
+                        _say(f"   {f.name} 추출(tar)…")
                         with tarfile.open(f) as t:
                             try: t.extractall(dest, filter="data")   # py3.12+ 경로조작 방지
                             except TypeError: t.extractall(dest)     # 구버전 폴백
@@ -548,6 +560,7 @@ def prepare_sources(keys=None):
                     shutil.copy2(f, dest / rel); n += 1
             ver.setdefault(key, {})["staged_sig"] = sig; save_versions(ver)
             action = "staged" if (n and not errs) else ("partial" if n else "error")
+            _say(f"{'✓' if action=='staged' else '⚠'} {s.get('name', key)} 적재 {'완료' if action=='staged' else action} ({n}개)")
             report.append({"key": key, "action": action, "n": n, "dest": str(dest),
                            "msg": "; ".join(errs)[:200] if errs else None})
         except Exception as e:
@@ -1480,7 +1493,11 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or "{}")
             targets = body.get("targets", [])
             MGR.last_targets = list(body.get("targets", []))   # 정제 체크 기록(매니페스트)
-            prep = prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
+            # 적재(prepare_sources)는 빌드 큐 앞에서 동기로 도는데, 큰 소스(navi .7z·building_db 2GB) 추출이
+            # 무출력이라 멈춘 듯 보였음 → 진행을 SSE(kind=prepare)로 라이브 스트리밍(클라는 로그만 표시).
+            def _pemit(line): MGR.publish({"kind": "prepare", "status": "running", "line": line})
+            _pemit("⬆ 업로드 소스 적재 점검…")
+            prep = prepare_sources(emit=_pemit)   # 업로드 데이터 적재(미업로드는 직전 재사용)
             res = MGR.enqueue(targets)   # {queued, fresh}
             return self._json({"queued": res["queued"], "fresh": res["fresh"], "prepared": prep})
         if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
@@ -1782,6 +1799,7 @@ function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHe
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);optBuild=optCollect=false;updateBusy();return}
+ if(d.kind==='prepare'){if(d.line)logln('[적재] '+d.line);return;}   // 업로드 소스 적재 진행 — 로그만(카드·busy·optBuild 불변)
  setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
  if(d.kind==='collect')optCollect=false; else optBuild=false;   // 실제 상태 도착 → 해당 낙관 플래그 해제
  updateBusy();
