@@ -2,7 +2,7 @@
 # CUVIA PostGIS 로더 공유 — libpq 환경변수 기본값 + ogr2ogr PG 연결문자열.
 # source 해서 사용. compose postgis 서비스 기본값(cuvia/cuvia)과 일치.
 export PGHOST="${PGHOST:-localhost}"
-export PGPORT="${PGPORT:-5432}"
+export PGPORT="${PGPORT:-5433}"          # 맵 전용 postgis 컨테이너 호스트포트(기존 host postgres 5432 회피)
 export PGUSER="${PGUSER:-cuvia}"
 export PGDATABASE="${PGDATABASE:-cuvia}"
 export PGPASSWORD="${PGPASSWORD:-cuvia}"

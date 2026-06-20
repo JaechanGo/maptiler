@@ -22,7 +22,7 @@ from psycopg_pool import ConnectionPool
 
 PORT = int(os.environ.get("GEOCODE_PORT", "8082"))
 DSN = os.environ.get("DATABASE_URL") or (
-    f"host={os.environ.get('PGHOST','localhost')} port={os.environ.get('PGPORT','5432')} "
+    f"host={os.environ.get('PGHOST','localhost')} port={os.environ.get('PGPORT','5433')} "
     f"user={os.environ.get('PGUSER','cuvia')} dbname={os.environ.get('PGDATABASE','cuvia')} "
     f"password={os.environ.get('PGPASSWORD','cuvia')}")
 ADDR_CAP = 400

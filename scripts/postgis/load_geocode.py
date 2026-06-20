@@ -10,7 +10,7 @@ dedup(is_primary)이 이미 geocode.sqlite `places`(lon/lat=4326)에 다 들어�
     → address (전체)          : 검색/표시/역지오코딩 원천
     → poi     (kind in biz/facility, 좌표有) : martin POI 레이어(기존 poi.mbtiles 대체)
 
-연결은 libpq 환경변수(PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD). 기본 cuvia/cuvia@localhost:5432.
+연결은 libpq 환경변수(PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD). 기본 cuvia/cuvia@localhost:5433(맵 전용 컨테이너 호스트포트).
   PGPASSWORD=... scripts/postgis/load_geocode.py [--db ~/geocode-build/geocode.sqlite]
 """
 import argparse, csv, os, subprocess, sys, tempfile, time
@@ -82,7 +82,7 @@ def main():
         sys.exit(f"geocode.sqlite 없음: {args.db} (09-gen-geocode.py 먼저)")
 
     env = dict(os.environ)
-    env.setdefault("PGHOST", "localhost"); env.setdefault("PGPORT", "5432")
+    env.setdefault("PGHOST", "localhost"); env.setdefault("PGPORT", "5433")
     env.setdefault("PGUSER", "cuvia"); env.setdefault("PGDATABASE", "cuvia")
     env.setdefault("PGPASSWORD", "cuvia")
 

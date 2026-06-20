@@ -98,7 +98,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${PGPORT:-5432}:5432"   # 빌드/적재용. 폐쇄망 게이트웨이 단독노출 시 제거 가능
+      # 호스트 5433→컨테이너 5432. 기본 5433 = 빌드호스트의 기존 host PostgreSQL(5432)과 충돌 회피.
+      # (컨테이너 내부는 항상 5432 — martin/geocode-pg 는 postgis:5432 로 접속). 다른 포트면 PGPORT 로 덮어쓰기.
+      - "${PGPORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-cuvia} -d ${PGDATABASE:-cuvia}"]
       interval: 10s

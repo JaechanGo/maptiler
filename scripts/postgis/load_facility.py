@@ -93,7 +93,7 @@ def main():
         sys.exit("✗ 이름·주소 컬럼 모두 감지 실패 — --name-col/--addr-col 로 지정")
 
     env = dict(os.environ)
-    for k, v in (("PGHOST","localhost"),("PGPORT","5432"),("PGUSER","cuvia"),
+    for k, v in (("PGHOST","localhost"),("PGPORT","5433"),("PGUSER","cuvia"),
                  ("PGDATABASE","cuvia"),("PGPASSWORD","cuvia")):
         env.setdefault(k, v)
 

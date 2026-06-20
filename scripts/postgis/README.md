@@ -8,7 +8,7 @@
 scripts/setup-build-host.sh                 # psql·osm2pgsql·ogr2ogr·GDAL 등
 cd server && docker compose --profile postgis up -d postgis martin   # PostGIS+martin 기동
 ```
-연결은 libpq 환경변수. 기본 `cuvia/cuvia@localhost:5432`. 비밀번호 변경 시 `export PGPASSWORD=...`.
+연결은 libpq 환경변수. 기본 `cuvia/cuvia@localhost:5433`(맵 전용 postgis 컨테이너 호스트포트 — 빌드호스트의 기존 host PostgreSQL 5432와 충돌 회피). 다른 포트면 `export PGPORT=...`, 비번 변경 시 `export PGPASSWORD=...`. 호스트 psql 없으면 apply-schema 가 컨테이너 psql 자동 사용.
 
 ## 1. 스키마 적용 (멱등)
 ```bash
