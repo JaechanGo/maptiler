@@ -13,9 +13,17 @@ if have 7z || have 7za || have 7zr; then
 elif have apt-get; then
   echo "→ apt: p7zip-full"; $SUDO apt-get update -qq && $SUDO apt-get install -y p7zip-full
 elif have dnf; then
-  echo "→ dnf: EPEL + p7zip"; $SUDO dnf install -y epel-release 2>/dev/null; $SUDO dnf install -y p7zip p7zip-plugins
+  echo "→ dnf: EPEL + p7zip"
+  # 죽은 서드파티 repo(예: EOL된 pgdg13 → 410)가 dnf 트랜잭션 전체를 막지 않도록 제외.
+  # p7zip 미존재 미러 대비 신형 7zip(/usr/bin/7z) 폴백.
+  $SUDO dnf install -y --disablerepo='pgdg*' epel-release 2>/dev/null
+  $SUDO dnf install -y --disablerepo='pgdg*' p7zip p7zip-plugins \
+    || $SUDO dnf install -y --disablerepo='pgdg*' 7zip
 elif have yum; then
-  echo "→ yum: EPEL + p7zip"; $SUDO yum install -y epel-release 2>/dev/null; $SUDO yum install -y p7zip p7zip-plugins
+  echo "→ yum: EPEL + p7zip"
+  $SUDO yum install -y --disablerepo='pgdg*' epel-release 2>/dev/null
+  $SUDO yum install -y --disablerepo='pgdg*' p7zip p7zip-plugins \
+    || $SUDO yum install -y --disablerepo='pgdg*' 7zip
 elif have brew; then
   echo "→ brew: p7zip"; brew install p7zip
 else
