@@ -58,6 +58,74 @@ services:
     networks:
       - cuvia
 
+  # ── PostGIS 지오코더 (Phase 5 — 5b shadow / 5c 전환) ─────────────
+  # SQLite 지오코더(geocode:8082)와 병행. 8092 로 노출해 parity 측정(13c-eval-golden.py).
+  # 5c 전환 시 게이트웨이 /geocode·/reverse upstream 을 geocode-pg:8082 로 바꾼다.
+  # ※air-gap: 런타임 pip 대신 psycopg 를 베이크한 이미지 필요(Phase 6 패키징).
+  geocode-pg:
+    image: cuvia-geocode-pg:local        # psycopg 베이크(geocode-pg.Dockerfile). 빌드호스트=compose 자동빌드, 폐쇄망=docker load
+    build:
+      context: .
+      dockerfile: geocode-pg.Dockerfile
+    platform: linux/amd64
+    profiles: ["postgis"]
+    restart: unless-stopped
+    ports:
+      - "8092:8082"   # shadow 비교용(폐쇄망 전환 후 제거)
+    environment:
+      DATABASE_URL: postgresql://${PGUSER:-cuvia}:${PGPASSWORD:-cuvia}@postgis:5432/${PGDATABASE:-cuvia}
+      GEOCODE_PORT: "8082"
+    volumes:
+      - ./geocode-api-pg.py:/app/geocode-api-pg.py:ro   # dev override(이미지에도 COPY됨)
+    depends_on:
+      postgis:
+        condition: service_healthy
+    networks:
+      - cuvia
+
+  # ── PostGIS 데이터 백본 (동적 레이어·공간분석·지오코더) ────────────
+  # profiles:[postgis] — 일반 지도 납품은 미가동(가벼움), 관제/분석 배포에서만 켠다.
+  #   docker compose --profile postgis up
+  postgis:
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    profiles: ["postgis"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-cuvia}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-cuvia}
+      POSTGRES_DB: ${PGDATABASE:-cuvia}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${PGPORT:-5432}:5432"   # 빌드/적재용. 폐쇄망 게이트웨이 단독노출 시 제거 가능
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-cuvia} -d ${PGDATABASE:-cuvia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cuvia
+
+  # ── martin — PostGIS live MVT 타일서버 (동적 레이어) ──────────────
+  # 베이스/지형/글리프/스프라이트는 tileserver-gl 이 전담(존치). martin 은 /dyn 만 담당.
+  # L1 캐시=martin Moka(인메모리). L2 영속 캐시는 게이트웨이 nginx proxy_cache(디스크).
+  martin:
+    image: ghcr.io/maplibre/martin:v0.18.0
+    platform: linux/amd64
+    profiles: ["postgis"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${PGUSER:-cuvia}:${PGPASSWORD:-cuvia}@postgis:5432/${PGDATABASE:-cuvia}
+    volumes:
+      - ./martin-config.yaml:/config/martin.yaml:ro   # 명시 table 소스(tiger·파티션자식 제외)+minzoom
+    command: ["--config", "/config/martin.yaml"]
+    depends_on:
+      postgis:
+        condition: service_healthy
+    networks:
+      - cuvia
+
   # 단일 도메인 게이트웨이(reverse proxy) — 모든 서비스를 한 포트로 통합. 공개망 권장.
   # GATEWAY_PORT 기본 80. 게이트웨이만 노출하려면 위 서비스들의 ports 매핑을 제거하면 됨.
   gateway:
@@ -68,6 +136,7 @@ services:
       - "${GATEWAY_PORT:-80}:80"
     volumes:
       - ./gateway-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - martin_cache:/data/cache/martin          # L2 영속 타일캐시(/dyn). martin 재기동에도 유지
     depends_on:
       - tileserver
       - demo
@@ -78,3 +147,7 @@ services:
 networks:
   cuvia:
     driver: bridge
+
+volumes:
+  pgdata:          # PostGIS 데이터 디렉토리(profile=postgis)
+  martin_cache:    # 게이트웨이 nginx 디스크 타일캐시(L2 영속)
