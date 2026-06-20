@@ -15,6 +15,7 @@ import argparse, io, json, math, os, pathlib, re, sqlite3, sys, time, unicodedat
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SIDO = ["seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","sejong","gyunggi",
         "gangwon","chungbuk","chungnam","jeonbuk","jeonnam","gyeongbuk","gyeongnam","jeju"]
+CW_LD, CW_OSM = {}, {}   # cat-crosswalk.json (canonical 카테고리 매핑) — main()에서 로드, add_biz/add_osm 이 사용
 
 # ---- EPSG:5179(UTM-K) → WGS84 (Snyder inverse TM, 무의존) ----
 _a=6378137.0; _f=1/298.257222101; _e2=2*_f-_f*_f; _ep2=_e2/(1-_e2)
@@ -57,22 +58,37 @@ SCHEMA = """
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
   CREATE VIRTUAL TABLE place_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
-  CREATE TABLE areas(id INTEGER PRIMARY KEY, name TEXT, type TEXT, rings TEXT);
+  CREATE TABLE areas(id INTEGER PRIMARY KEY, name TEXT, type TEXT, rings TEXT, code TEXT);
   CREATE VIRTUAL TABLE area_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
 """
 
+def _derive_jibun(namemap, mgt):
+    # 대표지번 없는 건물 → 건물관리번호로 지번 파생. mgt[:10]=법정동코드→법정동명, [11:15]=본번, [15:19]=부번.
+    nm = namemap.get(mgt[:10])
+    if not nm or len(mgt) < 19: return None
+    try: b = int(mgt[11:15]); s = int(mgt[15:19])
+    except ValueError: return None
+    if not b: return None
+    return f"{nm} {b}" + (f"-{s}" if s else "")
+
+
 def load_jibun(src, sido):
-    # 건물관리번호(18) → "법정동 [산]지번본번[-부번]" (대표지번). match_jibun_<시도>.txt
-    p = src / f"match_jibun_{sido}.txt"; d = {}
-    if not p.exists(): return d
+    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict).
+    # c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값), c[5]=산, c[6]=본번, c[7]=부번, c[18]=건물관리번호.
+    # 이름 dict 는 대표지번 없는 건물의 지번을 _derive_jibun 으로 채우는 데 쓴다(빠짐없이).
+    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}
+    if not p.exists(): return d, nm
     for line in io.open(p, encoding="cp949", errors="replace"):
         c = line.rstrip("\n").split("|")
         if len(c) < 19: continue
         mgt = c[18]
+        ri = c[4].strip()                       # 리(里) — 면 단위 지번에 보존(없으면 동/법정동만)
+        dong = f"{c[3]} {ri}" if ri else c[3]
+        nm.setdefault(mgt[:10], dong)
         if mgt in d: continue
         san = "산 " if c[5] == "1" else ""; bu = c[7]
-        d[mgt] = f"{c[3]} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
-    return d
+        d[mgt] = f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
+    return d, nm
 
 def add_juso(db, src, only, state):
     pid = state["pid"]; seen = state["seen"]
@@ -80,7 +96,7 @@ def add_juso(db, src, only, state):
         path = src / f"match_build_{s}.txt"
         if not path.exists():
             print(f"  (건너뜀) {path.name} 없음", file=sys.stderr); continue
-        jdict = load_jibun(src, s)
+        jdict, jname = load_jibun(src, s)
         st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
         for line in io.open(path, encoding="cp949", errors="replace"):
             c=line.rstrip("\n").split("|")
@@ -94,7 +110,8 @@ def add_juso(db, src, only, state):
             if not (124<=lon<=132 and 33<=lat<=39): continue
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jdict.get(mgt),None,None,'navi',1,lon,lat))  # bcode=c[0](법정동코드)·hcode=c[13](행정동코드)
+            jb=jdict.get(mgt) or _derive_jibun(jname, mgt)       # 대표지번 없으면 건물관리번호로 파생(빠짐없이)
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -111,7 +128,8 @@ def add_osm(db, osm_path, state):
     for name,typ,sub,lon,lat in o.execute("SELECT name,type,subtype,lon,lat FROM places"):
         if lon is None or lat is None: continue
         pid+=1
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,'osm',1,lon,lat))
+        oc=CW_OSM.get(sub or ''); oc1,oc2=(oc[0],oc[1] or None) if oc else (None,None)   # canonical 카테고리
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,oc1,oc2,'osm',1,lon,lat))
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -151,6 +169,9 @@ def add_biz(db, csvdir, state):
                 cat2=(row.get("상권업종중분류명") or "").strip() or None
                 road,rn,mno,sno = parse_doro(row.get("도로명주소") or "")   # ER 건물키 조인·검색용(11/11b가 보존, 없으면 None)
                 jibun_txt=(row.get("지번주소") or "").strip() or None
+                if src=='localdata':                                   # localdata 카테고리를 canonical 로 표준화
+                    cc=CW_LD.get(f"{cat1}|{biz}")
+                    if cc: cat1,cat2=cc[0],(cc[1] or None)
                 pid+=1
                 pb.append((pid,kind,nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
@@ -192,15 +213,31 @@ def main():
     ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
     ap.add_argument("--dedup", choices=["legacy","er"], default="legacy",
                     help="biz 표시용 중복제거: legacy=정규화상호+좌표3자리 1패스(기본), er=엔티티해상도(dedup_er.py: 셀이웃 블로킹+등급가중점수+union-find)")
+    ap.add_argument("--areas", help="행정경계 areas.sqlite(06-gen-areas 산출) — 역지오코딩 동 폴리곤 적재")
     args=ap.parse_args()
     only=set(args.only.split(",")) if args.only else None
+    cwp=pathlib.Path(__file__).resolve().parent/"cat-crosswalk.json"   # 카테고리 표준화 매핑(localdata/osm→canonical)
+    if cwp.exists():
+        _cw=json.load(open(cwp,encoding="utf-8")); CW_LD.update(_cw.get("localdata",{})); CW_OSM.update(_cw.get("osm",{}))
+        print(f"  cat-crosswalk: localdata {len(CW_LD)} · osm {len(CW_OSM)}", file=sys.stderr)
     out=pathlib.Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
+    if not args.areas:                                   # 관례 경로의 행정경계 자동 적재(06-gen-areas 산출 areas.sqlite)
+        cand = out.parent / "areas.sqlite"
+        if cand.exists(): args.areas = str(cand)
     tmp=out.with_suffix(".sqlite.tmp"); tmp.unlink(missing_ok=True)
     db=sqlite3.connect(tmp); db.executescript(SCHEMA)
     t0=time.time(); state={"pid":0,"seen":set()}
     print(f"[통합 지오코드 빌드] juso={args.src}\n  osm={args.osm}", file=sys.stderr)
     add_juso(db, pathlib.Path(args.src), only, state)
     add_osm(db, args.osm, state)
+    if args.areas and pathlib.Path(args.areas).exists():     # 행정경계 폴리곤(06-gen-areas) — reverse point-in-polygon용
+        ar = sqlite3.connect(f"file:{args.areas}?mode=ro", uri=True)   # ATTACH 아님: rtree 는 cross-attach INSERT 시 'database is locked'
+        db.executemany("INSERT INTO areas(id,name,type,rings,code) VALUES(?,?,?,?,?)",
+                       ar.execute("SELECT id,name,type,rings,code FROM areas"))
+        db.executemany("INSERT INTO area_rtree VALUES(?,?,?,?,?)",
+                       ar.execute("SELECT id,minlon,maxlon,minlat,maxlat FROM area_rtree"))
+        ar.close()
+        print(f"  areas ← {args.areas}: {db.execute('SELECT count(*) FROM areas').fetchone()[0]:,}", file=sys.stderr)
     if args.poi_csv_dir: add_biz(db, args.poi_csv_dir, state)
     # biz 중복(상가↔LOCALDATA 같은 점포) 표시용 대표 선정 — 출처(source)는 모두 보존하되 그룹당 1건만 is_primary=1.
     db.create_function("nrm", 1, biznrm)   # facility 충돌숨김(아래)에서도 사용 → dedup 방식과 무관하게 등록

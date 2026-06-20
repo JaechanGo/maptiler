@@ -33,7 +33,7 @@ def q1(db, sql, *a):
 # ── A. 인코딩·정규화 ──────────────────────────────────────────────
 def check_nfc(db):
     bad = 0; n = 0
-    for kind in ("addr", "biz", "place", "poi"):
+    for kind in ("addr", "biz", "place", "poi", "road", "station"):
         for (name,) in db.execute(
                 "SELECT name FROM places WHERE kind=? AND name IS NOT NULL LIMIT 20000", (kind,)):
             n += 1
@@ -52,7 +52,9 @@ def check_db_scan(db):
                        OR lat NOT BETWEEN {LAT0} AND {LAT1} THEN 1 ELSE 0 END) oob,
              sum(CASE WHEN lon=0 AND lat=0 THEN 1 ELSE 0 END) zero,
              count(jibun) jibun, count(cat1) cat1,
-             count(DISTINCT CASE WHEN sido<>'' THEN sido END) nsido
+             count(DISTINCT CASE WHEN sido<>'' THEN sido END) nsido,
+             sum(CASE WHEN bcode IS NOT NULL AND bcode<>'' THEN 1 ELSE 0 END) bcode,
+             sum(CASE WHEN hcode IS NOT NULL AND hcode<>'' THEN 1 ELSE 0 END) hcode
       FROM places GROUP BY kind""").fetchall()
     K = {r[0]: r for r in rows}
     total = sum(r[1] for r in rows)
@@ -77,11 +79,15 @@ def check_db_scan(db):
 
     if addr_n:
         jr = K["addr"][4] / addr_n
-        rec("PASS" if jr > 0.5 else "WARN", "주소 지번 채움률", f"{jr*100:.1f}% ({K['addr'][4]:,}/{addr_n:,})")
+        rec("PASS" if jr > 0.98 else "WARN", "주소 지번 채움률", f"{jr*100:.2f}% ({K['addr'][4]:,}/{addr_n:,})")
+        br = K["addr"][7] / addr_n
+        rec("PASS" if br >= 0.999 else "FAIL", "주소 법정동코드(b_code) 채움률", f"{br*100:.2f}% ({K['addr'][7]:,}/{addr_n:,})")
+        hr = K["addr"][8] / addr_n
+        rec("PASS" if hr >= 0.999 else "FAIL", "주소 행정동코드(h_code) 채움률", f"{hr*100:.2f}% ({K['addr'][8]:,}/{addr_n:,})")
     biz_n = K.get("biz", (None, 0))[1]
     if biz_n:
         cr = K["biz"][5] / biz_n
-        rec("PASS" if cr > 0.5 else "WARN", "시설 업종대분류 채움률", f"{cr*100:.1f}% ({K['biz'][5]:,}/{biz_n:,})")
+        rec("PASS" if cr > 0.95 else "WARN", "시설 업종대분류 채움률", f"{cr*100:.1f}% ({K['biz'][5]:,}/{biz_n:,})")
 
 
 # ── E. 인덱스 무결성 ──────────────────────────────────────────────
@@ -100,6 +106,40 @@ def check_index(db):
         rec("PASS" if rt == total else "WARN", "R-tree 인덱스", f"{rt:,} vs places {total:,}")
     else:
         rec("FAIL", "R-tree 인덱스", "place_rtree 없음")
+
+
+# ── E2. 행정경계 폴리곤(역지오코딩 point-in-polygon) ──────────────
+def check_areas(db):
+    has = lambda t: q1(db, "SELECT count(*) FROM sqlite_master WHERE name=?", t)
+    if not has("areas"):
+        rec("WARN", "행정경계 areas", "areas 테이블 없음 — 역지오 동 폴리곤 미적재"); return
+    by = dict(db.execute("SELECT type,count(*) FROM areas GROUP BY type").fetchall())
+    total = sum(by.values())
+    if total == 0:
+        rec("WARN", "행정경계 areas", "0건 — 역지오 동 경계 판정 불가(06-gen-areas/areas.sqlite 미적재?)"); return
+    miss = [t for t in ("legal-dong", "admin-dong") if by.get(t, 0) == 0]
+    if miss: rec("FAIL", "행정경계 단위", f"누락 {', '.join(miss)} (현재 {by})")
+    else:    rec("PASS", "행정경계 areas", f"{total:,}건 · " + " ".join(f"{k}={v:,}" for k, v in by.items()))
+    bad = q1(db, "SELECT count(*) FROM areas WHERE rings IS NULL OR rings='' OR rings='[]'")
+    rec("FAIL" if bad else "PASS", "areas rings 무결성", f"빈/깨진 rings {bad:,}건" if bad else f"전 {total:,}건 polygon 보유")
+    if has("area_rtree"):
+        rt = q1(db, "SELECT count(*) FROM area_rtree_rowid")
+        rec("PASS" if rt == total else "WARN", "area R-tree", f"{rt:,} vs areas {total:,}")
+    else:
+        rec("FAIL", "area R-tree", "area_rtree 없음")
+
+
+# ── E3. 카테고리 표준(canonical) 정합 — 권위 style/poi-taxonomy.json ─
+def check_categories(db, taxonomy_path):
+    if not (taxonomy_path and os.path.exists(taxonomy_path)):
+        rec("WARN", "카테고리 표준", "poi-taxonomy.json 없음 — 스킵"); return
+    canon = set(json.load(open(taxonomy_path, encoding="utf-8")).get("cat1_order", []))
+    if not canon:
+        rec("WARN", "카테고리 표준", "poi-taxonomy.json cat1_order 비어있음 — 스킵"); return
+    seen = [c for (c,) in db.execute("SELECT DISTINCT cat1 FROM places WHERE cat1 IS NOT NULL AND cat1<>''")]
+    off = sorted(c for c in seen if c not in canon)
+    if off: rec("FAIL", "카테고리 canonical 정합", f"표준 밖 cat1 {len(off)}종: {', '.join(off[:8])} (기준 poi-taxonomy {len(canon)}종)")
+    else:   rec("PASS", "카테고리 canonical 정합", f"cat1 {len(seen)}종 모두 표준({len(canon)}종) 부분집합")
 
 
 # ── F. 검색 품질(골든 질의 회귀) — API 필요 ───────────────────────
@@ -200,13 +240,14 @@ def main():
     ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
     ap.add_argument("--tiles", default=os.path.expanduser("~/geocode-build/tiles"))
     ap.add_argument("--style"); ap.add_argument("--config")
+    ap.add_argument("--taxonomy", default=str(pathlib.Path(__file__).resolve().parents[1] / "style" / "poi-taxonomy.json"))
     ap.add_argument("--api", default="http://localhost:8082")
     a = ap.parse_args()
 
     print(f"QC: {a.db}")
     if os.path.exists(a.db):
         db = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
-        check_nfc(db); check_db_scan(db); check_index(db); db.close()
+        check_nfc(db); check_db_scan(db); check_index(db); check_areas(db); check_categories(db, a.taxonomy); db.close()
     else:
         rec("FAIL", "DB", f"{a.db} 없음")
     check_golden(a.api)

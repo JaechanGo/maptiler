@@ -1,146 +1,188 @@
 {
-  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '자동 수집 목록'이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동. collect{method,...} 있으면 자동수집(file.localdata/data.go.kr/geofabrik 우회). default_collect=목록 기본 체크. build_input 있으면 업로드/적재 지원. 날짜 표기는 yyyy-mm-dd 표준.",
-  "sources": [
-    {
-      "key": "juso_navi",
-      "name": "도로명주소 내비게이션용DB 전체분",
-      "category": "주소",
-      "url": "https://business.juso.go.kr/addrlink/main.do",
-      "period_fmt": "YYYYMM",
-      "cycle": "월",
-      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용. 수동 업로드.",
-      "latest_check": {
-        "type": "json",
-        "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
-        "method": "POST",
-        "body": {
-          "rtlDtaDtlSn": "28",
-          "year": "{year}",
-          "month": "{month}",
-          "expand": "Y"
-        },
-        "json_path": "results.allMonthFileList",
-        "field": "crtrYm",
-        "filter": {
-          "isExist": "Y",
-          "fileTypeNm": "NAVIDATA"
-        },
-        "pick": "max"
-      },
-      "build_input": {
-        "dest": "staged/navi",
-        "extract": "7z",
-        "into": "dir"
-      }
+ "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '자동 수집 목록'이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동. collect{method,...} 있으면 자동수집(file.localdata/data.go.kr/geofabrik 우회). default_collect=목록 기본 체크. build_input 있으면 업로드/적재 지원. 날짜 표기는 yyyy-mm-dd 표준.",
+ "sources": [
+  {
+   "key": "juso_navi",
+   "name": "도로명주소 내비게이션용DB 전체분",
+   "category": "주소",
+   "url": "https://business.juso.go.kr/addrlink/main.do",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용. 수동 업로드.",
+   "latest_check": {
+    "type": "json",
+    "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
+    "method": "POST",
+    "body": {
+     "rtlDtaDtlSn": "28",
+     "year": "{year}",
+     "month": "{month}",
+     "expand": "Y"
     },
-    {
-      "key": "sangga",
-      "name": "소상공인시장진흥공단 상가(상권)정보",
-      "category": "상가",
-      "url": "https://www.data.go.kr/data/15083033/fileData.do",
-      "period_fmt": "YYYY-MM-DD",
-      "cycle": "분기",
-      "note": "상호·업종(POI/상가). 자동 다운로드: selectFileDataDownload.do(atchFileId 획득) → cmm/cmm/fileDownload.do(파일 스트림). data.go.kr 미차단. poi-all/sangga 에 zip 추출, 09가 glob.",
-      "latest_check": {
-        "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
-        "pick": "first"
-      },
-      "collect": {
-        "method": "datago_filedown",
-        "publicDataPk": "15083033",
-        "publicDataDetailPk": "uddi:6a450671-390c-4b6d-979c-fa056a627084",
-        "detail_url": "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do"
-      },
-      "default_collect": true,
-      "build_input": {
-        "dest": "poi-all/sangga",
-        "extract": null,
-        "into": "dir"
-      }
+    "json_path": "results.allMonthFileList",
+    "field": "crtrYm",
+    "filter": {
+     "isExist": "Y",
+     "fileTypeNm": "NAVIDATA"
     },
-    {
-      "key": "localdata",
-      "name": "인허가 지역별 전체분",
-      "category": "인허가",
-      "url": "https://www.localdata.go.kr/",
-      "period_fmt": "YYYY-MM-DD",
-      "cycle": "일",
-      "note": "지방행정 인허가(업소) 전국 전체분. file.localdata.go.kr 우회(한국 IP 호스트). 하위=17 시·도(orgCode_ALL, localdata-regions.json). URL 확정(2026-06 캡처): /file/download-all, 시·도=?orgCode=<code>_ALL.",
-      "collect": {
-        "method": "localdata_all",
-        "base": "https://file.localdata.go.kr",
-        "path": "/file/download-all",
-        "region_path": "/file/download-all?orgCode={orgCode}_ALL",
-        "regions": "localdata-regions.json"
-      },
-      "default_collect": true,
-      "build_input": {
-        "dest": "staged/localdata",
-        "extract": null,
-        "into": "dir"
-      }
-    },
-    {
-      "key": "facility",
-      "name": "생활편의시설(공공)",
-      "category": "생활편의",
-      "url": "https://www.localdata.go.kr/",
-      "period_fmt": "YYYY-MM-DD",
-      "cycle": "수시",
-      "note": "공중화장실·무인민원발급기 등 14종. file.localdata.go.kr 우회. kind=facility 로 별도 적재(상가/인허가 biz 분리). 14종·슬러그=facility-catalog.json. 종류 선택 다운로드.",
-      "collect": {
-        "method": "localdata_facility",
-        "catalog": "facility-catalog.json"
-      },
-      "default_collect": true,
-      "build_input": {
-        "dest": "staged/facility",
-        "extract": null,
-        "into": "dir"
-      }
-    },
-    {
-      "key": "building_db",
-      "name": "GIS건물통합정보 (건물DB)",
-      "category": "건물",
-      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
-      "period_fmt": "YYYY-MM-DD",
-      "cycle": "월(일 변경분)",
-      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드.",
-      "latest_check": {
-        "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
-        "pick": "max"
-      },
-      "build_input": {
-        "dest": "staged/gis",
-        "extract": "zip",
-        "into": "dir"
-      }
-    },
-    {
-      "key": "osm",
-      "name": "OpenStreetMap (남한, geofabrik)",
-      "category": "OSM",
-      "url": "https://download.geofabrik.de/asia/south-korea.html",
-      "period_fmt": "YYYY-MM-DD",
-      "cycle": "일",
-      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf 직접 다운로드(차단 없음). 거의 안 바뀌어 기본 미체크(직전 OSM 재사용), 체크 시에만 .pbf 재다운로드+변환(planetiler→korea.mbtiles, osm.sqlite, 동 라벨). 변환은 무거움(Java·~1GB 보조데이터·수십분).",
-      "latest_check": {
-        "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
-        "pick": "first"
-      },
-      "collect": {
-        "method": "geofabrik",
-        "url": "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf",
-        "dest": "data/osm/south-korea.osm.pbf",
-        "build_targets": ["osm_vector", "osm_sqlite", "dong"]
-      },
-      "default_collect": false,
-      "build_input": {
-        "dest": "data/osm",
-        "extract": null,
-        "into": "file"
-      }
-    }
-  ]
+    "pick": "max"
+   },
+   "build_input": {
+    "dest": "staged/navi",
+    "extract": "7z",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "sangga",
+   "name": "소상공인시장진흥공단 상가(상권)정보",
+   "category": "상가",
+   "url": "https://www.data.go.kr/data/15083033/fileData.do",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "분기",
+   "note": "상호·업종(POI/상가). 자동 다운로드: selectFileDataDownload.do(atchFileId 획득) → cmm/cmm/fileDownload.do(파일 스트림). data.go.kr 미차단. poi-all/sangga 에 zip 추출, 09가 glob.",
+   "latest_check": {
+    "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "first"
+   },
+   "collect": {
+    "method": "datago_filedown",
+    "publicDataPk": "15083033",
+    "publicDataDetailPk": "uddi:6a450671-390c-4b6d-979c-fa056a627084",
+    "detail_url": "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do"
+   },
+   "default_collect": true,
+   "build_input": {
+    "dest": "poi-all/sangga",
+    "extract": null,
+    "into": "dir"
+   }
+  },
+  {
+   "key": "localdata",
+   "name": "인허가 지역별 전체분",
+   "category": "인허가",
+   "url": "https://www.localdata.go.kr/",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "일",
+   "note": "지방행정 인허가(업소) 전국 전체분. file.localdata.go.kr 우회(한국 IP 호스트). 하위=17 시·도(orgCode_ALL, localdata-regions.json). URL 확정(2026-06 캡처): /file/download-all, 시·도=?orgCode=<code>_ALL.",
+   "collect": {
+    "method": "localdata_all",
+    "base": "https://file.localdata.go.kr",
+    "path": "/file/download-all",
+    "region_path": "/file/download-all?orgCode={orgCode}_ALL",
+    "regions": "localdata-regions.json"
+   },
+   "default_collect": true,
+   "build_input": {
+    "dest": "staged/localdata",
+    "extract": null,
+    "into": "dir"
+   }
+  },
+  {
+   "key": "facility",
+   "name": "생활편의시설(공공)",
+   "category": "생활편의",
+   "url": "https://www.localdata.go.kr/",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "공중화장실·무인민원발급기 등 14종. file.localdata.go.kr 우회. kind=facility 로 별도 적재(상가/인허가 biz 분리). 14종·슬러그=facility-catalog.json. 종류 선택 다운로드.",
+   "collect": {
+    "method": "localdata_facility",
+    "catalog": "facility-catalog.json"
+   },
+   "default_collect": true,
+   "build_input": {
+    "dest": "staged/facility",
+    "extract": null,
+    "into": "dir"
+   }
+  },
+  {
+   "key": "building_db",
+   "name": "GIS건물통합정보 (건물DB)",
+   "category": "건물",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "월(일 변경분)",
+   "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드.",
+   "latest_check": {
+    "regex": "기준일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "max"
+   },
+   "build_input": {
+    "dest": "staged/gis",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "osm",
+   "name": "OpenStreetMap (남한, geofabrik)",
+   "category": "OSM",
+   "url": "https://download.geofabrik.de/asia/south-korea.html",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "일",
+   "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf 직접 다운로드(차단 없음). 거의 안 바뀌어 기본 미체크(직전 OSM 재사용), 체크 시에만 .pbf 재다운로드+변환(planetiler→korea.mbtiles, osm.sqlite, 동 라벨). 변환은 무거움(Java·~1GB 보조데이터·수십분).",
+   "latest_check": {
+    "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "first"
+   },
+   "collect": {
+    "method": "geofabrik",
+    "url": "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf",
+    "dest": "data/osm/south-korea.osm.pbf",
+    "build_targets": [
+     "osm_vector",
+     "osm_sqlite",
+     "dong"
+    ]
+   },
+   "default_collect": false,
+   "build_input": {
+    "dest": "data/osm",
+    "extract": null,
+    "into": "file"
+   }
+  },
+  {
+   "key": "boundary_legal",
+   "name": "행정구역 읍면동(법정동) 경계",
+   "category": "행정경계",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "월",
+   "note": "VWorld dsId=30603(datPageSize=100로 17시도 전체 한 페이지) 「행정구역_읍면동(법정동)」 LSMD_ADM_SECT_UMD_<시도>(시도별 SHP). EPSG:5186·CP949, 필드 EMD_NM/EMD_CD(8자리=법정동코드 앞8). 역지오코딩 areas(type=legal-dong) 적재: `06-gen-areas.py --shp sources/boundary/legal --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong`. 2026-06 기준 5,370건. 갱신일 추적=VWorld 30603(갱신일 YYYY-MM-DD). 대안 법정동 소스 GIS Developer(gisdeveloper.co.kr/?p=2332, 읍면동=법정동, 가입X)이나 날짜가 지저분해 VWorld 채택.",
+   "build_input": {
+    "dest": "sources/boundary/legal",
+    "extract": "zip",
+    "into": "dir"
+   },
+   "latest_check": {
+    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
+    "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "max"
+   }
+  },
+  {
+   "key": "boundary_admin",
+   "name": "행정동 경계 (센서스경계)",
+   "category": "행정경계",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "반기",
+   "note": "행정동 경계 BND_ADM_DONG_PG(VWorld dsId=30017, 통계청 센서스경계와 동일파일) BND_ADM_DONG_PG(단일 SHP). EPSG:5186·CP949, 필드 ADM_NM/ADM_CD(8자리, SGIS 한국행정구역분류 코드계 — navi h_code와 다른 체계, 이름은 일치). 역지오코딩 areas(type=admin-dong) 적재: `06-gen-areas.py --shp sources/boundary/admin/BND_ADM_DONG_PG.shp --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong`. 2025-06-30 기준 3,559건 갱신일 추적=VWorld 30017 BND_ADM_DONG_PG 갱신일(서버렌더·정적 OK, 파일 DBF 날짜와 일치). data.go.kr 15125055도 동일 데이터(수정일).",
+   "build_input": {
+    "dest": "sources/boundary/admin",
+    "extract": "zip",
+    "into": "dir"
+   },
+   "latest_check": {
+    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
+    "regex": "BND_ADM_DONG_PG[\\s\\S]*?갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "first"
+   }
+  }
+ ]
 }
