@@ -112,8 +112,26 @@
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
     "pick": "max"
    },
+   "collect": {"method": "vworld_session", "ds_id": "18", "file_nos": []},
+   "default_collect": false,
    "build_input": {
     "dest": "staged/gis",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "parcel",
+   "name": "연속지적도 (VWorld dsId=30563)",
+   "category": "지적",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30563",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). 시군구 단위 다수 ZIP. PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh. file_nos 는 다운로드센터 로그인 후 DevTools 로 확인해 채울 것(선행 캡처).",
+   "collect": {"method": "vworld_session", "ds_id": "30563", "file_nos": []},
+   "default_collect": false,
+   "build_input": {
+    "dest": "staged/parcel",
     "extract": "zip",
     "into": "dir"
    }
@@ -184,6 +202,52 @@
     "regex": "BND_ADM_DONG_PG[\\s\\S]*?갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
     "pick": "first"
    }
+  },
+  {
+   "key": "police",
+   "name": "경찰청_전국 지구대·파출소 주소 현황",
+   "category": "시설",
+   "url": "https://www.data.go.kr/data/15077036/fileData.do",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "연",
+   "note": "관서명+도로명주소(좌표無→지오코딩 단계서 채움). PostGIS public_facility(kind=police). 무인증 datago_filedown(fileDetailSn=1). 적재: load_facility.py --kind police. ※키워드검색의 15054711(폐PK) 사용금지.",
+   "collect": {"method": "datago_filedown", "publicDataPk": "15077036", "fileDetailSn": "1"},
+   "default_collect": false,
+   "build_input": {"dest": "staged/facility_src/police", "extract": null, "into": "dir"}
+  },
+  {
+   "key": "fire_station",
+   "name": "소방청_119안전센터 현황",
+   "category": "시설",
+   "url": "https://www.data.go.kr/data/15065056/fileData.do",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "119안전센터명+주소. ZIP→연도별 CSV(load_facility 가 최신연도 선택). PostGIS public_facility(kind=fire_station). 무인증. ※소방관서현황 15033759(시·도 집계표)는 POI 아님—금지.",
+   "collect": {"method": "datago_filedown", "publicDataPk": "15065056", "fileDetailSn": "1"},
+   "default_collect": false,
+   "build_input": {"dest": "staged/facility_src/fire_station", "extract": "zip", "into": "dir"}
+  },
+  {
+   "key": "shelter_civil",
+   "name": "전국민방위대피시설표준데이터",
+   "category": "시설",
+   "url": "https://www.data.go.kr/data/15021098/standard.do",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "민방위 대피시설(좌표有). file.localdata.go.kr 무인증(한국IP 전용·해외 403). PostGIS public_facility(kind=shelter). ※파일 직링크 경로는 빌드시 standard.do 에서 확인 후 col.url 갱신 필요(현재 추정값).",
+   "collect": {"method": "direct", "url": "https://file.localdata.go.kr/file/civil_defense_shelter_info/info", "mode": "extract"},
+   "default_collect": false,
+   "build_input": {"dest": "staged/facility_src/shelter", "extract": null, "into": "dir"}
+  },
+  {
+   "key": "aed",
+   "name": "국립중앙의료원_전국 자동심장충격기(AED) 정보",
+   "category": "시설",
+   "url": "https://www.data.go.kr/data/15000652/openapi.do",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선.",
+   "build_input": {"dest": "staged/facility_src/aed", "extract": null, "into": "dir"}
   },
   {
    "key": "style",

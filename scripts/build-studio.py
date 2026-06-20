@@ -1057,6 +1057,32 @@ def _extract_into(src, dest_dir, orig_name=None):
     shutil.copy2(src, dest_dir / nm)
 
 
+def _vworld_cookie():
+    """VWorld 로그인 세션 쿠키 — 환경변수 VWORLD_COOKIE 우선, 없으면 BUILD_HOME/.secrets/vworld_cookie.
+    사용자가 브라우저 로그인 후 JSESSIONID(=...; ...) 를 붙여넣어 둔다(만료 시 재주입)."""
+    ck = os.environ.get("VWORLD_COOKIE")
+    if ck:
+        return ck.strip()
+    f = BUILD_HOME / ".secrets" / "vworld_cookie"
+    try:
+        if f.exists():
+            return f.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    return None
+
+
+def _collect_headers(src):
+    """수집 메서드별 추가 헤더 — vworld_session 이면 로그인 쿠키+Referer. 그 외 None."""
+    if (src.get("collect") or {}).get("method") == "vworld_session":
+        ck = _vworld_cookie()
+        if not ck:
+            raise RuntimeError("VWorld 세션 쿠키 없음 — 환경변수 VWORLD_COOKIE 또는 "
+                               f"{BUILD_HOME}/.secrets/vworld_cookie 에 브라우저 로그인 쿠키(JSESSIONID=…) 설정")
+        return {"Cookie": ck, "Referer": "https://www.vworld.kr/"}
+    return None
+
+
 def _collect_plan(item_key):
     """항목키 → (source, urls[], dest, mode). 항목키: '<srckey>' 또는 '<srckey>:<sub>'."""
     skey, _, sub = item_key.partition(":")
@@ -1078,18 +1104,33 @@ def _collect_plan(item_key):
         return src, [base + reg["all_path"]], BUILD_HOME / "staged/localdata", "extract"
     if method == "geofabrik":
         return src, [col["url"]], ROOT / col.get("dest", "data/osm/south-korea.osm.pbf"), "file"  # 02-gen-vector.sh 가 ROOT/data/osm 읽음
+    if method == "direct":   # 무인증 직접 다운로드(민방위 대피시설 등). col.url → dest 추출/복사.
+        return src, [col["url"]], BUILD_HOME / src.get("build_input", {}).get("dest", "staged/facility_src"), col.get("mode", "extract")
     if method == "datago_filedown":   # data.go.kr 2단계: selectFileDataDownload.do(메타) → fileDownload.do(파일)
-        meta_url = (col.get("detail_url", "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do")
-                    + f"?recommendDataYn=Y&publicDataPk={col.get('publicDataPk')}"
-                    + f"&publicDataDetailPk={urllib.parse.quote(col.get('publicDataDetailPk', ''))}")
+        # 메타 파라미터: 상가=publicDataDetailPk(uddi), 경찰/소방=fileDetailSn. 둘 다 지원.
+        q = f"?recommendDataYn=Y&publicDataPk={col.get('publicDataPk')}"
+        if col.get("publicDataDetailPk"):
+            q += f"&publicDataDetailPk={urllib.parse.quote(col['publicDataDetailPk'])}"
+        if col.get("fileDetailSn"):
+            q += f"&fileDetailSn={col['fileDetailSn']}"
+        meta_url = col.get("detail_url", "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do") + q
         req = urllib.request.Request(meta_url, headers={"User-Agent": "Mozilla/5.0", "Referer": src.get("url", "")})
         meta = json.loads(urllib.request.urlopen(req, timeout=30, context=ssl._create_unverified_context()).read().decode("utf-8", "replace"))
         if not (meta.get("status") and meta.get("atchFileId")):
-            raise RuntimeError("상가 메타 조회 실패(atchFileId 없음) — data.go.kr 변경/차단 확인")
-        dnm = (meta.get("dataSetFileDetailInfo") or {}).get("dataNm", "sangga")
+            raise RuntimeError(f"data.go.kr 메타 조회 실패(atchFileId 없음) — PK={col.get('publicDataPk')} 변경/차단/IP 확인")
+        dnm = (meta.get("dataSetFileDetailInfo") or {}).get("dataNm", skey)
         url = ("https://www.data.go.kr/cmm/cmm/fileDownload.do"
-               + f"?atchFileId={meta['atchFileId']}&fileDetailSn={meta.get('fileDetailSn', '1')}&dataNm={urllib.parse.quote(dnm)}")
+               + f"?atchFileId={meta['atchFileId']}&fileDetailSn={col.get('fileDetailSn', meta.get('fileDetailSn', '1'))}&dataNm={urllib.parse.quote(dnm)}")
         return src, [url], BUILD_HOME / src.get("build_input", {}).get("dest", "poi-all/sangga"), "extract"
+    if method == "vworld_session":   # VWorld 다운로드센터 — 로그인 세션 쿠키로 downloadResourceFile.do GET
+        # 선행(1회): 로그인 후 DevTools 로 ds_id·fileNo·실제 download .do 경로 캡처 → 아래 col 채움.
+        base = col.get("download_url", "https://www.vworld.kr/dtmk/downloadResourceFile.do")
+        ds = str(col.get("ds_id", "")); nos = col.get("file_nos") or ([col["file_no"]] if col.get("file_no") else [])
+        if not (ds and nos):
+            raise RuntimeError(f"vworld_session({skey}): collect.ds_id 와 file_nos 필요 — "
+                               "VWorld 다운로드센터 로그인 후 파일별 fileNo 확인해 data-sources.json 에 채울 것")
+        urls = [f"{base}?ds_id={ds}&fileNo={urllib.parse.quote(str(n))}" for n in nos]
+        return src, urls, BUILD_HOME / src.get("build_input", {}).get("dest", "staged/gis"), "extract"
     raise RuntimeError(f"수집 미지원: {skey}")
 
 
@@ -1188,12 +1229,13 @@ def run_collect(selected):
         for item_key in selected:
             try:
                 src, urls, dest, mode = _collect_plan(item_key)
+                hdrs = _collect_headers(src)   # vworld_session 이면 로그인 세션 쿠키 주입
                 MGR._emit("collect", f"⇩ {item_key} 다운로드 ({len(urls)}파일)…")
                 shas = []
                 if mode == "file":
                     destp = pathlib.Path(dest); destp.parent.mkdir(parents=True, exist_ok=True)
                     tmp = tmpdir / (item_key.replace(":", "_") + ".part")
-                    sz = _http_download(urls[0], tmp)
+                    sz = _http_download(urls[0], tmp, headers=hdrs)
                     sha, reused = store_put(tmp); shas.append(sha)
                     if not reused or not destp.exists():
                         shutil.copy2(store_path(sha), destp)
@@ -1202,7 +1244,7 @@ def run_collect(selected):
                     allreused = True
                     for i, u in enumerate(urls):
                         tmp = tmpdir / (item_key.replace(":", "_") + f"_{i}.part")
-                        sz = _http_download(u, tmp)
+                        sz = _http_download(u, tmp, headers=hdrs)
                         sha, reused = store_put(tmp); shas.append(sha); allreused = allreused and reused
                         MGR._emit("collect", f"  파일{i+1}/{len(urls)} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
                     if (not allreused) or (not _nonempty_dir(pathlib.Path(dest))):
