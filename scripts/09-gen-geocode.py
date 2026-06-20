@@ -248,11 +248,15 @@ def main():
         # navi 조인 backfill: biz 행에 건물키(bd_mgt_sn) — sido+sigungu+road_norm+본/부번 일치 navi addr 의 최근접값.
         # 미파싱·미일치는 NULL 유지(dedup_er가 좌표밀도 TF로 폴백). 부분인덱스 후 상관서브쿼리(수백만행→수분), 끝나면 인덱스 제거.
         db.execute("CREATE INDEX IF NOT EXISTS idx_addr_key ON places(sido,sigungu,road_norm,main_no,sub_no) WHERE kind='addr'")
+        # 조인키(sido+sigungu+road_norm+본/부번)가 같은 건물을 특정 → 매칭 addr 은 동일 bd_mgt_sn.
+        # 좌표 최근접 tiebreak 은 서브쿼리 ORDER BY 에서 바깥 places.lon/lat 을 참조해야 하는데,
+        # 낮은 버전 SQLite(빌드 호스트)가 ORDER BY 절의 바깥참조를 해석 못해 "no such column" 으로 실패.
+        # 거의 동일 결과인 결정적 inner 정렬(bd_mgt_sn)로 대체 → 전 버전 호환.
         db.execute("""UPDATE places SET bd_mgt_sn=(
             SELECT a.bd_mgt_sn FROM places a WHERE a.kind='addr'
               AND a.sido=places.sido AND a.sigungu=places.sigungu
               AND a.road_norm=places.road_norm AND a.main_no=places.main_no AND a.sub_no=places.sub_no
-            ORDER BY abs(a.lon-places.lon)+abs(a.lat-places.lat) LIMIT 1)
+            ORDER BY a.bd_mgt_sn LIMIT 1)
           WHERE kind='biz' AND road_norm IS NOT NULL AND main_no IS NOT NULL""")
         db.execute("DROP INDEX IF EXISTS idx_addr_key")
         nbiz = db.execute("SELECT count(*) FROM places WHERE kind='biz'").fetchone()[0]

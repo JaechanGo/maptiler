@@ -24,7 +24,7 @@ while IFS= read -r shp; do
   tippecanoe -o "$PARTS/$lyr.mbtiles" -l building -Z13 -z16 \
     --drop-densest-as-needed --simplification=4 --no-tile-size-limit \
     -y render_height -y levels --quiet --force "$TMPJL"
-  echo "  [$i] $lyr → $(du -h "$PARTS/$lyr.mbtiles"|cut -f1)  (여유 $(df -h /System/Volumes/Data|awk 'NR==2{print $4}'))"
+  echo "  [$i] $lyr → $(du -h "$PARTS/$lyr.mbtiles"|cut -f1)  (여유 $(df -h "$OUTDIR"|awk 'NR==2{print $4}'))"
   rm -f "$TMPJL"
 done < <(find "$SRC" -iname '*.shp')
 
