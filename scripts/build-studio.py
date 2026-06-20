@@ -1766,23 +1766,26 @@ function card(kind,label){if(cards[kind])return;const el=document.createElement(
  $('#cards').appendChild(el);cards[kind]=el;bars[kind]=$('#bar_'+kind);sts[kind]=$('#st_'+kind);}
 const LBL={};
 function lbl(k){const t=TARGETS.find(x=>x.kind===k);return t?t.label:k}
-const JOB={};   // kind → 최신 상태. 빌드/수집 진행 중이면 시작 버튼 비활성화(중복 실행·체크 초기화 방지)
-function anyBusy(){return Object.keys(JOB).some(k=>JOB[k]==='queued'||JOB[k]==='running');}
-function setBusy(b){
- const run=$('#run'); if(run){run.disabled=b; run.textContent=b?'⏳ 빌드 중…':'빌드 시작';}
- const fa=$('#forceAll'); if(fa)fa.disabled=b;
- const cb=$('#collectBtn'); if(cb){cb.disabled=b; cb.textContent=b?'⏳ 진행 중…':'⬇ 자동수집 시작 (순차)';}
+const JOB={}; let optBuild=false, optCollect=false;   // JOB: kind→상태. opt*: 클릭 직후 SSE 도착 전 낙관적 비활성화
+function buildBusy(){return optBuild||Object.keys(JOB).some(k=>k!=='collect'&&(JOB[k]==='queued'||JOB[k]==='running'));}
+function collectBusy(){return optCollect||JOB['collect']==='queued'||JOB['collect']==='running';}
+function anyBusy(){return buildBusy()||collectBusy();}   // 타겟 체크 초기화 게이팅(완전 idle 일 때만)
+function updateBusy(){
+ const bb=buildBusy(), cb=collectBusy(), any=bb||cb;
+ const run=$('#run'); if(run){run.disabled=any; run.textContent=bb?'⏳ 빌드 중…':'빌드 시작';}   // '빌드 중…'은 실제 빌드 때만(수집 중엔 '빌드 시작'·비활성)
+ const fa=$('#forceAll'); if(fa)fa.disabled=any;
+ const col=$('#collectBtn'); if(col){col.disabled=any; col.textContent=cb?'⏳ 진행 중…':'⬇ 자동수집 시작 (순차)';}
 }
-function updateBusy(){setBusy(anyBusy());}
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
  if(s){JOB[k]=s;const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
 function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
- if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);updateBusy();return}
+ if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);optBuild=optCollect=false;updateBusy();return}
  setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
+ if(d.kind==='collect')optCollect=false; else optBuild=false;   // 실제 상태 도착 → 해당 낙관 플래그 해제
  updateBusy();
- if(d.status==='done'||d.status==='error'||d.status==='skipped'){loadBuilds();if(d.kind==='collect')loadCollect();else if(!anyBusy())refreshTargetsSoon();}};   // 타겟 체크 초기화는 전체 빌드 종료 후에만
+ if(d.status==='done'||d.status==='error'||d.status==='skipped'){loadBuilds();if(d.kind==='collect')loadCollect();else if(!anyBusy())refreshTargetsSoon();}};   // 타겟 체크 초기화는 전체 종료 후에만
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function vbadge(s){if(!s.uploadable)return '';
@@ -1866,8 +1869,8 @@ function loadCollect(preserve=true){
 function startCollect(){let sel=[...document.querySelectorAll('#collect input.ck:checked')].map(x=>x.value).filter(Boolean);
   if(sel.includes('localdata'))sel=sel.filter(k=>!k.startsWith('localdata:'));
   if(!sel.length)return alert('수집할 항목을 체크하세요');
-  logln('▶ 자동수집 '+sel.length+'건 순차 시작…'); setBusy(true);   // 즉시 비활성화(SSE running 도착 전 중복 클릭 방지)
-  fetch('/api/collect/start',{method:'POST',body:JSON.stringify({selected:sel})}).then(r=>r.json()).then(d=>{if(d.error){updateBusy();return alert(d.error);}logln('  큐: '+(d.started||[]).join(', '));}).catch(e=>{updateBusy();alert('수집 시작 실패: '+e);});}
+  logln('▶ 자동수집 '+sel.length+'건 순차 시작…'); optCollect=true; updateBusy();   // 즉시 수집-비활성화(SSE running 도착 전 중복 클릭 방지)
+  fetch('/api/collect/start',{method:'POST',body:JSON.stringify({selected:sel})}).then(r=>r.json()).then(d=>{if(d.error){optCollect=false;updateBusy();return alert(d.error);}logln('  큐: '+(d.started||[]).join(', '));}).catch(e=>{optCollect=false;updateBusy();alert('수집 시작 실패: '+e);});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadCollect();});}
@@ -1968,12 +1971,12 @@ function runBuild(t){
  fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
    (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
    (d.fresh||[]).forEach(k=>logln('  ↻ '+lbl(k)+': 최신 — 건너뜀(재사용)'));
-   logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();updateBusy();}).catch(e=>{updateBusy();logln('✗ 빌드 시작 실패: '+e);});}
+   logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();optBuild=false;updateBusy();}).catch(e=>{optBuild=false;updateBusy();logln('✗ 빌드 시작 실패: '+e);});}
 // 빌드 시작 시엔 '빌드 대상' 체크박스를 건드리지 않는다(사용자 선택 유지). 타겟 목록 갱신(=fresh 자동 체크해제)은
 // 모든 잡이 끝난 뒤(es.onmessage 의 !anyBusy())에만 1회 수행 → 진행 중 초기화/중간 재렌더 방지.
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('빌드할 대상이 없습니다.\n(모두 최신이면, 다시 빌드할 항목을 체크하거나 [강제 재빌드(전체)]를 누르세요)');
- setBusy(true);   // 즉시 비활성화 — 사전점검·확인 대화 중 중복 클릭/타겟 체크 초기화 방지
+ optBuild=true; updateBusy();   // 즉시 빌드-비활성화 — 사전점검·확인 대화 중 중복 클릭/타겟 체크 초기화 방지
  // 사전점검 — 필요한 소스 데이터 누락/검증실패면 경고 팝업(그래도 진행 가능)
  fetch('/api/build/check',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(c=>{
    const miss=c.missing||[],inval=c.invalid||[];
@@ -1982,11 +1985,11 @@ $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:chec
      if(miss.length)msg+='⚠ 데이터가 없습니다:\n  · '+miss.map(m=>m.name).join('\n  · ')+'\n\n';
      if(inval.length)msg+='⚠ 검증 경고/실패:\n  · '+inval.map(m=>m.name+' ('+m.validation+')').join('\n  · ')+'\n\n';
      msg+='이대로 빌드를 진행할까요? (해당 데이터는 비거나 직전 분으로 빌드됩니다)';
-     if(!confirm(msg)){logln('⏹ 빌드 취소 — 누락/오류: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));updateBusy();return;}
+     if(!confirm(msg)){logln('⏹ 빌드 취소 — 누락/오류: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));optBuild=false;updateBusy();return;}
      logln('⚠ 누락 무시하고 진행: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));
    }
    runBuild(t);
- }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);else updateBusy();});};
+ }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);else{optBuild=false;updateBusy();}});};
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;
