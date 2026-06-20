@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 빌드 호스트 준비 — p7zip 설치 + Java 21 설치(타 서비스 17 불간섭) + planetiler.jar 부트스트랩 + 툴체인 점검.
+# 빌드 호스트 준비 — p7zip + Java 21(타 서비스 17 불간섭) + planetiler.jar 부트스트랩 + GDAL·tippecanoe 설치.
 # OS/패키지매니저 자동감지: Ubuntu·Debian(apt) / RHEL·Rocky·CentOS·BlueOnyx(dnf|yum+EPEL) / macOS(brew).
 #   ./scripts/setup-build-host.sh
 # (폐쇄망 서빙 서버는 불필요 — 빌드는 인터넷 빌드 호스트에서만 7z가 필요)
@@ -98,12 +98,49 @@ else
 fi
 
 echo
-echo "── [4/4] 빌드 툴체인 점검(없으면 안내) ───────────"
+echo "── [4/4] 빌드 툴체인(GDAL·tippecanoe) 설치 ───────"
+# GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·10-gen-buildings.sh 변환에 필수.
+if have gdaltransform && have ogr2ogr; then
+  echo "✓ 이미 설치됨: GDAL ($(command -v ogr2ogr))"
+elif have apt-get; then
+  echo "→ apt: gdal-bin"; $SUDO apt-get install -y gdal-bin
+elif have dnf; then
+  echo "→ dnf: gdal"; $SUDO dnf install -y --disablerepo='pgdg*' gdal
+elif have yum; then
+  echo "→ yum: gdal"; $SUDO yum install -y --disablerepo='pgdg*' gdal
+elif have brew; then
+  echo "→ brew: gdal"; brew install gdal
+else
+  echo "✗ 패키지 매니저 미발견 — GDAL 수동 설치 필요"
+fi
+if have gdaltransform && have ogr2ogr; then echo "✓ GDAL 사용 가능"; else echo "✗ GDAL 여전히 없음 — localdata/buildings 빌드 불가(권한/네트워크 확인)"; fi
+
+echo
+# tippecanoe·tile-join: buildings·poi 벡터타일 생성/병합에 필수. apt/dnf 패키지 없음 → brew 또는 소스 빌드.
+if have tippecanoe && have tile-join; then
+  echo "✓ 이미 설치됨: tippecanoe ($(command -v tippecanoe))"
+elif have brew; then
+  echo "→ brew: tippecanoe"; brew install tippecanoe
+elif have git && have make; then
+  echo "→ 소스 빌드: felt/tippecanoe (C++ 툴체인+zlib+sqlite3 헤더 동반설치)"
+  if have apt-get;   then $SUDO apt-get install -y build-essential libsqlite3-dev zlib1g-dev git
+  elif have dnf;     then $SUDO dnf install -y --disablerepo='pgdg*' gcc-c++ make sqlite-devel zlib-devel git
+  elif have yum;     then $SUDO yum install -y --disablerepo='pgdg*' gcc-c++ make sqlite-devel zlib-devel git
+  fi
+  _tcdir="${TMPDIR:-/tmp}/tippecanoe-build.$$"; rm -rf "$_tcdir"
+  if git clone --depth 1 https://github.com/felt/tippecanoe "$_tcdir"; then
+    if make -C "$_tcdir" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"; then
+      $SUDO make -C "$_tcdir" install && echo "✓ tippecanoe 설치 완료"
+    else echo "✗ tippecanoe 빌드 실패 — build-essential/sqlite-devel 설치 여부 확인"; fi
+    rm -rf "$_tcdir"
+  else echo "✗ tippecanoe 소스 클론 실패(네트워크?)"; fi
+else
+  echo "✗ tippecanoe 설치 불가 — brew 또는 git+make 필요. 수동: git clone https://github.com/felt/tippecanoe && make -j && $SUDO make install"
+fi
+if have tippecanoe && have tile-join; then echo "✓ tippecanoe 사용 가능"; else echo "✗ tippecanoe 여전히 없음 — buildings/poi 타일 빌드 불가"; fi
+
+echo
+echo "── 최종 툴체인 점검 ──────────────────────────────"
 for t in python3 java ogr2ogr gdaltransform tippecanoe tile-join; do
   if have "$t"; then echo "  ✓ $t"; else echo "  ✗ $t (없음 — 해당 빌드 단계에 필요)"; fi
 done
-echo
-echo "툴체인 설치 예(필요 시 · gdal/tippecanoe 등. Java 21 은 위 [2/4] 가 처리):"
-echo "  Ubuntu : $SUDO apt-get install -y gdal-bin              # tippecanoe/tile-join 은 소스 빌드"
-echo "  RHEL   : $SUDO dnf install -y gdal                      # tippecanoe 는 소스 빌드"
-echo "  macOS  : brew install gdal tippecanoe openjdk"

@@ -184,6 +184,20 @@
     "regex": "BND_ADM_DONG_PG[\\s\\S]*?갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
     "pick": "first"
    }
+  },
+  {
+   "key": "style",
+   "name": "지도 스타일 (style.json — Style Studio 내보내기)",
+   "category": "스타일",
+   "url": "/style",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수동",
+   "note": "Style Studio 에서 '내보내기'로 받은 완성형 style.json(MapLibre 스타일 v8, layers 배열 포함) 을 업로드하면 패키징(폐쇄망 번들) 단계에서 그대로 사용한다. 업로드하지 않으면 기본 스타일을 자동 조립(style/base.json + layers/*.json + theme.json). 빌드 시 staged/style 로 적재되어 package.sh [1/4] 가 STYLE_IMPORT 로 인식.",
+   "build_input": {
+    "dest": "staged/style",
+    "extract": null,
+    "into": "file"
+   }
   }
  ]
 }

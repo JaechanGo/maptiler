@@ -9,6 +9,7 @@
        BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
 """
 import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
+import pty   # 자식 프로세스를 TTY 에 붙여 외부 도구의 블록버퍼링을 막고 로그를 실시간 스트리밍
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -270,8 +271,24 @@ def _v_boundary(files):
     return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
 
 
+def _v_style(files):
+    # Style Studio 내보내기 = 완성형 style.json(MapLibre v8). 가장 최근 .json 1개를 검증.
+    js = [f for f in files if f.suffix.lower() == ".json"]
+    if not js:
+        return ("fail", "style.json(.json) 파일이 필요합니다")
+    f = sorted(js, key=lambda p: p.stat().st_mtime)[-1]
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except Exception as e:
+        return ("fail", f"JSON 파싱 실패: {str(e)[:80]}")
+    if not isinstance(d.get("layers"), list) or not d["layers"]:
+        return ("fail", "style.json 형식 아님(layers 배열 없음)")
+    extra = f" · {len(js)}개 중 최신({f.name})" if len(js) > 1 else ""
+    return ("ok", f"layers {len(d['layers'])}개 · sources {len(d.get('sources') or {})}개{extra}")
+
+
 _VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building,
-               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary}
+               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary, "style": _v_style}
 
 
 def _validate_source(key):
@@ -864,14 +881,12 @@ class Manager:
         try:
             cmd = TARGETS()[kind]["cmd"]
             self._emit(kind, "$ " + " ".join(cmd))
-            # PYTHONUNBUFFERED=1 — 파이썬 자식이 파이프로 출력 시 블록버퍼링되어 진행률이
-            # 종료 시점에 몰리는 것을 막아 라인 단위 라이브 스트리밍을 보장.
+            # 자식 출력을 PTY 로 받아 실시간 스트리밍. 외부 도구(tippecanoe·ogr2ogr·planetiler 등)는
+            # stdout 이 파이프면 블록버퍼링되어 로그가 종료 직전까지 안 나온다(진행 여부 알 수 없음).
+            # TTY 에 붙으면 라인 버퍼링 → 즉시 출력. \r 진행표시도 라인으로 surface.
+            # (PYTHONUNBUFFERED 는 파이썬 자식 보조.) PTY 불가 환경은 파이프로 폴백.
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 text=True, bufsize=1, cwd=str(ROOT), env=env)
-            for line in p.stdout:
-                self._emit(kind, line.rstrip("\n"))
-            rc = p.wait()
+            rc = self._stream(kind, cmd, env)
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
             record_build_sig(kind)   # 성공 시그니처 기록 → 다음 빌드에서 변경없으면 자동 건너뜀
@@ -881,6 +896,64 @@ class Manager:
         except Exception as e:
             j["status"] = "error"; self._emit(kind, f"[오류] {e}")
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"]})
+
+    _ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')   # 색/커서 ANSI 이스케이프(TTY 모드에서 도구가 붙임) 제거
+
+    def _stream(self, kind, cmd, env):
+        """자식을 PTY 에 붙여 라인 단위 실시간 출력. \\r 진행표시는 라인으로 surface하되 5/s 스로틀.
+        PTY 생성/기동 실패 시 파이프로 폴백."""
+        try:
+            mfd, sfd = pty.openpty()
+        except Exception:
+            return self._stream_pipe(kind, cmd, env)
+        try:
+            p = subprocess.Popen(cmd, stdout=sfd, stderr=sfd, stdin=subprocess.DEVNULL,
+                                 cwd=str(ROOT), env=env, close_fds=True)
+        except Exception:
+            os.close(mfd); os.close(sfd)
+            return self._stream_pipe(kind, cmd, env)
+        os.close(sfd)
+        buf = ""; hold = ""; lr = [0.0]   # lr: \r 진행표시 마지막 emit 시각(스로틀)
+        def feed(s, final=False):
+            nonlocal buf, hold
+            buf += hold + s; hold = ""
+            if not final and buf.endswith("\r"):   # 청크 경계에 걸린 \r\n 보호(\r 만 다음으로 미룸)
+                buf = buf[:-1]; hold = "\r"
+            buf = buf.replace("\r\n", "\n")
+            toks = re.split(r'([\r\n])', buf)
+            buf = toks.pop()                       # 마지막 토큰 = 미완성 tail
+            it = iter(toks)
+            for text in it:
+                sep = next(it, "")
+                if sep == "\r":                    # in-place 진행표시 → 최대 5/s
+                    now = time.monotonic()
+                    if now - lr[0] < 0.2: continue
+                    lr[0] = now
+                text = self._ANSI.sub("", text)
+                if text: self._emit(kind, text)
+            if final:
+                tail = self._ANSI.sub("", buf)
+                if tail.strip(): self._emit(kind, tail)
+                buf = ""
+        try:
+            while True:
+                try: chunk = os.read(mfd, 65536)
+                except OSError: break              # 자식 종료(mac PTY: EIO)
+                if not chunk: break                # EOF(linux)
+                feed(chunk.decode("utf-8", "replace"))
+        finally:
+            try: os.close(mfd)
+            except OSError: pass
+        feed("", final=True)
+        return p.wait()
+
+    def _stream_pipe(self, kind, cmd, env):
+        """PTY 불가 환경 폴백 — 파이프 라인 스트리밍(외부 도구는 버퍼링될 수 있음)."""
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, bufsize=1, cwd=str(ROOT), env=env)
+        for line in p.stdout:
+            self._emit(kind, line.rstrip("\n"))
+        return p.wait()
 
 MGR = Manager()
 
@@ -1145,6 +1218,19 @@ def run_collect(selected):
         MGR._emit("collect", f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
         MGR.publish({"kind": "collect", "status": "done", "progress": 1.0})
         return changed
+
+
+def _collect_guarded(selected):
+    """run_collect 를 감싸 예외 시에도 'collect' 종료(error) 상태를 반드시 publish.
+    안 그러면 클라이언트가 수집을 'running' 으로 오인해 빌드 버튼이 영구 비활성화된다."""
+    try:
+        run_collect(selected)
+    except Exception as e:
+        j = MGR.jobs.get("collect") or {"progress": 0.0, "log": [], "st": {}}
+        j["status"] = "error"; MGR.jobs["collect"] = j
+        try: MGR._emit("collect", f"[오류] 수집 중단: {str(e)[:160]}")
+        except Exception: pass
+        MGR.publish({"kind": "collect", "status": "error", "progress": j.get("progress", 0.0)})
 
 
 # ── 빌드 프로필(매니페스트) — 빌드에 쓴 파일집합(SHA) 스냅샷 저장·불러오기 ─────────
@@ -1459,7 +1545,7 @@ class H(BaseHTTPRequestHandler):
             sel = (json.loads(self.rfile.read(n) or "{}")).get("selected", [])
             if not sel: return self._json({"error": "수집할 항목을 선택하세요"}, 400)
             if _COLLECT_LOCK.locked(): return self._json({"error": "이미 수집 진행 중"}, 409)
-            threading.Thread(target=run_collect, args=(sel,), daemon=True).start()
+            threading.Thread(target=_collect_guarded, args=(sel,), daemon=True).start()
             return self._json({"ok": True, "started": sel})
         if self.path.startswith("/api/collect/upload"):   # 항목별 사용자 정의 파일 업로드 → staged 직접 적재
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1680,14 +1766,23 @@ function card(kind,label){if(cards[kind])return;const el=document.createElement(
  $('#cards').appendChild(el);cards[kind]=el;bars[kind]=$('#bar_'+kind);sts[kind]=$('#st_'+kind);}
 const LBL={};
 function lbl(k){const t=TARGETS.find(x=>x.kind===k);return t?t.label:k}
+const JOB={};   // kind → 최신 상태. 빌드/수집 진행 중이면 시작 버튼 비활성화(중복 실행·체크 초기화 방지)
+function anyBusy(){return Object.keys(JOB).some(k=>JOB[k]==='queued'||JOB[k]==='running');}
+function setBusy(b){
+ const run=$('#run'); if(run){run.disabled=b; run.textContent=b?'⏳ 빌드 중…':'빌드 시작';}
+ const fa=$('#forceAll'); if(fa)fa.disabled=b;
+ const cb=$('#collectBtn'); if(cb){cb.disabled=b; cb.textContent=b?'⏳ 진행 중…':'⬇ 자동수집 시작 (순차)';}
+}
+function updateBusy(){setBusy(anyBusy());}
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
- if(s){const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
+ if(s){JOB[k]=s;const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
 function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
- if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);return}
+ if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);updateBusy();return}
  setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
- if(d.status==='done'||d.status==='error'||d.status==='skipped'){loadBuilds();if(d.kind==='collect')loadCollect();else refreshTargetsSoon();}};
+ updateBusy();
+ if(d.status==='done'||d.status==='error'||d.status==='skipped'){loadBuilds();if(d.kind==='collect')loadCollect();else if(!anyBusy())refreshTargetsSoon();}};   // 타겟 체크 초기화는 전체 빌드 종료 후에만
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function vbadge(s){if(!s.uploadable)return '';
@@ -1771,8 +1866,8 @@ function loadCollect(preserve=true){
 function startCollect(){let sel=[...document.querySelectorAll('#collect input.ck:checked')].map(x=>x.value).filter(Boolean);
   if(sel.includes('localdata'))sel=sel.filter(k=>!k.startsWith('localdata:'));
   if(!sel.length)return alert('수집할 항목을 체크하세요');
-  logln('▶ 자동수집 '+sel.length+'건 순차 시작…');
-  fetch('/api/collect/start',{method:'POST',body:JSON.stringify({selected:sel})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('  큐: '+(d.started||[]).join(', '));});}
+  logln('▶ 자동수집 '+sel.length+'건 순차 시작…'); setBusy(true);   // 즉시 비활성화(SSE running 도착 전 중복 클릭 방지)
+  fetch('/api/collect/start',{method:'POST',body:JSON.stringify({selected:sel})}).then(r=>r.json()).then(d=>{if(d.error){updateBusy();return alert(d.error);}logln('  큐: '+(d.started||[]).join(', '));}).catch(e=>{updateBusy();alert('수집 시작 실패: '+e);});}
 function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 쓴)':'최신')+' 기준일 입력 — 예: 202605 또는 2026-06-19');
   if(v==null)return; fetch('/api/sources/version',{method:'POST',body:JSON.stringify({key,field,value:v})})
    .then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadCollect();});}
@@ -1873,9 +1968,12 @@ function runBuild(t){
  fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
    (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
    (d.fresh||[]).forEach(k=>logln('  ↻ '+lbl(k)+': 최신 — 건너뜀(재사용)'));
-   logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();refreshTargetsSoon();});}
+   logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();updateBusy();}).catch(e=>{updateBusy();logln('✗ 빌드 시작 실패: '+e);});}
+// 빌드 시작 시엔 '빌드 대상' 체크박스를 건드리지 않는다(사용자 선택 유지). 타겟 목록 갱신(=fresh 자동 체크해제)은
+// 모든 잡이 끝난 뒤(es.onmessage 의 !anyBusy())에만 1회 수행 → 진행 중 초기화/중간 재렌더 방지.
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('빌드할 대상이 없습니다.\n(모두 최신이면, 다시 빌드할 항목을 체크하거나 [강제 재빌드(전체)]를 누르세요)');
+ setBusy(true);   // 즉시 비활성화 — 사전점검·확인 대화 중 중복 클릭/타겟 체크 초기화 방지
  // 사전점검 — 필요한 소스 데이터 누락/검증실패면 경고 팝업(그래도 진행 가능)
  fetch('/api/build/check',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(c=>{
    const miss=c.missing||[],inval=c.invalid||[];
@@ -1884,11 +1982,11 @@ $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:chec
      if(miss.length)msg+='⚠ 데이터가 없습니다:\n  · '+miss.map(m=>m.name).join('\n  · ')+'\n\n';
      if(inval.length)msg+='⚠ 검증 경고/실패:\n  · '+inval.map(m=>m.name+' ('+m.validation+')').join('\n  · ')+'\n\n';
      msg+='이대로 빌드를 진행할까요? (해당 데이터는 비거나 직전 분으로 빌드됩니다)';
-     if(!confirm(msg)){logln('⏹ 빌드 취소 — 누락/오류: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));return;}
+     if(!confirm(msg)){logln('⏹ 빌드 취소 — 누락/오류: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));updateBusy();return;}
      logln('⚠ 누락 무시하고 진행: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));
    }
    runBuild(t);
- }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);});};
+ }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);else updateBusy();});};
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;

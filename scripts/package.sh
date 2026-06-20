@@ -13,8 +13,27 @@ BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
 TILES_DIR="$BUILD_HOME/tiles"
 GEOCODE_DB="$BUILD_HOME/geocode.sqlite"
 
+# tiles 통합 — 출력경로가 스크립트별로 갈린다: korea/dong/terrain 은 02/05/03 이 repo tiles/ 에,
+# buildings/poi 는 10/12 가 BUILD_HOME/tiles 에 쓴다(dev tileserver 는 ../tiles=repo 마운트라 그쪽 필요).
+# 번들/QC 정본은 BUILD_HOME/tiles 이므로, repo/tiles 에만 있거나 더 최신인 산출물을 여기로 모은다
+# (APFS clonefile=즉시·무추가공간; 타 볼륨이면 일반 복사 폴백). → 번들이 5종을 빠짐없이 담는다.
+mkdir -p "$TILES_DIR"
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+  if [ -s "$ROOT/tiles/$mb" ] && { [ ! -s "$TILES_DIR/$mb" ] || [ "$ROOT/tiles/$mb" -nt "$TILES_DIR/$mb" ]; }; then
+    echo "  ↪ tiles 통합: tiles/$mb → $TILES_DIR/$mb"
+    cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null || cp "$ROOT/tiles/$mb" "$TILES_DIR/$mb"
+  fi
+done
+
+# Build Studio 로 가져온 style.json(staged/style) 이 있으면 그대로 사용, 없으면 기본 조립.
 echo "[1/4] 스타일 조립(최신화)"
-"$ROOT/scripts/build-style.sh"
+STYLE_STAGED="$(ls -1 "$BUILD_HOME/staged/style/"*.json 2>/dev/null | head -n1 || true)"
+if [ -n "${STYLE_STAGED:-}" ]; then
+  echo "  가져온 스타일 사용: $STYLE_STAGED"
+  STYLE_IMPORT="$STYLE_STAGED" "$ROOT/scripts/build-style.sh"
+else
+  "$ROOT/scripts/build-style.sh"
+fi
 
 # tileserver-config.json 이 참조하는 mbtiles 5종 — 하나라도 빠진 번들은
 # 폐쇄망에서 TileServer-GL 기동 실패/레이어 누락으로 이어지므로 패키징 단계에서 차단한다.
