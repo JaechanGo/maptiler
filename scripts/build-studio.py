@@ -314,6 +314,24 @@ def _safe_relpath(name):
     return "/".join(parts)
 
 
+def _unzip_recursive(path, dest, depth=4):
+    """zip 추출 + 내부 중첩 zip 재귀 추출(zip-of-zips: 법정동 LSMD 시도별 묶음 등). 내부 zip은 풀고 제거."""
+    dest = pathlib.Path(dest)
+    with zipfile.ZipFile(path) as z:
+        z.extractall(dest)
+    for _ in range(depth):
+        inners = [p for p in dest.rglob("*.zip") if p.is_file()]
+        if not inners:
+            break
+        for inner in inners:
+            try:
+                with zipfile.ZipFile(inner) as z:
+                    z.extractall(inner.parent)
+                inner.unlink()
+            except Exception:
+                pass
+
+
 def prepare_sources(keys=None):
     """sources/<key>/ 의 '모든' 업로드 파일을 build_input.dest 로 적재(누적).
     확장자별: .zip=stdlib 추출 / .7z=CLI(있으면) / .tar·.tgz·.txz=stdlib 추출 / 그외(.csv·.txt·.shp 등)=복사.
@@ -343,7 +361,7 @@ def prepare_sources(keys=None):
                 ext = f.suffix.lower()
                 if ext == ".zip":
                     try:
-                        with zipfile.ZipFile(f) as z: z.extractall(dest); n += 1
+                        _unzip_recursive(f, dest); n += 1   # 중첩 zip(zip-of-zips: 법정동 시도별 묶음)도 재귀 추출
                     except Exception as e:
                         errs.append(f"{f.name}: zip {str(e)[:50]}")
                 elif ext == ".7z":
@@ -599,7 +617,7 @@ def _extract_into(src, dest_dir, orig_name=None):
     dest_dir = pathlib.Path(dest_dir); dest_dir.mkdir(parents=True, exist_ok=True)
     src = pathlib.Path(src)
     if zipfile.is_zipfile(src):
-        with zipfile.ZipFile(src) as z: z.extractall(dest_dir); return
+        _unzip_recursive(src, dest_dir); return   # 중첩 zip 재귀
     if tarfile.is_tarfile(src):
         with tarfile.open(src) as t:
             try: t.extractall(dest_dir, filter="data")
