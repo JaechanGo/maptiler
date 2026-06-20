@@ -1075,9 +1075,10 @@ def _collect_headers(src):
     if (src.get("collect") or {}).get("method") == "vworld_session":
         ck = _vworld_cookie()
         if not ck:
-            raise RuntimeError("VWorld 세션 쿠키 없음 — 환경변수 VWORLD_COOKIE 또는 "
-                               f"{BUILD_HOME}/.secrets/vworld_cookie 에 브라우저 로그인 쿠키(JSESSIONID=…) 설정")
-        return {"Cookie": ck, "Referer": "https://www.vworld.kr/"}
+            raise RuntimeError("VWorld 세션 쿠키 없음 — Build Studio UI(🔑 PJSESSIONID·vworld) 또는 "
+                               f"환경변수 VWORLD_COOKIE / {BUILD_HOME}/.secrets/vworld_cookie 설정")
+        # Referer 는 해당 dsId 다운로드센터 페이지(src.url) — VWorld 가 Referer 검사함
+        return {"Cookie": ck, "Referer": src.get("url") or "https://www.vworld.kr/dtmk/"}
     return None
 
 
@@ -1091,7 +1092,7 @@ def _vworld_list_filenos(ds, col):
     url = col.get("list_url") or (
         f"https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId={ds}&datIde={ds}&svcCde=MK&datPageSize=1000")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie,
-                                               "Referer": "https://www.vworld.kr/"})
+                                               "Referer": url})
     html = urllib.request.urlopen(req, timeout=60, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
     pairs = re.findall(r'class="tit min">([^<]+)</div>.*?listFnc\.download\(\s*\'(\d+)\'\s*,\s*\'(\d+)\'', html, re.S)
     level = col.get("level", "sigungu"); out = []
@@ -1632,10 +1633,16 @@ class H(BaseHTTPRequestHandler):
             if _COLLECT_LOCK.locked(): return self._json({"error": "이미 수집 진행 중"}, 409)
             threading.Thread(target=_collect_guarded, args=(sel,), daemon=True).start()
             return self._json({"ok": True, "started": sel})
-        if self.path == "/api/secrets/vworld":   # VWorld 세션 쿠키 저장(.secrets/vworld_cookie) — vworld_session 수집용. repo 밖·gitignore.
+        if self.path == "/api/secrets/vworld":   # VWorld 세션 쿠키 저장 — SSCSID·vworld 2값 → 'SSCSID=…; vworld=…'. repo 밖·gitignore.
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
-            ck = (json.loads(self.rfile.read(n) or "{}")).get("cookie", "").strip()
+            b = json.loads(self.rfile.read(n) or "{}")
+            ck = (b.get("cookie") or "").strip()   # 전체 Cookie 헤더 직접 입력도 허용(하위호환)
+            if not ck:
+                parts = []
+                if (b.get("pjsessionid") or "").strip(): parts.append("PJSESSIONID=" + b["pjsessionid"].strip())
+                if (b.get("vworld") or "").strip(): parts.append("vworld=" + b["vworld"].strip())
+                ck = "; ".join(parts)
             sd = BUILD_HOME / ".secrets"; sd.mkdir(parents=True, exist_ok=True)
             f = sd / "vworld_cookie"
             if ck:
@@ -1834,8 +1841,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <button class=ghost id=dlSelBtn>⬇ 다운로드(내 PC로)</button></div>
    <div style="margin-top:12px;border-top:1px solid var(--bd);padding-top:10px;font-size:12px">
      <div style="color:var(--mut);margin-bottom:6px">🔑 VWorld 세션 쿠키 <span id=vwState class=mut></span></div>
-     <div style="display:flex;gap:8px"><input id=vwCookie type=password placeholder="SSCSID=…; JSESSIONID=…" style="flex:1;background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:6px 9px;font-size:12px"><button class=ghost id=vwSave>저장</button></div>
-     <div class=mut style="font-size:10px;margin-top:5px">연속지적·건물(VWorld) 수집용. 브라우저 로그인 후 DevTools→Network→다운로드 클릭→요청의 Cookie 헤더 전체 붙여넣기. 만료 시 재입력.</div></div></div>
+     <div style="display:flex;gap:6px;flex-wrap:wrap">
+       <input id=vwPjsess type=password placeholder="PJSESSIONID 값" style="flex:1;min-width:130px;background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:6px 9px;font-size:12px">
+       <input id=vwVworld type=password placeholder="vworld 값" style="flex:1;min-width:130px;background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:6px 9px;font-size:12px">
+       <button class=ghost id=vwSave>저장</button></div>
+     <div class=mut style="font-size:10px;margin-top:5px">연속지적·건물(VWorld) 수집용. 로그인 후 DevTools→Application→Cookies→vworld.kr 에서 <b>PJSESSIONID</b>·<b>vworld</b> 값 복사. 만료 시 재입력.</div></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 프로필 · 이력</h2>
    <div id=builds class=ds></div></div>
  </div>
@@ -2067,7 +2077,7 @@ function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원
   fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect(false);});}
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 function loadVw(){fetch('/api/secrets/vworld').then(r=>r.json()).then(d=>{const s=$('#vwState');if(s)s.textContent=d.set?'· 설정됨 ✓':'· 미설정';});}
-function saveVw(){const i=$('#vwCookie');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({cookie:i.value})}).then(r=>r.json()).then(d=>{i.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}
+function saveVw(){const j=$('#vwPjsess'),b=$('#vwVworld');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({pjsessionid:j.value,vworld:b.value})}).then(r=>r.json()).then(d=>{j.value='';b.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}
 loadCollect(); loadBuilds(); loadVw();
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정'); $('#vwSave').onclick=saveVw;
 $('#forceAll').onclick=()=>{document.querySelectorAll('#checks input').forEach(c=>c.checked=true);logln('⟳ 전체 체크 — 최신 무시하고 강제 재빌드');};
