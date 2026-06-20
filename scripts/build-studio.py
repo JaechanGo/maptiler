@@ -1081,6 +1081,30 @@ def _collect_headers(src):
     return None
 
 
+def _vworld_list_filenos(ds, col):
+    """VWorld 다운로드센터 목록(서버렌더 HTML)을 쿠키로 받아 listFnc.download('ds','fileNo','sizeKB') 에서
+    fileNo 자동 추출 → file_nos 하드코딩 불필요(전국 시군구 + 갱신 대응).
+    level=sigungu(기본, 시군구 단위 파일)|sido(시도 통합 1파일)|all. 파일명 'LSMD_CONT_LDREG_<시도>[_<시군구>].zip'."""
+    cookie = _vworld_cookie()
+    if not cookie:
+        raise RuntimeError("VWorld 세션 쿠키 없음(목록 조회) — VWORLD_COOKIE 또는 .secrets/vworld_cookie")
+    url = col.get("list_url") or (
+        f"https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId={ds}&datIde={ds}&svcCde=MK&datPageSize=1000")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie,
+                                               "Referer": "https://www.vworld.kr/"})
+    html = urllib.request.urlopen(req, timeout=60, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
+    pairs = re.findall(r'class="tit min">([^<]+)</div>.*?listFnc\.download\(\s*\'(\d+)\'\s*,\s*\'(\d+)\'', html, re.S)
+    level = col.get("level", "sigungu"); out = []
+    for fname, _d, fno in pairs:
+        body = re.sub(r'^.*?LDREG_', '', fname.strip().replace(".zip", ""))   # '충북' 또는 '충북_충주시'
+        is_sido = "_" not in body
+        # 세종(단층 시도)은 시군구 하위파일이 없어 sigungu level 에서도 포함해야 누락 안 됨
+        if level == "sigungu" and is_sido and "세종" not in body: continue
+        if level == "sido" and not is_sido: continue
+        out.append(fno)
+    return out
+
+
 def _collect_plan(item_key):
     """항목키 → (source, urls[], dest, mode). 항목키: '<srckey>' 또는 '<srckey>:<sub>'."""
     skey, _, sub = item_key.partition(":")
@@ -1121,12 +1145,14 @@ def _collect_plan(item_key):
                + f"?atchFileId={meta['atchFileId']}&fileDetailSn={col.get('fileDetailSn', meta.get('fileDetailSn', '1'))}&dataNm={urllib.parse.quote(dnm)}")
         return src, [url], BUILD_HOME / src.get("build_input", {}).get("dest", "poi-all/sangga"), "extract"
     if method == "vworld_session":   # VWorld 다운로드센터 — 로그인 세션 쿠키로 downloadResourceFile.do GET
-        # 선행(1회): 로그인 후 DevTools 로 ds_id·fileNo·실제 download .do 경로 캡처 → 아래 col 채움.
         base = col.get("download_url", "https://www.vworld.kr/dtmk/downloadResourceFile.do")
-        ds = str(col.get("ds_id", "")); nos = col.get("file_nos") or ([col["file_no"]] if col.get("file_no") else [])
+        ds = str(col.get("ds_id", ""))
+        nos = [str(n) for n in (col.get("file_nos") or [])]
+        if ds and not nos:           # file_nos 미지정 → 쿠키로 목록 페이지에서 fileNo 자동 발견(level=시군구 기본)
+            nos = _vworld_list_filenos(ds, col)
         if not (ds and nos):
-            raise RuntimeError(f"vworld_session({skey}): collect.ds_id 와 file_nos 필요 — "
-                               "VWorld 다운로드센터 로그인 후 파일별 fileNo 확인해 data-sources.json 에 채울 것")
+            raise RuntimeError(f"vworld_session({skey}): ds_id 필요. file_nos 미지정 시 쿠키로 목록 자동조회 — "
+                               "VWORLD_COOKIE 설정 후 재시도(또는 file_nos 명시).")
         urls = [f"{base}?ds_id={ds}&fileNo={urllib.parse.quote(str(n))}" for n in nos]
         return src, urls, BUILD_HOME / src.get("build_input", {}).get("dest", "staged/gis"), "extract"
     raise RuntimeError(f"수집 미지원: {skey}")
