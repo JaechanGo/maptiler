@@ -148,8 +148,9 @@ def add_osm(db, osm_path, state):
 
 def add_biz(db, csvdir, state):
     # 소상공인 상가(상권)정보 CSV(시도별) → kind='biz'. 경도/위도 이미 WGS84.
+    # facility(생활편의) 중 좌표 없는 행(주소만)은 pending 으로 모아 반환 → geocode_facilities 가 navi 로 지오코딩.
     import csv, glob
-    pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
+    pid=state["pid"]; st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]; pending=[]
     for path in sorted(glob.glob(os.path.join(csvdir,"**","*.csv"), recursive=True)):
         base = os.path.basename(path)   # 출처·종류 구분(파일명)
         if base == 'facility_clean.csv': src, kind = 'facility', 'facility'   # 생활편의시설 — biz 와 분리 적재
@@ -157,9 +158,6 @@ def add_biz(db, csvdir, state):
         else: src, kind = 'sangga', 'biz'
         with open(path, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
-                try: lon=float(row.get("경도") or 0); lat=float(row.get("위도") or 0)
-                except ValueError: continue
-                if not (124<=lon<=132 and 33<=lat<=39): continue
                 nm=(row.get("상호명") or "").strip()
                 if not nm or nm in ("업소명없음", "상호명없음", "-", "."): continue   # 원본 플레이스홀더 제외
                 biz=(row.get("상권업종소분류명") or "").strip()
@@ -172,6 +170,12 @@ def add_biz(db, csvdir, state):
                 if src=='localdata':                                   # localdata 카테고리를 canonical 로 표준화
                     cc=CW_LD.get(f"{cat1}|{biz}")
                     if cc: cat1,cat2=cc[0],(cc[1] or None)
+                try: lon=float(row.get("경도") or ""); lat=float(row.get("위도") or "")
+                except ValueError: lon=lat=None
+                if lon is None or not (124<=lon<=132 and 33<=lat<=39):
+                    if kind=='facility' and rn and mno is not None:    # 좌표없는 시설 → 도로명 파싱된 행만 지오코딩 대기
+                        pending.append((nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2))
+                    continue
                 pid+=1
                 pb.append((pid,kind,nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
@@ -179,6 +183,31 @@ def add_biz(db, csvdir, state):
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     _flush(db,pb,fb,rb)
     print(f"  biz: +{pid-n0:,}  ({time.time()-st:.1f}s)", file=sys.stderr); state["pid"]=pid
+    return pending
+
+
+def geocode_facilities(db, pending, state):
+    # 좌표 없는 facility 행(주소만) → navi addr(kind='addr') 좌표로 채워 적재.
+    # 조인키 = sido+시군구+도로명정규화(road_norm)+건물본번(main_no)+부번(sub_no) — biz 건물키 backfill 과 동일.
+    # navi 에 없는 주소(미매칭)는 좌표 없는 POI 라 버린다(insert 안 함). FTS·rtree 까지 정상행만 적재.
+    if not pending: return
+    st=time.time()
+    db.execute("CREATE INDEX IF NOT EXISTS idx_addr_key ON places(sido,sigungu,road_norm,main_no,sub_no) WHERE kind='addr'")
+    cur=db.cursor(); pid=state["pid"]; pb=[]; fb=[]; rb=[]; ok=0
+    for nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2 in pending:
+        r=cur.execute("""SELECT lon,lat FROM places WHERE kind='addr'
+            AND sido=? AND sigungu=? AND road_norm=? AND main_no=? AND sub_no=? ORDER BY id LIMIT 1""",
+            (sido,sgg,rn,mno,sno)).fetchone()
+        if not r: continue
+        lon,lat=r; pid+=1; ok+=1
+        pb.append((pid,'facility',nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,None,None,jibun_txt,cat1,cat2,'facility',1,round(lon,6),round(lat,6)))
+        fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))
+        rb.append((pid,lon,lon,lat,lat))
+        if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
+    _flush(db,pb,fb,rb)
+    db.execute("DROP INDEX IF EXISTS idx_addr_key")
+    state["pid"]=pid
+    print(f"  [geocode] facility 주소→좌표 매칭 {ok:,}/{len(pending):,} ({time.time()-st:.1f}s)", file=sys.stderr)
 
 def _flush(db,pb,fb,rb):
     if not pb: return
@@ -238,7 +267,8 @@ def main():
                        ar.execute("SELECT id,minlon,maxlon,minlat,maxlat FROM area_rtree"))
         ar.close()
         print(f"  areas ← {args.areas}: {db.execute('SELECT count(*) FROM areas').fetchone()[0]:,}", file=sys.stderr)
-    if args.poi_csv_dir: add_biz(db, args.poi_csv_dir, state)
+    pending_fac = add_biz(db, args.poi_csv_dir, state) if args.poi_csv_dir else []
+    geocode_facilities(db, pending_fac, state)   # 좌표없는 시설(주소만) → navi 도로명주소 지오코딩
     # biz 중복(상가↔LOCALDATA 같은 점포) 표시용 대표 선정 — 출처(source)는 모두 보존하되 그룹당 1건만 is_primary=1.
     db.create_function("nrm", 1, biznrm)   # facility 충돌숨김(아래)에서도 사용 → dedup 방식과 무관하게 등록
     if args.dedup == "er":

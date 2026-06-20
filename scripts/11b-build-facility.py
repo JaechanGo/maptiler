@@ -22,9 +22,10 @@ except Exception:
     pass
 
 # 컬럼 휴리스틱(소문자·공백제거 후 정확→부분 일치). 14종 표준데이터의 흔한 헤더 변형 포함.
-NAME_HINTS  = ["명칭", "시설명", "사업장명", "상호명", "상호", "화장실명", "관리기관명", "기관명", "장소명",
+NAME_HINTS  = ["명칭", "시설명", "사업장명", "상호명", "상호", "화장실명", "발급기명", "관리기관명", "기관명", "장소명",
                "센터명", "설치장소", "위치명", "소재지명", "보관소명", "대피시설명", "수목명", "업소명", "시설물명"]
-DORO_HINTS  = ["소재지도로명주소", "도로명주소", "소재지도로명", "도로명전체주소"]
+# 발급기명: 무인민원발급기 설치정보의 위치명(예 '종각역','종로구청'). 관리기관명(='서울특별시 종로구')보다 우선해야 라벨이 유의미.
+DORO_HINTS  = ["소재지도로명주소", "도로명주소", "소재지도로명", "도로명전체주소", "설치장소주소"]
 JIBUN_HINTS = ["소재지지번주소", "지번주소", "소재지지번", "소재지번주소", "소재지"]
 LAT_HINTS   = ["위도", "latitude", "lat", "y좌표", "ycrd", "wgs84위도"]
 LON_HINTS   = ["경도", "longitude", "lng", "lon", "x좌표", "xcrd", "wgs84경도"]
@@ -49,12 +50,40 @@ def find_col(cols, hints):
     return None
 
 
+def pick_coord(cols, rows, hints, lo, hi):
+    """좌표(위/경도) 컬럼 선택 — 이름이 힌트에 걸리는 후보 중 **표본값이 십진수(소수점)+유효범위(lo~hi)**
+    인 비율이 가장 높은 컬럼을 채택. 한 파일에 위도(EPSG4326)·WGS84위도(십진수)와 위도(도)/(분)/(초)
+    (DMS 분해)가 함께 있을 때, 이름 순서만 보면 정수 '도' 컬럼을 먼저 잡아 좌표를 정수격자로 뭉개는 사고가
+    났음(예: 민방위대피시설 → lat 37, 진짜 37.577). 값으로 검증해 십진 컬럼을 우선. 십진 후보 없으면 None."""
+    nh = [_nk(h) for h in hints]
+    cand = [c for c in cols if c and any(h == _nk(c) or h in _nk(c) for h in nh)]
+    best, best_score = None, 0.0
+    for c in cand:
+        good = seen = 0
+        for r in rows[:200]:                 # 앞 200행 표본
+            v = str(r.get(c) or "").strip()
+            if not v:
+                continue
+            seen += 1
+            try:
+                f = float(v)
+            except ValueError:
+                continue
+            if "." in v and lo <= f <= hi:   # 십진수 AND 유효범위
+                good += 1
+        score = good / seen if seen else 0.0
+        if score > best_score:
+            best, best_score = c, score
+    return best
+
+
 def parse_region(*addrs):
     for a in addrs:
         t = N(a or "").split()
         if len(t) >= 2:
-            emd = next((x for x in t[2:4] if x.endswith(("동", "읍", "면", "리", "가"))), "")
-            return t[0], t[1], emd
+            sgg = t[1] + (" " + t[2] if len(t) >= 3 and t[2].endswith("구") else "")  # 시+구(예: 수원시 영통구) — navi sigungu 포맷에 맞춤
+            emd = next((x for x in t[2:5] if x.endswith(("동", "읍", "면", "리", "가"))), "")
+            return t[0], sgg, emd
     return "", "", ""
 
 
@@ -88,7 +117,7 @@ def main():
     w = csv.writer(open(OUT, "w", encoding="utf-8", newline=""))
     w.writerow(["상호명", "상권업종소분류명", "시도명", "시군구명", "행정동명",
                 "경도", "위도", "전화번호", "인허가일자", "상권업종대분류명", "도로명주소", "지번주소"])
-    total = 0; skipped = 0
+    total = 0; skipped = 0; geopend = 0
     for f in files:
         rel = os.path.relpath(f, SRC).split(os.sep)
         item = rel[0] if len(rel) > 1 else os.path.splitext(os.path.basename(f))[0]
@@ -98,19 +127,28 @@ def main():
             continue
         cols = list(rows[0].keys())
         c_name = find_col(cols, NAME_HINTS)
-        c_lat, c_lon = find_col(cols, LAT_HINTS), find_col(cols, LON_HINTS)
+        c_lat = pick_coord(cols, rows, LAT_HINTS, 33, 39)    # 값검증(십진+범위)으로 DMS '도' 컬럼 회피
+        c_lon = pick_coord(cols, rows, LON_HINTS, 124, 132)
         c_tmx, c_tmy = find_col(cols, TMX_HINTS), find_col(cols, TMY_HINTS)
         c_doro, c_jibun = find_col(cols, DORO_HINTS), find_col(cols, JIBUN_HINTS)
         mode = "wgs" if (c_lat and c_lon) else ("tm5174" if (c_tmx and c_tmy) else None)
-        print(f"  [{label}] {os.path.basename(f)} enc={enc} name={c_name} coord={mode}", file=sys.stderr)
-        if not mode:
-            print(f"    ! 좌표 컬럼 미탐지 — 건너뜀 (헤더: {cols[:10]})", file=sys.stderr)
+        # 좌표 컬럼이 없어도 이름·주소가 있으면 좌표 빈칸으로 출력 → 09-gen-geocode 가 navi 도로명주소로 지오코딩
+        geocode = (not mode) and bool(c_name) and bool(c_doro or c_jibun)
+        print(f"  [{label}] {os.path.basename(f)} enc={enc} name={c_name} coord={mode or ('addr-geocode' if geocode else None)}", file=sys.stderr)
+        if not mode and not geocode:
+            print(f"    ! 좌표·주소 모두 없음 — 건너뜀 (헤더: {cols[:10]})", file=sys.stderr)
             continue
-        tm_rows = []; tm_coords = []; n = 0
+        tm_rows = []; tm_coords = []; n = 0; ng = 0
         for r in rows:
             nm = (N(r.get(c_name)).strip() if c_name else "") or label
             jibun = r.get(c_jibun) if c_jibun else ""; doro = r.get(c_doro) if c_doro else ""
-            if mode == "wgs":
+            if geocode:
+                doro_s = N(doro).strip(); jibun_s = N(jibun).strip()
+                if not (doro_s or jibun_s):
+                    skipped += 1; continue                       # 주소도 비면 못 씀
+                sido, sgg, emd = parse_region(doro, jibun)       # 도로명 우선(09 의 navi 조인키)
+                w.writerow([nm, label, sido, sgg, emd, "", "", "", "", "생활편의", doro_s, jibun_s]); ng += 1
+            elif mode == "wgs":
                 try:
                     lon = round(float(str(r.get(c_lon)).strip()), 6)
                     lat = round(float(str(r.get(c_lat)).strip()), 6)
@@ -131,10 +169,10 @@ def main():
                     skipped += 1; continue
                 sido, sgg, emd = parse_region(jibun, doro)
                 w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
-        total += n
-        if n:
-            print(f"    +{n:,}", file=sys.stderr)
-    print(f"OK: {OUT}  적재 {total:,} · 제외(좌표) {skipped:,}", file=sys.stderr)
+        total += n; geopend += ng
+        if n or ng:
+            print(f"    +{n:,}{f' · 주소지오코딩대기 +{ng:,}' if ng else ''}", file=sys.stderr)
+    print(f"OK: {OUT}  적재 {total:,} · 지오코딩대기 {geopend:,} · 제외 {skipped:,}", file=sys.stderr)
 
 
 if __name__ == "__main__":
