@@ -1,0 +1,117 @@
+# martin — PostGIS live MVT 서버 설정 (CUVIA 동적 레이어)
+# auto_publish=false + 명시적 table 소스 → tiger 스키마/파티션 자식(parcel_11…) 노이즈 제외,
+# 부모 파티션 테이블(parcel/building)만 서빙(PG가 파티션 라우팅). 소스별 minzoom 으로 대용량 보호.
+# 연결은 DATABASE_URL 환경변수(docker-compose). L1 캐시=Moka(cache_size_mb), L2=게이트웨이 nginx.
+listen_addresses: '0.0.0.0:3000'
+cache_size_mb: 512
+
+postgres:
+  connection_string: ${DATABASE_URL}
+  auto_publish: false          # 명시 table 만 노출(tiger·파티션자식 제외)
+  tables:
+    admin_boundary:
+      schema: public
+      table: admin_boundary
+      srid: 4326
+      geometry_column: geom
+      geometry_type: MULTIPOLYGON
+      minzoom: 6
+      maxzoom: 22
+      extent: 4096
+      buffer: 64
+      clip_geom: true
+      properties:
+        level: text
+        name: text
+        code: text
+        sido_cd: text
+
+    parcel:                    # ≈39.6M — z16+ 에서만(대용량 보호). 파티션 부모 서빙.
+      schema: public
+      table: parcel
+      srid: 4326
+      geometry_column: geom
+      geometry_type: MULTIPOLYGON
+      minzoom: 16
+      maxzoom: 22
+      extent: 4096
+      buffer: 64
+      clip_geom: true
+      properties:
+        pnu: text
+        jibun: text
+        sido_cd: text
+
+    building:                  # z13+ (3D fill-extrusion). 파티션 부모.
+      schema: public
+      table: building
+      srid: 4326
+      geometry_column: geom
+      geometry_type: MULTIPOLYGON
+      minzoom: 13
+      maxzoom: 22
+      extent: 4096
+      buffer: 64
+      clip_geom: true
+      properties:
+        name: text
+        render_height: float4
+        levels: int4
+
+    poi:                       # 상가·인허가·생활편의(Phase 4)
+      schema: public
+      table: poi
+      srid: 4326
+      geometry_column: geom
+      geometry_type: POINT
+      minzoom: 11
+      maxzoom: 22
+      properties:
+        kind: text
+        name: text
+        subtype: text
+        cat1: text
+        cat2: text
+        source: text
+        is_primary: int2
+
+    public_facility:           # 병원/경찰/소방/AED/대피소
+      schema: public
+      table: public_facility
+      srid: 4326
+      geometry_column: geom
+      geometry_type: POINT
+      minzoom: 10
+      maxzoom: 22
+      properties:
+        kind: text
+        name: text
+        addr: text
+
+    cctv:
+      schema: public
+      table: cctv
+      srid: 4326
+      geometry_column: geom
+      geometry_type: POINT
+      minzoom: 12
+      maxzoom: 22
+      properties:
+        name: text
+        azimuth: float4
+        fov: float4
+        height_m: float4
+        max_distance: float4
+
+    safemap:                   # 위험지역(범죄/침수/여성안심/재난) — 혼합 지오메트리
+      schema: public
+      table: safemap
+      srid: 4326
+      geometry_column: geom
+      geometry_type: GEOMETRY
+      minzoom: 9
+      maxzoom: 22
+      properties:
+        kind: text
+        name: text
+        grade: text

@@ -2,7 +2,10 @@
   "sources": {
     "poi": {
       "type": "vector",
-      "url": "mbtiles://{poi}"
+      "tiles": ["/dyn/poi/{z}/{x}/{y}"],
+      "minzoom": 11,
+      "maxzoom": 22,
+      "attribution": "© 소상공인시장진흥공단 · LOCALDATA"
     }
   },
   "layers": [

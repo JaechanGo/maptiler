@@ -11,7 +11,10 @@
     },
     "buildings": {
       "type": "vector",
-      "url": "mbtiles://{buildings}"
+      "tiles": ["/dyn/building/{z}/{x}/{y}"],
+      "minzoom": 13,
+      "maxzoom": 22,
+      "attribution": "© VWorld 건물통합정보"
     }
   },
   "layers": [

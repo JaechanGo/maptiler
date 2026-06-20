@@ -1,0 +1,33 @@
+{
+  "sources": {
+    "parcel": {
+      "type": "vector",
+      "tiles": ["/dyn/parcel/{z}/{x}/{y}"],
+      "minzoom": 16,
+      "maxzoom": 22,
+      "attribution": "© VWorld 연속지적도"
+    }
+  },
+  "layers": [
+    {
+      "id": "parcel-line",
+      "type": "line",
+      "source": "parcel",
+      "source-layer": "parcel",
+      "minzoom": 16,
+      "paint": {
+        "line-color": "hsl(214, 28%, 46%)",
+        "line-opacity": [
+          "interpolate", ["linear"], ["zoom"],
+          16, 0.35,
+          18, 0.6
+        ],
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          16, 0.4,
+          19, 1.2
+        ]
+      }
+    }
+  ]
+}
