@@ -8,7 +8,7 @@
 기동:  python3 scripts/build-studio.py            # http://localhost:8090
        BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
 """
-import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, urllib.request, urllib.parse
+import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -282,11 +282,106 @@ def _validate_source(key):
     except Exception as e:
         return ("fail", f"검증 오류: {str(e)[:120]}")
 
+
+# ── 건물DB(GIS건물통합정보) 시도 파싱 — F_FAC_BUILDING_<시도코드2자리>_<YYYYMM> ──────────
+# VWorld dsId=18 은 시도 17개 단위 SHP. zip 내부 레이어명에서 시도코드·기준일 추출.
+_BUILDING_SIDO = {
+    "11": "서울특별시", "26": "부산광역시", "27": "대구광역시", "28": "인천광역시",
+    "29": "광주광역시", "30": "대전광역시", "31": "울산광역시", "36": "세종특별자치시",
+    "41": "경기도", "42": "강원특별자치도", "51": "강원특별자치도", "43": "충청북도",
+    "44": "충청남도", "45": "전북특별자치도", "52": "전북특별자치도", "46": "전라남도",
+    "47": "경상북도", "48": "경상남도", "50": "제주특별자치도",
+}
+# 파일명에 코드 없이 한글 시도명만 있는 경우 폴백(부분일치, 긴 별칭 우선)
+_SIDO_ALIASES = [
+    ("11", "서울"), ("26", "부산"), ("27", "대구"), ("28", "인천"), ("29", "광주"),
+    ("30", "대전"), ("31", "울산"), ("36", "세종"), ("41", "경기"), ("51", "강원"),
+    ("43", "충청북"), ("43", "충북"), ("44", "충청남"), ("44", "충남"),
+    ("52", "전라북"), ("52", "전북"), ("46", "전라남"), ("46", "전남"),
+    ("47", "경상북"), ("47", "경북"), ("48", "경상남"), ("48", "경남"), ("50", "제주"),
+]
+_BLD_PAT = re.compile(r"F_FAC_BUILDING_(\d{2})_(\d{6,8})", re.I)
+
+
+def _building_meta(path):
+    """업로드 건물 파일 → (시도코드|None, 기준일 digits|''). 우선 파일명, 다음 zip 내부 SHP명, 폴백 한글 시도명/날짜."""
+    name = path.name
+    m = _BLD_PAT.search(name)
+    if m:
+        return m.group(1), m.group(2)
+    names = []
+    if path.suffix.lower() == ".zip":
+        try:
+            if zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path) as zf:
+                    names = zf.namelist()
+        except Exception:
+            names = []
+        for n in names:               # 내부 SHP 레이어명에서 코드+기준일
+            mm = _BLD_PAT.search(n)
+            if mm:
+                return mm.group(1), mm.group(2)
+    blob = name + " " + " ".join(names)
+    for code, alias in _SIDO_ALIASES:  # 한글 시도명 폴백
+        if alias in blob:
+            return code, _period_from_name(name) or _period_from_name(" ".join(names))
+    return None, _period_from_name(name)
+
+
+def scan_uploaded_files(key):
+    """업로드 출처 디렉토리의 파일 단위 현황 — 파일명·기준일·크기·업로드시각·최신화상태(+건물DB는 시도 그룹핑).
+    진실원천=디스크 실파일(rglob), 업로드시각은 upload_history 로 보강."""
+    src = next((s for s in load_sources() if s["key"] == key), None)
+    if not src:
+        return None
+    sdir = SOURCES_DIR / key
+    rec = load_versions().get(key, {}); latest = rec.get("latest")
+    hist = {}
+    c = _db()
+    try:
+        for f, uat in c.execute("SELECT file,uploaded_at FROM upload_history WHERE key=? ORDER BY id DESC", (key,)):
+            hist.setdefault(f, uat)   # 파일명별 최신 업로드시각
+    finally:
+        c.close()
+    is_bld = (key == "building_db")
+    groups = {}
+    if sdir.is_dir():
+        for f in sorted((p for p in sdir.rglob("*") if p.is_file()), key=lambda p: str(p)):
+            rel = str(f.relative_to(sdir))
+            code, asof = _building_meta(f) if is_bld else (None, _period_from_name(f.name))
+            st = f.stat()
+            row = {"file": rel, "asof": asof or None, "size": st.st_size,
+                   "uploaded_at": hist.get(rel) or hist.get(f.name)
+                                  or time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
+                   "status": _cmp_period(asof, latest)}
+            g = groups.setdefault(code or "", {"code": code, "files": []})
+            g["files"].append(row)
+    regions = []
+    for gk in sorted(groups, key=lambda k: (k == "", k)):   # 미분류(빈키) 맨 뒤
+        g = groups[gk]; asofs = [r["asof"] for r in g["files"] if r["asof"]]
+        newest = max(asofs, key=_norm) if asofs else None
+        regions.append({"code": g["code"],
+                        "name": (_BUILDING_SIDO.get(g["code"]) if g["code"] else None),
+                        "asof": newest, "status": _cmp_period(newest, latest),
+                        "n": len(g["files"]), "files": g["files"]})
+    return {"key": key, "latest": latest, "grouped": is_bld,
+            "total": sum(r["n"] for r in regions), "regions": regions}
+
+
 def load_builds():
     return _load_json(DIST / "builds.json", [])
 
 def _norm(x):
     return re.sub(r"\D", "", str(x or ""))   # 기준일 비교용 — 숫자만(202605 vs 2026-06-18 호환)
+
+def _cmp_period(cur, lat):
+    """기준일 vs 최신 → 'current'|'update'|'unknown'. 공통 정밀도 비교(YYYYMM vs YYYYMMDD 동월 오판 방지)."""
+    if not cur or not lat:
+        return "unknown"
+    a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
+    if not k:
+        return "unknown"
+    return "update" if b[:k] > a[:k] else "current"
 
 def fetch_latest(source):
     """레지스트리의 latest_check(url/regex/pick)로 외부 페이지에서 최신 기준일 추출. 실패 시 None.
@@ -464,6 +559,164 @@ def _deps(t):
     if not d: return []
     return [d] if isinstance(d, str) else list(d)
 
+
+# ── 타겟 최신성(freshness) — 자동 재빌드 판정 ────────────────────────
+# 각 타겟의 "최신"=(입력 소스 SHA + 빌드 스크립트 해시 + 상위 타겟 시그니처)가 직전 성공빌드와
+# 동일 AND 산출물 파일 존재. 동일하면 자동 건너뜀('fresh'). 사용자가 명시 체크한 타겟은 항상 빌드.
+#   src     : 직접 읽는 원천 소스키(sources_state.staged_sig 로 변경 추적; 자식 <key>:* 포함)
+#   dep_art : 산출물을 입력으로 받는 상위 타겟(그 타겟 시그니처를 재귀 포함 → 연쇄 변경 전파)
+#   scripts : 빌드 로직 스크립트(내용 해시 — 코드 수정 시 재빌드)
+#   out     : 산출물 경로(전부 존재해야 '최신'); always=True 면 항상 빌드(qc·package)
+TFRESH = {
+    "osm_vector": {"src": ["osm"], "scripts": ["scripts/02-gen-vector.sh"],
+                   "out": [ROOT / "tiles/korea.mbtiles"]},
+    "osm_sqlite": {"dep_art": ["osm_vector"], "scripts": ["scripts/osm-from-mbtiles.py"],
+                   "out": [BUILD_HOME / "osm.sqlite"]},
+    "dong": {"src": ["osm"], "scripts": ["scripts/04-gen-dong-labels.py", "scripts/05-gen-dong-tiles.py"],
+             "out": [ROOT / "tiles/dong.mbtiles"]},
+    "localdata": {"src": ["localdata"], "scripts": ["scripts/11-build-localdata.py"],
+                  "out": [BUILD_HOME / "poi-all/localdata_clean.csv"]},
+    "facility": {"src": ["facility"], "scripts": ["scripts/11b-build-facility.py"],
+                 "out": [BUILD_HOME / "poi-all/facility_clean.csv"]},
+    "geocode": {"src": ["juso_navi", "sangga"], "dep_art": ["osm_sqlite", "localdata", "facility"],
+                "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py"],
+                "out": [BUILD_HOME / "geocode.sqlite"]},
+    "areas": {"src": ["boundary_legal", "boundary_admin"], "dep_art": ["geocode"],
+              "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
+    "buildings": {"src": ["building_db"], "scripts": ["scripts/10-gen-buildings.sh"],
+                  "out": [BUILD_HOME / "tiles/buildings.mbtiles"]},
+    "poi": {"dep_art": ["geocode"], "scripts": ["scripts/12-build-poi.sh"],
+            "out": [BUILD_HOME / "tiles/poi.mbtiles"]},
+    "qc": {"always": True},
+    "package": {"always": True},
+}
+
+BUILD_STATE = BUILD_HOME / "build_state.json"   # 타겟별 직전 성공빌드 시그니처
+
+
+def load_build_state():
+    try:
+        return json.loads(BUILD_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_build_state(st):
+    BUILD_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = BUILD_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=0), encoding="utf-8")
+    tmp.replace(BUILD_STATE)
+
+
+_SCRIPT_HASH_CACHE = {}   # rel → (mtime_ns, hash) — 동일 요청 내 반복 해시 방지
+
+
+def _script_hash(rel):
+    """빌드 스크립트 내용 해시(앞 16헥스). 없으면 'missing'(산출물검사로 커버)."""
+    p = ROOT / rel
+    try:
+        mt = p.stat().st_mtime_ns
+    except OSError:
+        return "missing"
+    c = _SCRIPT_HASH_CACHE.get(rel)
+    if c and c[0] == mt:
+        return c[1]
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 16), b""):
+            h.update(b)
+    v = h.hexdigest()[:16]
+    _SCRIPT_HASH_CACHE[rel] = (mt, v)
+    return v
+
+
+def _target_sig(kind, ver=None, _seen=None):
+    """타겟 최신 판정용 시그니처 — 입력 소스 SHA + 스크립트 해시 + 상위 타겟 시그니처(재귀)."""
+    if ver is None:
+        ver = load_versions()
+    if _seen is None:
+        _seen = set()
+    if kind in _seen:
+        return ""   # 순환 방지
+    _seen = _seen | {kind}
+    m = TFRESH.get(kind, {})
+    parts = []
+    for sk in m.get("src", []):   # 소스 + 자식(<sk>:*) staged_sig 정렬 결합
+        subs = sorted(f"{kk}:{(v or {}).get('staged_sig', '')}"
+                      for kk, v in ver.items() if kk == sk or kk.startswith(sk + ":"))
+        parts.append(sk + "=" + "|".join(subs))
+    for s in m.get("scripts", []):
+        parts.append(s + "=" + _script_hash(s))
+    for d in m.get("dep_art", []):
+        parts.append("dep:" + d + "=" + _target_sig(d, ver, _seen))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def target_freshness(kind, ver=None, state=None):
+    """'fresh'(건너뜀가능) | 'stale'(입력변경) | 'missing'(산출물없음) | 'always'(항상빌드) | None."""
+    m = TFRESH.get(kind)
+    if not m:
+        return None
+    if m.get("always"):
+        return "always"
+    outs = m.get("out", [])
+    if not outs or not all(pathlib.Path(o).exists() for o in outs):
+        return "missing"
+    if state is None:
+        state = load_build_state()
+    if ver is None:
+        ver = load_versions()
+    return "fresh" if (state.get(kind, {}) or {}).get("sig") == _target_sig(kind, ver) else "stale"
+
+
+def all_freshness():
+    ver = load_versions(); state = load_build_state()
+    return {k: target_freshness(k, ver, state) for k in TARGETS()}
+
+
+def record_build_sig(kind):
+    """빌드 성공 후 시그니처 기록(always 타겟·미정의 타겟은 생략)."""
+    m = TFRESH.get(kind)
+    if not m or m.get("always"):
+        return
+    try:
+        st = load_build_state()
+        st[kind] = {"sig": _target_sig(kind), "built_at": time.strftime("%Y-%m-%d %H:%M")}
+        save_build_state(st)
+    except Exception:
+        pass
+
+
+def required_sources(kinds):
+    """선택 타겟 + 전이 의존(빌드 dep & 산출물 dep)이 필요로 하는 소스키 집합."""
+    T = TARGETS(); plan = set(); stack = list(kinds)
+    while stack:
+        k = stack.pop()
+        if k in plan or k not in T:
+            continue
+        plan.add(k)
+        for d in _deps(T[k]):
+            stack.append(d)
+        for d in TFRESH.get(k, {}).get("dep_art", []):
+            stack.append(d)
+    srcs = set()
+    for k in plan:
+        srcs.update(TFRESH.get(k, {}).get("src", []))
+    return srcs
+
+
+def source_presence(key, ver=None):
+    """소스 데이터 존재/검증 상태 → (present:bool, validation:str|None). 자식 <key>:* 도 인정."""
+    if ver is None:
+        ver = load_versions()
+    rec = ver.get(key, {}) or {}
+    present = bool(rec.get("staged_sig") or rec.get("file") or rec.get("current"))
+    if not present:
+        present = any((v or {}).get("staged_sig") or (v or {}).get("current")
+                      for k, v in ver.items() if k.startswith(key + ":"))
+    return present, rec.get("validation_status")
+
+
 def progress_of(kind, line, st):
     """스크립트 stderr 라인 → 진행률(0..1) 휴리스틱. st는 대상별 누적 상태(dict)."""
     l = line.strip()
@@ -521,7 +774,10 @@ class Manager:
 
     def enqueue(self, kinds):
         # 전이(transitive) 의존성까지 worklist로 해소 → dep의 dep도 모두 포함.
-        T = TARGETS(); plan = set(); stack = list(kinds)
+        # 명시 선택(kinds)은 항상 빌드. 의존성으로 끌려온 타겟은 '최신(fresh)'이면 자동 건너뜀
+        # (산출물 그대로 재사용). 단일 워커 FIFO + CANON 정렬이라 상위는 하위보다 먼저 처리됨.
+        T = TARGETS(); explicit = set(k for k in kinds if k in T)
+        plan = set(); stack = list(explicit)
         while stack:
             k = stack.pop()
             t = T.get(k)
@@ -530,19 +786,25 @@ class Manager:
             for d in _deps(t):
                 if d in T: stack.append(d)
         ordered = [k for k in CANON if k in plan]
+        fresh_map = all_freshness()   # ver/state 1회 로드 — 의존성 자동 건너뜀 판정
         # jobs 변형은 subscribe()의 스냅샷과 같은 lock으로 보호(동시 SSE 연결 중 dict 크기변경 크래시 방지).
         # 이미 queued/running 인 kind는 재적재하지 않음(중복 동시 실행 방지). publish/work.put은 lock 밖에서.
-        started = []
+        started = []; fresh = []
         with self.lock:
             for k in ordered:
                 cur = self.jobs.get(k)
                 if cur and cur["status"] in ("queued", "running"): continue
+                if k not in explicit and fresh_map.get(k) == "fresh":   # 의존성+최신 → 건너뜀(재사용)
+                    self.jobs[k] = {"status": "fresh", "progress": 1.0, "log": [], "st": {}}
+                    fresh.append(k); continue
                 self.jobs[k] = {"status": "queued", "progress": 0.0, "log": [], "st": {}}
                 started.append(k)
+        for k in fresh:
+            self.publish({"kind": k, "status": "fresh", "progress": 1.0})
         for k in started:
             self.publish({"kind": k, "status": "queued", "progress": 0.0})
             self.work.put(k)
-        return started
+        return {"queued": started, "fresh": fresh}
 
     def _worker(self):
         while True:
@@ -582,6 +844,7 @@ class Manager:
             rc = p.wait()
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
+            record_build_sig(kind)   # 성공 시그니처 기록 → 다음 빌드에서 변경없으면 자동 건너뜀
             if kind == "package":   # 빌드(패키징) 완료 → 매니페스트 자동저장(번들 포함)
                 try: save_manifest(with_bundle=True)
                 except Exception as e: self._emit(kind, f"[프로필 저장 실패] {e}")
@@ -1009,7 +1272,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/vendor/"):
             return self._static(self.path.lstrip("/").split("?")[0])
         if self.path == "/api/targets":
-            return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"]}
+            fr = all_freshness()   # 타겟별 최신성(fresh/stale/missing/always) — 프론트 배지·자동 체크해제용
+            return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"], "fresh": fr.get(k)}
                                             for k, v in TARGETS().items()]})
         if self.path == "/api/builds":
             p = DIST / "cuvia-map-bundle.tgz"
@@ -1037,10 +1301,7 @@ class H(BaseHTTPRequestHandler):
             out = []
             for s in load_sources():
                 v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
-                status = "unknown"
-                if cur and lat:   # 공통 정밀도로 비교(YYYYMM vs YYYYMMDD 동월 오판 방지)
-                    a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
-                    status = ("update" if b[:k] > a[:k] else "current") if k else "unknown"
+                status = _cmp_period(cur, lat)
                 out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
                             "uploadable": bool(s.get("build_input")),
                             "checked_at": v.get("checked_at"), "status": status,
@@ -1048,6 +1309,12 @@ class H(BaseHTTPRequestHandler):
                             "validation": v.get("validation_status"), "validation_msg": v.get("validation_msg"),
                             "validated_at": v.get("validated_at")})
             return self._json({"sources": out, "build_home": str(BUILD_HOME)})
+        if self.path.startswith("/api/sources/files"):   # 업로드 파일별 현황(건물DB=시도 그룹핑·최신화)
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            data = scan_uploaded_files((q.get("key") or [""])[0])
+            if data is None:
+                return self._json({"error": "알 수 없는 key"}, 400)
+            return self._json(data)
         if self.path == "/api/download/bundle":
             p = DIST / "cuvia-map-bundle.tgz"
             if not p.is_file():
@@ -1098,8 +1365,22 @@ class H(BaseHTTPRequestHandler):
             targets = body.get("targets", [])
             MGR.last_targets = list(body.get("targets", []))   # 정제 체크 기록(매니페스트)
             prep = prepare_sources()   # 업로드 데이터 적재(미업로드는 직전 재사용)
-            ordered = MGR.enqueue(targets)
-            return self._json({"queued": ordered, "prepared": prep})
+            res = MGR.enqueue(targets)   # {queued, fresh}
+            return self._json({"queued": res["queued"], "fresh": res["fresh"], "prepared": prep})
+        if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            body = json.loads(self.rfile.read(n) or "{}")
+            targets = body.get("targets", [])
+            ver = load_versions(); names = {s["key"]: s["name"] for s in load_sources()}
+            miss = []; inval = []
+            for k in sorted(required_sources(targets)):
+                present, val = source_presence(k, ver)
+                if not present:
+                    miss.append({"key": k, "name": names.get(k, k)})
+                elif val in ("warn", "fail"):
+                    inval.append({"key": k, "name": names.get(k, k), "validation": val})
+            return self._json({"missing": miss, "invalid": inval})
         if self.path == "/api/sources/version":   # 출처 기준일 수동 등록/갱신(현재/최신)
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -1276,7 +1557,9 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .tcard{padding:11px 13px;border:1px solid var(--bd);border-radius:9px;margin-bottom:9px}
  .tcard .h{display:flex;justify-content:space-between;align-items:center;font-size:13px}
  .st{font-size:11px;padding:2px 8px;border-radius:99px;background:#0c1018;color:var(--mut)}
- .st.running{color:#7fd1ff} .st.done{color:#7ee0a0} .st.error{color:#ff8585} .st.queued{color:#d9c07a} .st.skipped{color:#9aa3ad}
+ .st.running{color:#7fd1ff} .st.done{color:#7ee0a0} .st.error{color:#ff8585} .st.queued{color:#d9c07a} .st.skipped{color:#9aa3ad} .st.fresh{color:#7ee0a0}
+ .tb{display:inline-block;white-space:nowrap;font-size:10px;border-radius:6px;padding:1px 6px;margin-left:4px}
+ .tb.fresh{color:#7ee0a0;background:#0e1a12} .tb.stale{color:#d9c07a;background:#1a160c} .tb.miss{color:#ff8585;background:#1a0e0e} .tb.always{color:#9aa3ad;background:#0c1018}
  button{background:var(--ac);color:#06121f;border:0;border-radius:8px;padding:9px 16px;font-weight:600;cursor:pointer}
  button.ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
  button:disabled{opacity:.5;cursor:default}
@@ -1301,6 +1584,15 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .nr{display:flex;align-items:center;gap:8px;flex-shrink:0}
  .nver{font-size:11px;color:var(--mut);margin:3px 0 0 42px} .nver b{color:var(--tx);font-weight:500} .nver a{color:var(--ac);cursor:pointer}
  .kids{margin:5px 0 0 24px;border-left:1px solid #1c2438}
+ .bfwrap{margin:6px 0 0 24px}
+ .bftoggle{font-size:11px;color:var(--mut);cursor:pointer;user-select:none}
+ .bfiles{margin:4px 0 0;border-left:1px solid #1c2438;padding-left:8px}
+ .bfhead{font-size:11px;margin:0 0 4px}
+ .rgrp{margin:0 0 6px} .rgrp .rh{display:flex;justify-content:space-between;font-size:11px;padding:2px 0;gap:8px}
+ .ftab{width:100%;border-collapse:collapse;font-size:11px;margin:2px 0 0}
+ .ftab th{text-align:left;color:var(--mut);font-weight:500;padding:2px 6px;border-bottom:1px solid var(--bd);white-space:nowrap}
+ .ftab td{padding:2px 6px;border-bottom:1px solid #131a28;overflow-wrap:anywhere;vertical-align:top}
+ .ftab th.r,.ftab td.r{text-align:right;white-space:nowrap}
  .krow{display:flex;align-items:center;justify-content:space-between;padding:4px 0 4px 12px;font-size:12px}
  .krow label{display:flex;align-items:center;gap:6px;cursor:pointer;min-width:0}
  .kr{display:flex;align-items:center;gap:8px} .kr .mut{font-size:10px}
@@ -1329,10 +1621,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div id=builds class=ds></div></div>
  </div>
  <div>
-  <div class=panel><h2>빌드 대상 (정제 체크)</h2>
+  <div class=panel><h2>빌드 대상 <span class=mut style="font-weight:400;font-size:12px">— 변경된 것만 자동 선택 · 최신은 건너뜀</span></h2>
    <div id=checks></div>
    <div style="display:flex;gap:8px;margin-top:12px">
-     <button id=run>빌드 시작</button></div></div>
+     <button id=run>빌드 시작</button>
+     <button class=ghost id=forceAll title="모든 타겟 체크(최신 무시하고 전체 재빌드)">강제 재빌드(전체)</button></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
  </div>
@@ -1340,23 +1633,30 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
-fetch('/api/targets').then(r=>r.json()).then(d=>{
+function tbadge(f){return f==='fresh'?'<span class="tb fresh">↻ 최신</span>'
+  :f==='stale'?'<span class="tb stale">⟳ 변경됨</span>'
+  :f==='missing'?'<span class="tb miss">⊘ 산출물 없음</span>'
+  :f==='always'?'<span class="tb always">항상</span>':'';}
+// 최신(fresh)인 타겟은 기본 체크해제 — 그대로 두면 빌드 시 건너뜀. 다시 체크하면 강제 재빌드.
+function loadTargets(){return fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
-  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" checked> ${t.label}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
-});
+  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${t.fresh==='fresh'?'':'checked'}> ${t.label} ${tbadge(t.fresh)}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
+});}
+let _tt; function refreshTargetsSoon(){clearTimeout(_tt);_tt=setTimeout(loadTargets,800);}   // 빌드 종료 후 배지·체크 갱신(디바운스)
+loadTargets();
 function card(kind,label){if(cards[kind])return;const el=document.createElement('div');el.className='tcard';
  el.innerHTML=`<div class=h><span>${label||kind}</span><span class=st id=st_${kind}>대기</span></div><div class=bar><i id=bar_${kind}></i></div>`;
  $('#cards').appendChild(el);cards[kind]=el;bars[kind]=$('#bar_'+kind);sts[kind]=$('#st_'+kind);}
 const LBL={};
 function lbl(k){const t=TARGETS.find(x=>x.kind===k);return t?t.label:k}
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
- if(s){const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
+ if(s){const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
 function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);return}
  setStatus(d.kind,d.status,d.progress); if(d.line)logln('['+d.kind+'] '+d.line);
- if(d.status==='done'){loadBuilds();if(d.kind==='collect')loadCollect();}};
+ if(d.status==='done'||d.status==='error'||d.status==='skipped'){loadBuilds();if(d.kind==='collect')loadCollect();else refreshTargetsSoon();}};
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function vbadge(s){if(!s.uploadable)return '';
@@ -1383,7 +1683,26 @@ function renderNode(it){const kids=it.children||[],hasKids=kids.length>0;
    <div class=nrow><span class=nl>${cb}${car}<b>${it.name}</b></span><span class=nr>${modeChip(it)}${info?`<span class="mut info">${info}</span>`:''}${acts(it)}</span></div>
    <div class=nver>현재 <b>${fmt(it.current)}</b> <a onclick="setVer('${it.key}','current')">✎</a> · 최신 <b>${fmt(it.latest)}</b> ${it.auto?`<a onclick="checkLatest('${it.key}',this)">조회</a>`:''} · ${srcStatus(it)}${it.file?` · <span class=mut>📄${it.file}</span>`:''}</div>
    ${it.uploadable?`<div class=bar id=ub_${it.key} style="display:none"><i id=ubi_${it.key}></i></div>`:''}
+   ${it.uploadable&&!hasKids?`<div class=bfwrap><span class=bftoggle id=bft_${it.key} onclick="toggleBF('${it.key}')">▸ 파일 현황</span><div id=bf_${it.key} class=bfiles style="display:none"></div></div>`:''}
    ${hasKids?`<div id=kids_${it.key} class=kids style="display:none">${kids.map(k=>kidRow(k,it.key)).join('')}</div>`:''}</div>`;}
+function bf_bytes(n){return n>=1073741824?gb(n):n>=1048576?(n/1048576).toFixed(1)+'MB':(n/1024).toFixed(0)+'KB';}
+function bfBadge(asof,latest){if(!asof)return '<span class=mut>기준일 미상</span>';if(!latest)return '<span class=mut>—</span>';
+  const a=String(asof).replace(/\D/g,''),b=String(latest).replace(/\D/g,''),k=Math.min(a.length,b.length);
+  if(!k)return '<span class=mut>—</span>';return b.slice(0,k)>a.slice(0,k)?'🔴 구버전':'🟢 최신';}
+function toggleBF(key){const e=document.getElementById('bf_'+key),t=document.getElementById('bft_'+key);
+  const o=e.style.display==='none';e.style.display=o?'':'none';if(t)t.textContent=(o?'▾':'▸')+' 파일 현황';
+  if(o&&!e.dataset.loaded){e.dataset.loaded='1';loadBF(key);}}
+function loadBF(key){const e=document.getElementById('bf_'+key);e.innerHTML='<span class=mut>불러오는 중…</span>';
+  fetch('/api/sources/files?key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+    if(d.error){e.innerHTML='<span class=mut>'+d.error+'</span>';return;}
+    if(!d.total){e.innerHTML='<span class=mut>업로드된 파일 없음 — 폴더/파일을 끌어다 놓거나 ⬆ 로 올리세요</span>';return;}
+    const ftab=fs=>`<table class=ftab><thead><tr><th>파일</th><th>기준일</th><th class=r>크기</th><th class=r>업로드</th><th>상태</th></tr></thead><tbody>${
+      fs.map(f=>`<tr><td>📄 ${f.file}</td><td class=mut>${fmt(f.asof)}</td><td class="mut r">${bf_bytes(f.size)}</td><td class="mut r">${(f.uploaded_at||'').slice(0,16)}</td><td>${bfBadge(f.asof,d.latest)}</td></tr>`).join('')}</tbody></table>`;
+    const head=`<div class="mut bfhead">총 ${d.total}개 · 출처 갱신일 ${fmt(d.latest)}</div>`;
+    const body=d.grouped?(d.regions||[]).map(rg=>`<div class=rgrp><div class=rh><b>${rg.name||'미분류'} <span class=mut>(${rg.n})</span></b><span class=mut>${fmt(rg.asof)} · ${bfBadge(rg.asof,d.latest)}</span></div>${ftab(rg.files)}</div>`).join('')
+      :ftab((d.regions[0]||{files:[]}).files);
+    e.innerHTML=head+body;
+  }).catch(err=>{e.innerHTML='<span class=mut>실패: '+err+'</span>';});}
 function toggleKids(key){const e=document.getElementById('kids_'+key),c=document.getElementById('cr_'+key);if(e){const o=e.style.display==='none';e.style.display=o?'':'none';if(c)c.textContent=o?'⌄':'›';}}
 function toggleAll(key,on){document.querySelectorAll('#kids_'+key+' input.ck').forEach(c=>c.checked=on);syncParent(key);}
 function onKid(key){syncParent(key);}
@@ -1397,12 +1716,16 @@ async function upSub(key,files){logln('⇧ '+key+' 업로드 '+files.length+'개
     x.onload=()=>{try{const d=JSON.parse(x.responseText);logln(d.error?'  ✗ '+d.error:'  ✓ '+f.name+' (sha '+d.sha+')');}catch(_){logln('  ✗ 응답오류 '+x.status);}res();};
     x.onerror=()=>{logln('  ✗ 네트워크');res();};x.send(f);});}
   loadCollect();}
-function loadCollect(){Promise.all([fetch('/api/collect/catalog').then(r=>r.json()),fetch('/api/sources').then(r=>r.json())]).then(([cd,sd])=>{
+function loadCollect(){
+  const prevChk={};document.querySelectorAll('#collect input.ck').forEach(c=>{if(c.value)prevChk[c.value]=c.checked;});  // 재렌더 전 체크상태 보존(업로드·검증 시 선택 초기화 방지)
+  Promise.all([fetch('/api/collect/catalog').then(r=>r.json()),fetch('/api/sources').then(r=>r.json())]).then(([cd,sd])=>{
   if(cd.build_home)$('#bh').textContent='BUILD_HOME: '+cd.build_home;
   const sv=Object.fromEntries((sd.sources||[]).map(s=>[s.key,s]));
   COL=(cd.items||[]).map(it=>{const s=sv[it.key]||{};return Object.assign({},it,{url:s.url,status:s.status,latest:s.latest||it.latest,current:s.current||it.current,validation:s.validation,validation_msg:s.validation_msg,file:s.file,auto:s.auto||it.auto});});
   SRC=COL;
   $('#collect').innerHTML=COL.map(renderNode).join('');
+  document.querySelectorAll('#collect input.ck').forEach(c=>{if(c.value in prevChk)c.checked=prevChk[c.value];});  // 직전 선택 복원(최초 렌더는 prevChk 비어 default 유지)
+  COL.forEach(it=>{if((it.children||[]).length)syncParent(it.key);});  // 부모 체크/indeterminate 재계산
   bindDrops();});}
 function startCollect(){let sel=[...document.querySelectorAll('#collect input.ck:checked')].map(x=>x.value).filter(Boolean);
   if(sel.includes('localdata'))sel=sel.filter(k=>!k.startsWith('localdata:'));
@@ -1505,16 +1828,28 @@ function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 loadCollect(); loadBuilds();
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정');
-const TSRC={localdata:['localdata'],facility:['facility'],geocode:['juso_navi','sangga','localdata','facility'],areas:['boundary_legal','boundary_admin'],buildings:['building_db']};
-$('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
- if(!t.length)return alert('대상을 선택하세요');
- const need=new Set();t.forEach(k=>(TSRC[k]||[]).forEach(s=>need.add(s)));
- const byKey=Object.fromEntries(SRC.map(s=>[s.key,s]));
- [...need].forEach(k=>{const s=byKey[k];if(s&&s.validation&&s.validation!=='ok')logln('⚠ '+(s.name||k)+' 검증 '+s.validation+' — 그대로 빌드(경고)');});
+$('#forceAll').onclick=()=>{document.querySelectorAll('#checks input').forEach(c=>c.checked=true);logln('⟳ 전체 체크 — 최신 무시하고 강제 재빌드');};
+function runBuild(t){
  const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음',partial:'⚠ 일부만 적재(오류)','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
  fetch('/api/build',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(d=>{
    (d.prepared||[]).forEach(p=>logln('  📦 '+p.key+': '+(A[p.action]||p.action)+(p.n?' ('+p.n+'개)':'')+(p.msg?' — '+p.msg:'')));
-   logln('▶ 큐: '+d.queued.join(', '));loadCollect();});};
+   (d.fresh||[]).forEach(k=>logln('  ↻ '+lbl(k)+': 최신 — 건너뜀(재사용)'));
+   logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();refreshTargetsSoon();});}
+$('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
+ if(!t.length)return alert('빌드할 대상이 없습니다.\n(모두 최신이면, 다시 빌드할 항목을 체크하거나 [강제 재빌드(전체)]를 누르세요)');
+ // 사전점검 — 필요한 소스 데이터 누락/검증실패면 경고 팝업(그래도 진행 가능)
+ fetch('/api/build/check',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(c=>{
+   const miss=c.missing||[],inval=c.invalid||[];
+   if(miss.length||inval.length){
+     let msg='';
+     if(miss.length)msg+='⚠ 데이터가 없습니다:\n  · '+miss.map(m=>m.name).join('\n  · ')+'\n\n';
+     if(inval.length)msg+='⚠ 검증 경고/실패:\n  · '+inval.map(m=>m.name+' ('+m.validation+')').join('\n  · ')+'\n\n';
+     msg+='이대로 빌드를 진행할까요? (해당 데이터는 비거나 직전 분으로 빌드됩니다)';
+     if(!confirm(msg)){logln('⏹ 빌드 취소 — 누락/오류: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));return;}
+     logln('⚠ 누락 무시하고 진행: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));
+   }
+   runBuild(t);
+ }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);});};
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;
