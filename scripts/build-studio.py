@@ -416,6 +416,10 @@ def TARGETS():
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
                  "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er"]),   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
+        "areas": dict(label="행정구역 경계 (법정동·행정동 → areas)", dep="geocode",
+            cmd=["bash", "-c",
+                 f'python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/legal"}" --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
+                 f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"']),
         "buildings": dict(label="3D 건물 타일", dep=None,
             cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh"), SRC_GIS]),
         "poi": dict(label="시설 라벨 타일 (poi.mbtiles)", dep="geocode",
@@ -428,7 +432,7 @@ def TARGETS():
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "buildings", "poi", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "areas", "buildings", "poi", "qc", "package"]
 
 def progress_of(kind, line, st):
     """스크립트 stderr 라인 → 진행률(0..1) 휴리스틱. st는 대상별 누적 상태(dict)."""
@@ -1460,7 +1464,7 @@ function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 loadCollect(); loadBuilds();
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정');
-const TSRC={localdata:['localdata'],facility:['facility'],geocode:['juso_navi','sangga','localdata','facility'],buildings:['building_db']};
+const TSRC={localdata:['localdata'],facility:['facility'],geocode:['juso_navi','sangga','localdata','facility'],areas:['boundary_legal','boundary_admin'],buildings:['building_db']};
 $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
  if(!t.length)return alert('대상을 선택하세요');
  const need=new Set();t.forEach(k=>(TSRC[k]||[]).forEach(s=>need.add(s)));
