@@ -598,10 +598,11 @@ def TARGETS():
             cmd=["bash", "-c",
                  f'python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/legal"}" --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
                  f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"']),
-        "buildings": dict(label="3D 건물 타일", dep=None,
-            cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh"), SRC_GIS]),
-        "poi": dict(label="시설 라벨 타일 (poi.mbtiles)", dep="geocode",
-            cmd=["bash", str(ROOT/"scripts/12-build-poi.sh")]),   # repo 원본 직접 — 배포본(BUILD_HOME/build-poi.sh) 동기 불필요
+        # 하이브리드: 건물·필지·POI·시설은 PostGIS→martin(/dyn) 서빙으로 일원화 → buildings.mbtiles/poi.mbtiles 타깃 폐기.
+        # 동적 레이어 = scripts/postgis/load-all.sh(admin·parcel·building·geocode→address/poi·facility) 한 타깃으로.
+        # (PostGIS 적재는 빌드호스트에서 compose --profile postgis 기동 후 실행.)
+        "load_postgis": dict(label="PostGIS 적재 (필지·건물·POI·시설·행정구역)", dep="geocode",
+            cmd=["bash", str(ROOT/"scripts/postgis/load-all.sh")]),
         "qc": dict(label="QC 검증", dep=None,
             cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
                  "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
@@ -610,7 +611,7 @@ def TARGETS():
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "areas", "buildings", "poi", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
 
 
 def _deps(t):
@@ -643,10 +644,11 @@ TFRESH = {
                 "out": [BUILD_HOME / "geocode.sqlite"]},
     "areas": {"src": ["boundary_legal", "boundary_admin"], "dep_art": ["geocode"],
               "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
-    "buildings": {"src": ["building_db"], "scripts": ["scripts/10-gen-buildings.sh"],
-                  "out": [BUILD_HOME / "tiles/buildings.mbtiles"]},
-    "poi": {"dep_art": ["geocode"], "scripts": ["scripts/12-build-poi.sh"],
-            "out": [BUILD_HOME / "tiles/poi.mbtiles"]},
+    "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility"],
+                     "dep_art": ["geocode"],
+                     "scripts": ["scripts/postgis/load-all.sh", "scripts/postgis/load_parcel.sh",
+                                 "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py"],
+                     "out": []},   # PostGIS 적재(파일 산출물 없음) — src/scripts 시그니처로 재빌드 판정
     "qc": {"always": True},
     "package": {"always": True},
 }
@@ -786,16 +788,12 @@ def progress_of(kind, line, st):
         if l.startswith("osm:"): return 0.65
         if l.startswith("biz:"): return 0.9
         if l.startswith("OK:"): return 1.0
-    elif kind == "poi":
-        if "features" in l: return 0.35
-        if "tippecanoe" in l: return 0.55
-        if l.startswith("OK:"): return 1.0
-    elif kind == "buildings":
-        # 10-gen-buildings.sh는 시도별 '  [i] LAYER → …' 단일 인덱스로 출력(N/M 아님).
-        m = re.search(r"\[(\d+)\]", l)
-        if m: return min(0.9, 0.1 + 0.8*int(m.group(1))/17)   # 시도 17개 기준 단조 증가
-        if "병합" in l or "tile-join" in l: return 0.92
-        if l.startswith("OK:"): return 1.0
+    elif kind == "load_postgis":
+        # load-all.sh: '━━ <단계> ━━' 헤더 + 시도별 '[i/N]' + 'OK: load-all 완료'
+        m = re.search(r"\[(\d+)/(\d+)\]", l)
+        if m: return min(0.95, 0.1 + 0.85*int(m.group(1))/max(int(m.group(2)), 1))
+        if l.startswith("OK: load-all"): return 1.0
+        if l.startswith("━━"): return 0.1
     elif kind in ("localdata", "package"):
         if l.startswith("OK:") or "반입 대상" in l: return 1.0
     elif kind == "qc":
