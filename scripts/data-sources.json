@@ -106,7 +106,7 @@
    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18",
    "period_fmt": "YYYY-MM-DD",
    "cycle": "월(일 변경분)",
-   "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드(시도 17개 단위 SHP, F_FAC_BUILDING_<시도코드2자리>_<YYYYMM>). 폴더채로 올리면 파일별 시도·기준일·최신화 상태 파싱(/api/sources/files). 최신화 기준=페이지 갱신일.",
+   "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드(시도 17개 단위 SHP, 실제 파일명 AL_D010_<시도코드2자리>_<YYYYMMDD>.zip — 전체분; 변동분=CH_D010). 폴더채로 올리면 파일별 시도·기준일·최신화 상태 파싱(/api/sources/files, 시도 그룹핑). 최신화 비교=페이지 갱신일 대비 월(YYYYMM) 정밀도(월 전체분이라 일자 drift 무시).",
    "latest_check": {
     "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&dataSetSeq=18&svcCde=NA",
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",

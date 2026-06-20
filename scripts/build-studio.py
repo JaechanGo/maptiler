@@ -284,53 +284,68 @@ def _validate_source(key):
 
 
 # ── 건물DB(GIS건물통합정보) 시도 파싱 — F_FAC_BUILDING_<시도코드2자리>_<YYYYMM> ──────────
-# VWorld dsId=18 은 시도 17개 단위 SHP. zip 내부 레이어명에서 시도코드·기준일 추출.
+# VWorld dsId=18 은 시도 17개 단위 SHP. 실제 파일명 AL_D010_<시도코드2자리>_<YYYYMMDD>(전체분; 변동분=CH_D010).
+# zip/내부 SHP/폴더명에서 시도코드·기준일 추출. (구포맷 F_FAC_BUILDING_<코드>_<YYYYMM> 도 호환.)
+_SIDO_CANON = {"42": "51", "45": "52"}   # 구코드(강원42·전북45) → 특별자치도 신코드(한 시도=한 그룹)
 _BUILDING_SIDO = {
     "11": "서울특별시", "26": "부산광역시", "27": "대구광역시", "28": "인천광역시",
     "29": "광주광역시", "30": "대전광역시", "31": "울산광역시", "36": "세종특별자치시",
-    "41": "경기도", "42": "강원특별자치도", "51": "강원특별자치도", "43": "충청북도",
-    "44": "충청남도", "45": "전북특별자치도", "52": "전북특별자치도", "46": "전라남도",
-    "47": "경상북도", "48": "경상남도", "50": "제주특별자치도",
+    "41": "경기도", "51": "강원특별자치도", "43": "충청북도", "44": "충청남도",
+    "52": "전북특별자치도", "46": "전라남도", "47": "경상북도", "48": "경상남도",
+    "50": "제주특별자치도",
 }
-# 파일명에 코드 없이 한글 시도명만 있는 경우 폴백(부분일치, 긴 별칭 우선)
+# 코드 없이 한글 시도명만 있을 때 폴백 — 풀네임(_BUILDING_SIDO.values)을 먼저 보고, 없으면 짧은 별칭.
 _SIDO_ALIASES = [
     ("11", "서울"), ("26", "부산"), ("27", "대구"), ("28", "인천"), ("29", "광주"),
     ("30", "대전"), ("31", "울산"), ("36", "세종"), ("41", "경기"), ("51", "강원"),
-    ("43", "충청북"), ("43", "충북"), ("44", "충청남"), ("44", "충남"),
-    ("52", "전라북"), ("52", "전북"), ("46", "전라남"), ("46", "전남"),
-    ("47", "경상북"), ("47", "경북"), ("48", "경상남"), ("48", "경남"), ("50", "제주"),
+    ("43", "충북"), ("43", "충청북"), ("44", "충남"), ("44", "충청남"),
+    ("52", "전북"), ("52", "전라북"), ("46", "전남"), ("46", "전라남"),
+    ("47", "경북"), ("47", "경상북"), ("48", "경남"), ("48", "경상남"), ("50", "제주"),
 ]
-_BLD_PAT = re.compile(r"F_FAC_BUILDING_(\d{2})_(\d{6,8})", re.I)
+_BLD_PAT = re.compile(r"(?:AL_D010|CH_D010|F_FAC_BUILDING)_(\d{2})_(\d{6,8})", re.I)
+# 파일 현황 표시에서 제외할 SHP 부속파일(데이터셋=.shp/.zip 만 노출) — 빌드/검증의 rglob 와 무관(표시 전용)
+_SHP_SIDECAR = {".shx", ".dbf", ".prj", ".fix", ".cpg", ".qpj", ".sbn", ".sbx", ".qix", ".aih", ".ain", ".xml"}
 
 
-def _building_meta(path):
-    """업로드 건물 파일 → (시도코드|None, 기준일 digits|''). 우선 파일명, 다음 zip 내부 SHP명, 폴백 한글 시도명/날짜."""
-    name = path.name
-    m = _BLD_PAT.search(name)
-    if m:
-        return m.group(1), m.group(2)
-    names = []
+def _valid_period(s):
+    """기준일 추출 — 연도 19/20xx·월 01~12 검증(임의 6/8자리 일련번호 오탐 방지). YYYYMM 또는 YYYYMMDD."""
+    m = re.search(r"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(\d{2})?(?!\d)", s or "")
+    return (m.group(1) + m.group(2) + (m.group(3) or "")) if m else ""
+
+
+def _sido_codes_from_text(blob):
+    """텍스트→시도코드 집합. 공식 풀네임 우선(예 '경기도 광주시'는 경기로 정확분류), 없으면 짧은 별칭(2종↑ 모호→빈집합)."""
+    full = {code for code, name in _BUILDING_SIDO.items() if name in blob}
+    if full:
+        return full
+    alias = {code for code, a in _SIDO_ALIASES if a in blob}
+    return alias if len(alias) == 1 else set()
+
+
+def _building_regions(path, rel=""):
+    """건물 업로드 파일 → (정렬된 시도코드 리스트, 기준일digits|''). zip 내부 전 멤버 스캔(다중 시도 zip 지원),
+    파일명·폴더명(rel)·zip내부명에서 F_FAC_BUILDING_<코드>_<날짜> 우선, 없으면 한글 시도명 폴백."""
+    members = []
     if path.suffix.lower() == ".zip":
         try:
             if zipfile.is_zipfile(path):
                 with zipfile.ZipFile(path) as zf:
-                    names = zf.namelist()
+                    members = zf.namelist()
         except Exception:
-            names = []
-        for n in names:               # 내부 SHP 레이어명에서 코드+기준일
-            mm = _BLD_PAT.search(n)
-            if mm:
-                return mm.group(1), mm.group(2)
-    blob = name + " " + " ".join(names)
-    for code, alias in _SIDO_ALIASES:  # 한글 시도명 폴백
-        if alias in blob:
-            return code, _period_from_name(name) or _period_from_name(" ".join(names))
-    return None, _period_from_name(name)
+            members = []
+    blob = " ".join([rel, path.name] + members)
+    codes, dates = set(), []
+    for mm in _BLD_PAT.finditer(blob):
+        codes.add(_SIDO_CANON.get(mm.group(1), mm.group(1))); dates.append(mm.group(2))
+    if not codes:
+        codes = _sido_codes_from_text(blob)
+    asof = (max(dates, key=_norm) if dates else "") or _valid_period(path.name) or _valid_period(blob)
+    return sorted(codes), asof
 
 
 def scan_uploaded_files(key):
     """업로드 출처 디렉토리의 파일 단위 현황 — 파일명·기준일·크기·업로드시각·최신화상태(+건물DB는 시도 그룹핑).
-    진실원천=디스크 실파일(rglob), 업로드시각은 upload_history 로 보강."""
+    진실원천=디스크 실파일(rglob), 업로드시각은 upload_history 로 보강. 다중 시도 zip 은 시도별로 분해 표시."""
     src = next((s for s in load_sources() if s["key"] == key), None)
     if not src:
         return None
@@ -344,28 +359,34 @@ def scan_uploaded_files(key):
     finally:
         c.close()
     is_bld = (key == "building_db")
-    groups = {}
+    prec = 6 if is_bld else None   # 건물DB=월 전체분 → 월(YYYYMM) 정밀도(일자 갱신일 drift 오판 방지)
+    groups = {}; total = 0
     if sdir.is_dir():
         for f in sorted((p for p in sdir.rglob("*") if p.is_file()), key=lambda p: str(p)):
-            rel = str(f.relative_to(sdir))
-            code, asof = _building_meta(f) if is_bld else (None, _period_from_name(f.name))
-            st = f.stat()
+            if f.name.startswith(".") or f.suffix.lower() in _SHP_SIDECAR:
+                continue   # 숨김파일(.DS_Store 등)·SHP 사이드카(.shx/.dbf/.prj/.fix) 제외 — 데이터셋(zip/shp)만 표시
+            try:
+                rel = str(f.relative_to(sdir)); st = f.stat()
+            except (OSError, ValueError):
+                continue   # 열거~stat 사이 삭제/경합 — 건너뜀
+            codes, asof = _building_regions(f, rel) if is_bld else ([], _period_from_name(f.name))
+            total += 1
             row = {"file": rel, "asof": asof or None, "size": st.st_size,
                    "uploaded_at": hist.get(rel) or hist.get(f.name)
                                   or time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
-                   "status": _cmp_period(asof, latest)}
-            g = groups.setdefault(code or "", {"code": code, "files": []})
-            g["files"].append(row)
+                   "status": _cmp_period(asof, latest, prec)}
+            for gk in (codes or [""]):   # 시도 미상=미분류(빈키), 다중 시도=각 그룹에 표시
+                groups.setdefault(gk, {"code": gk or None, "files": []})["files"].append(row)
     regions = []
     for gk in sorted(groups, key=lambda k: (k == "", k)):   # 미분류(빈키) 맨 뒤
         g = groups[gk]; asofs = [r["asof"] for r in g["files"] if r["asof"]]
         newest = max(asofs, key=_norm) if asofs else None
         regions.append({"code": g["code"],
                         "name": (_BUILDING_SIDO.get(g["code"]) if g["code"] else None),
-                        "asof": newest, "status": _cmp_period(newest, latest),
+                        "asof": newest, "status": _cmp_period(newest, latest, prec),
                         "n": len(g["files"]), "files": g["files"]})
     return {"key": key, "latest": latest, "grouped": is_bld,
-            "total": sum(r["n"] for r in regions), "regions": regions}
+            "total": total, "regions": regions}   # total=고유 파일수(다중 시도 파일은 그룹 n 에선 중복 카운트)
 
 
 def load_builds():
@@ -374,11 +395,15 @@ def load_builds():
 def _norm(x):
     return re.sub(r"\D", "", str(x or ""))   # 기준일 비교용 — 숫자만(202605 vs 2026-06-18 호환)
 
-def _cmp_period(cur, lat):
-    """기준일 vs 최신 → 'current'|'update'|'unknown'. 공통 정밀도 비교(YYYYMM vs YYYYMMDD 동월 오판 방지)."""
+def _cmp_period(cur, lat, prec=None):
+    """기준일 vs 최신 → 'current'|'update'|'unknown'. 공통 정밀도 비교(YYYYMM vs YYYYMMDD 동월 오판 방지).
+    prec=6 이면 월(YYYYMM) 단위로 절단 비교 — 건물DB(월 전체분)는 일 단위 갱신일과 비교 시 일자 drift 오판 방지."""
     if not cur or not lat:
         return "unknown"
-    a, b = _norm(cur), _norm(lat); k = min(len(a), len(b))
+    a, b = _norm(cur), _norm(lat)
+    if prec:
+        a, b = a[:prec], b[:prec]
+    k = min(len(a), len(b))
     if not k:
         return "unknown"
     return "update" if b[:k] > a[:k] else "current"
@@ -1301,7 +1326,7 @@ class H(BaseHTTPRequestHandler):
             out = []
             for s in load_sources():
                 v = ver.get(s["key"], {}); cur = v.get("current"); lat = v.get("latest")
-                status = _cmp_period(cur, lat)
+                status = _cmp_period(cur, lat, 6 if s["key"] == "building_db" else None)   # 건물DB=월 정밀도
                 out.append({**s, "current": cur, "latest": lat, "auto": bool(s.get("latest_check")),
                             "uploadable": bool(s.get("build_input")),
                             "checked_at": v.get("checked_at"), "status": status,
@@ -1685,10 +1710,12 @@ function renderNode(it){const kids=it.children||[],hasKids=kids.length>0;
    ${it.uploadable?`<div class=bar id=ub_${it.key} style="display:none"><i id=ubi_${it.key}></i></div>`:''}
    ${it.uploadable&&!hasKids?`<div class=bfwrap><span class=bftoggle id=bft_${it.key} onclick="toggleBF('${it.key}')">▸ 파일 현황</span><div id=bf_${it.key} class=bfiles style="display:none"></div></div>`:''}
    ${hasKids?`<div id=kids_${it.key} class=kids style="display:none">${kids.map(k=>kidRow(k,it.key)).join('')}</div>`:''}</div>`;}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function bf_bytes(n){return n>=1073741824?gb(n):n>=1048576?(n/1048576).toFixed(1)+'MB':(n/1024).toFixed(0)+'KB';}
-function bfBadge(asof,latest){if(!asof)return '<span class=mut>기준일 미상</span>';if(!latest)return '<span class=mut>—</span>';
-  const a=String(asof).replace(/\D/g,''),b=String(latest).replace(/\D/g,''),k=Math.min(a.length,b.length);
-  if(!k)return '<span class=mut>—</span>';return b.slice(0,k)>a.slice(0,k)?'🔴 구버전':'🟢 최신';}
+function bfBadge(asof,latest,prec){if(!asof)return '<span class=mut>기준일 미상</span>';if(!latest)return '<span class=mut>—</span>';
+  let a=String(asof).replace(/\D/g,''),b=String(latest).replace(/\D/g,'');if(prec){a=a.slice(0,prec);b=b.slice(0,prec);}
+  const k=Math.min(a.length,b.length);
+  if(!k)return '<span class=mut>—</span>';return b.slice(0,k)>a.slice(0,k)?'🔴 갱신본 있음':'🟢 최신';}
 function toggleBF(key){const e=document.getElementById('bf_'+key),t=document.getElementById('bft_'+key);
   const o=e.style.display==='none';e.style.display=o?'':'none';if(t)t.textContent=(o?'▾':'▸')+' 파일 현황';
   if(o&&!e.dataset.loaded){e.dataset.loaded='1';loadBF(key);}}
@@ -1696,10 +1723,11 @@ function loadBF(key){const e=document.getElementById('bf_'+key);e.innerHTML='<sp
   fetch('/api/sources/files?key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
     if(d.error){e.innerHTML='<span class=mut>'+d.error+'</span>';return;}
     if(!d.total){e.innerHTML='<span class=mut>업로드된 파일 없음 — 폴더/파일을 끌어다 놓거나 ⬆ 로 올리세요</span>';return;}
+    const pr=d.grouped?6:0;   // 건물DB(grouped)=월 정밀도 비교(일자 갱신일 drift 오판 방지)
     const ftab=fs=>`<table class=ftab><thead><tr><th>파일</th><th>기준일</th><th class=r>크기</th><th class=r>업로드</th><th>상태</th></tr></thead><tbody>${
-      fs.map(f=>`<tr><td>📄 ${f.file}</td><td class=mut>${fmt(f.asof)}</td><td class="mut r">${bf_bytes(f.size)}</td><td class="mut r">${(f.uploaded_at||'').slice(0,16)}</td><td>${bfBadge(f.asof,d.latest)}</td></tr>`).join('')}</tbody></table>`;
+      fs.map(f=>`<tr><td>📄 ${esc(f.file)}</td><td class=mut>${fmt(f.asof)}</td><td class="mut r">${bf_bytes(f.size)}</td><td class="mut r">${esc((f.uploaded_at||'').slice(0,16))}</td><td>${bfBadge(f.asof,d.latest,pr)}</td></tr>`).join('')}</tbody></table>`;
     const head=`<div class="mut bfhead">총 ${d.total}개 · 출처 갱신일 ${fmt(d.latest)}</div>`;
-    const body=d.grouped?(d.regions||[]).map(rg=>`<div class=rgrp><div class=rh><b>${rg.name||'미분류'} <span class=mut>(${rg.n})</span></b><span class=mut>${fmt(rg.asof)} · ${bfBadge(rg.asof,d.latest)}</span></div>${ftab(rg.files)}</div>`).join('')
+    const body=d.grouped?(d.regions||[]).map(rg=>`<div class=rgrp><div class=rh><b>${rg.name||'미분류'} <span class=mut>(${rg.n})</span></b><span class=mut>${fmt(rg.asof)} · ${bfBadge(rg.asof,d.latest,pr)}</span></div>${ftab(rg.files)}</div>`).join('')
       :ftab((d.regions[0]||{files:[]}).files);
     e.innerHTML=head+body;
   }).catch(err=>{e.innerHTML='<span class=mut>실패: '+err+'</span>';});}
@@ -1716,8 +1744,9 @@ async function upSub(key,files){logln('⇧ '+key+' 업로드 '+files.length+'개
     x.onload=()=>{try{const d=JSON.parse(x.responseText);logln(d.error?'  ✗ '+d.error:'  ✓ '+f.name+' (sha '+d.sha+')');}catch(_){logln('  ✗ 응답오류 '+x.status);}res();};
     x.onerror=()=>{logln('  ✗ 네트워크');res();};x.send(f);});}
   loadCollect();}
-function loadCollect(){
-  const prevChk={};document.querySelectorAll('#collect input.ck').forEach(c=>{if(c.value)prevChk[c.value]=c.checked;});  // 재렌더 전 체크상태 보존(업로드·검증 시 선택 초기화 방지)
+function loadCollect(preserve=true){
+  // 재렌더 전 체크상태 보존(업로드·검증 시 선택 초기화 방지). 프로필 로드/최초 렌더는 preserve=false 로 default_collect 적용.
+  const prevChk={};if(preserve)document.querySelectorAll('#collect input.ck').forEach(c=>{if(c.value)prevChk[c.value]=c.checked;});
   Promise.all([fetch('/api/collect/catalog').then(r=>r.json()),fetch('/api/sources').then(r=>r.json())]).then(([cd,sd])=>{
   if(cd.build_home)$('#bh').textContent='BUILD_HOME: '+cd.build_home;
   const sv=Object.fromEntries((sd.sources||[]).map(s=>[s.key,s]));
@@ -1824,7 +1853,7 @@ function editProfile(id){const el=document.querySelector('#pf_'+id+' .pname');if
     fetch('/api/profiles/rename',{method:'POST',body:JSON.stringify({id,name:n})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadBuilds();});};
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();save();}else if(e.key==='Escape'){done=true;renderProfRows();}};inp.onblur=save;}
 function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원할까요? (현재 staged 덮어씀)'))return;
-  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect();});}
+  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect(false);});}
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 loadCollect(); loadBuilds();
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정');
