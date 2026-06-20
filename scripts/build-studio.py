@@ -1737,7 +1737,13 @@ function onKid(key){syncParent(key);}
 function syncParent(key){const p=document.getElementById('pk_'+key);if(!p)return;const ks=[...document.querySelectorAll('#kids_'+key+' input.ck')];if(!ks.length)return;const on=ks.filter(c=>c.checked).length;p.checked=on===ks.length;p.indeterminate=on>0&&on<ks.length;}
 function checkItem(key,a){if(a)a.textContent='…';fetch('/api/collect/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{if(d.error)alert('최신 조회 실패: '+d.error);loadCollect();}).catch(e=>{alert('실패: '+e);loadCollect();});}
 function dlItem(key){window.open('/api/collect/download?key='+encodeURIComponent(key),'_blank');}
-function upItem(key){const inp=document.createElement('input');inp.type='file';inp.multiple=true;inp.onchange=()=>{const fs=[...inp.files];if(!fs.length)return;key.includes(':')?upSub(key,fs):uploadAll(key,fs);};inp.click();}
+// Safari/Firefox 는 DOM 에 연결되지 않은 file input 의 .click() 으로 파일 다이얼로그를 열지 않음 → body 에 잠깐 붙였다 제거.
+function openFilePicker(multiple,dir,cb){const inp=document.createElement('input');inp.type='file';inp.multiple=!!multiple;
+  if(dir)inp.webkitdirectory=true;inp.style.display='none';document.body.appendChild(inp);
+  inp.onchange=()=>{const fs=[...inp.files];inp.remove();cb(fs);};
+  window.addEventListener('focus',function h(){setTimeout(()=>{if(inp.isConnected&&!inp.files.length)inp.remove();},300);window.removeEventListener('focus',h);});  // 취소 시 정리
+  inp.click();}
+function upItem(key){openFilePicker(true,false,fs=>{if(!fs.length)return;key.includes(':')?upSub(key,fs):uploadAll(key,fs);});}
 async function upSub(key,files){logln('⇧ '+key+' 업로드 '+files.length+'개…');
   for(const f of files){await new Promise(res=>{const x=new XMLHttpRequest();
     x.open('POST','/api/collect/upload?key='+encodeURIComponent(key)+'&name='+encodeURIComponent(f.name));
@@ -1767,9 +1773,7 @@ function setVer(key,field){const v=prompt((field==='current'?'현재(빌드에 �
 function checkLatest(key,a){if(a)a.textContent='조회중…';
   fetch('/api/sources/check',{method:'POST',body:JSON.stringify({key})}).then(r=>r.json()).then(d=>{
    if(d.error)alert('최신 조회 실패: '+d.error); loadCollect();}).catch(e=>{alert('실패: '+e);loadCollect();});}
-function pickFiles(key,dir){const inp=document.createElement('input');inp.type='file';inp.multiple=true;
-  if(dir)inp.webkitdirectory=true;
-  inp.onchange=()=>{const fs=[...inp.files];if(fs.length)uploadAll(key,fs);};inp.click();}
+function pickFiles(key,dir){openFilePicker(true,dir,fs=>{if(fs.length)uploadAll(key,fs);});}
 function relName(f){const r=f._rel||f.webkitRelativePath||'';const p=r.split('/').filter(Boolean);
   return p.length>1?p.slice(1).join('/'):f.name;}   // 폴더 업로드 시 선택폴더명(첫 세그먼트) 제거 → 내부구조 보존
 function setUbar(key,p){const b=$('#ub_'+key),i=$('#ubi_'+key);if(b){b.style.display='';i.style.width=Math.round(p*100)+'%';}}
