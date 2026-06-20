@@ -112,7 +112,7 @@
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
     "pick": "max"
    },
-   "collect": {"method": "vworld_session", "ds_id": "18", "level": "sigungu", "file_nos": []},
+   "collect": {"method": "vworld_session", "ds_id": "18", "level": "sido", "file_nos": []},
    "default_collect": false,
    "build_input": {
     "dest": "staged/gis",
@@ -127,8 +127,8 @@
    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30563",
    "period_fmt": "YYYY-MM-DD",
    "cycle": "수시",
-   "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). 시군구 단위 다수 ZIP. PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh. fileNo 는 쿠키로 목록페이지에서 자동발견(level=sigungu, 시도통합 중복 제외). 다운로드 엔드포인트=downloadResourceFile.do?ds_id=&fileNo=.",
-   "collect": {"method": "vworld_session", "ds_id": "30563", "level": "sigungu", "file_nos": []},
+   "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh. fileNo 는 쿠키로 목록페이지에서 자동발견(level=sido — 시도 통합 1파일/시도, 17개, 파티션과 1:1). 다운로드 엔드포인트=downloadResourceFile.do?ds_id=&fileNo=.",
+   "collect": {"method": "vworld_session", "ds_id": "30563", "level": "sido", "file_nos": []},
    "default_collect": false,
    "build_input": {
     "dest": "staged/parcel",

@@ -1529,6 +1529,8 @@ class H(BaseHTTPRequestHandler):
             return self._sse()
         if self.path == "/api/collect/catalog":
             return self._json({"items": collect_catalog(), "build_home": str(BUILD_HOME)})
+        if self.path == "/api/secrets/vworld":   # VWorld 쿠키 설정여부만(값 미노출)
+            return self._json({"set": bool(_vworld_cookie())})
         if self.path.startswith("/api/collect/download"):   # 항목별 staged 를 zip 스트리밍(내 PC로)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             key = (q.get("key") or [""])[0]; dest = _item_dest(key)
@@ -1630,6 +1632,19 @@ class H(BaseHTTPRequestHandler):
             if _COLLECT_LOCK.locked(): return self._json({"error": "이미 수집 진행 중"}, 409)
             threading.Thread(target=_collect_guarded, args=(sel,), daemon=True).start()
             return self._json({"ok": True, "started": sel})
+        if self.path == "/api/secrets/vworld":   # VWorld 세션 쿠키 저장(.secrets/vworld_cookie) — vworld_session 수집용. repo 밖·gitignore.
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            ck = (json.loads(self.rfile.read(n) or "{}")).get("cookie", "").strip()
+            sd = BUILD_HOME / ".secrets"; sd.mkdir(parents=True, exist_ok=True)
+            f = sd / "vworld_cookie"
+            if ck:
+                f.write_text(ck, encoding="utf-8")
+                try: os.chmod(f, 0o600)
+                except OSError: pass
+                return self._json({"ok": True, "set": True})
+            f.unlink(missing_ok=True)   # 빈 값 = 삭제
+            return self._json({"ok": True, "set": False})
         if self.path.startswith("/api/collect/upload"):   # 항목별 사용자 정의 파일 업로드 → staged 직접 적재
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             key = (q.get("key") or [""])[0]; name = _safe_relpath((q.get("name") or [""])[0])
@@ -1816,7 +1831,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div id=collect class=ds></div>
    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
      <button id=collectBtn>⬇ 자동수집 시작 (순차)</button>
-     <button class=ghost id=dlSelBtn>⬇ 다운로드(내 PC로)</button></div></div>
+     <button class=ghost id=dlSelBtn>⬇ 다운로드(내 PC로)</button></div>
+   <div style="margin-top:12px;border-top:1px solid var(--bd);padding-top:10px;font-size:12px">
+     <div style="color:var(--mut);margin-bottom:6px">🔑 VWorld 세션 쿠키 <span id=vwState class=mut></span></div>
+     <div style="display:flex;gap:8px"><input id=vwCookie type=password placeholder="SSCSID=…; JSESSIONID=…" style="flex:1;background:#0c1018;border:1px solid var(--bd);border-radius:6px;color:var(--tx);padding:6px 9px;font-size:12px"><button class=ghost id=vwSave>저장</button></div>
+     <div class=mut style="font-size:10px;margin-top:5px">연속지적·건물(VWorld) 수집용. 브라우저 로그인 후 DevTools→Network→다운로드 클릭→요청의 Cookie 헤더 전체 붙여넣기. 만료 시 재입력.</div></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 프로필 · 이력</h2>
    <div id=builds class=ds></div></div>
  </div>
@@ -2047,8 +2066,10 @@ function editProfile(id){const el=document.querySelector('#pf_'+id+' .pname');if
 function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원할까요? (현재 staged 덮어씀)'))return;
   fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect(false);});}
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
-loadCollect(); loadBuilds();
-$('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정');
+function loadVw(){fetch('/api/secrets/vworld').then(r=>r.json()).then(d=>{const s=$('#vwState');if(s)s.textContent=d.set?'· 설정됨 ✓':'· 미설정';});}
+function saveVw(){const i=$('#vwCookie');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({cookie:i.value})}).then(r=>r.json()).then(d=>{i.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}
+loadCollect(); loadBuilds(); loadVw();
+$('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정'); $('#vwSave').onclick=saveVw;
 $('#forceAll').onclick=()=>{document.querySelectorAll('#checks input').forEach(c=>c.checked=true);logln('⟳ 전체 체크 — 최신 무시하고 강제 재빌드');};
 function runBuild(t){
  const A={staged:'⬆ 새 데이터 적재',ok:'✓ 적재됨',reused:'↻ 직전 데이터 사용','missing':'⚠ 데이터 없음',partial:'⚠ 일부만 적재(오류)','no-tool':'⚠ 추출도구 없음',error:'✗ 오류'};
