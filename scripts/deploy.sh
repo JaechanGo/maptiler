@@ -23,9 +23,10 @@ else
   echo "⚠ images.tar 경로를 인자로 주세요 (이미 load 했다면 무시)" >&2
 fi
 
-# tileserver-config.json 이 mbtiles 5종을 모두 참조하므로, 하나라도 없으면
+# tileserver-config.json 이 베이스 mbtiles 3종(korea/terrain/dong)을 참조하므로, 하나라도 없으면
 # TileServer-GL 이 기동 자체에 실패한다(벡터 단독 degrade 없음) — 사전 검증.
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+# (buildings/poi/parcel 동적 레이어는 PostGIS→martin — postgis/cuvia.dump 로 별도 복원)
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn)
   if [ ! -s "$ROOT/tiles/$mb" ]; then   # -s: 존재+크기>0 (0바이트 evict/잘린 파일도 차단, package.sh와 통일)
     echo "오류: tiles/$mb 가 없거나 0바이트 — 번들이 불완전합니다. 압축 해제 경로를 확인하세요." >&2
     exit 1
@@ -38,8 +39,37 @@ if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then
   exit 1
 fi
 
+# PostGIS 번들 감지 → --profile postgis 로 기동(동적 레이어 필지·건물·시설·martin·지오코더 포함)
+COMPOSE_PROFILE=""
+if [ -f "$ROOT/postgis/cuvia.dump" ]; then
+  COMPOSE_PROFILE="--profile postgis"
+  echo "PostGIS 번들 감지 — 동적 레이어·martin 포함 기동"
+fi
+
 # shellcheck disable=SC2086
-cd "$ROOT/server" && $COMPOSE_CMD up -d
+cd "$ROOT/server" && $COMPOSE_CMD $COMPOSE_PROFILE up -d
+
+# PostGIS 덤프 복원(최초 1회, 멱등) — postgis healthy 대기 후 pg_restore
+if [ -f "$ROOT/postgis/cuvia.dump" ]; then
+  echo "PostGIS healthy 대기(최대 120초)..."
+  PGC="$($COMPOSE_CMD ps -q postgis 2>/dev/null || true)"
+  _w=0
+  until [ -n "$PGC" ] && docker exec "$PGC" pg_isready -U "${PGUSER:-cuvia}" >/dev/null 2>&1; do
+    [ "$_w" -ge 120 ] && { echo "오류: postgis 가 120초 내 미응답" >&2; exit 1; }
+    sleep 5; _w=$((_w + 5)); PGC="$($COMPOSE_CMD ps -q postgis 2>/dev/null || true)"
+  done
+  HAS=$(docker exec "$PGC" psql -tA -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" \
+        -c "SELECT to_regclass('public.parcel') IS NOT NULL" 2>/dev/null || echo "")
+  if [ "$HAS" = "t" ]; then
+    echo "PostGIS 이미 적재됨 — 복원 건너뜀(재복원하려면 docker volume rm server_pgdata 후 재실행)"
+  else
+    echo "PostGIS 덤프 복원(pg_restore)..."
+    docker exec -i "$PGC" pg_restore -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" \
+      --clean --if-exists --no-owner < "$ROOT/postgis/cuvia.dump" \
+      || echo "  (일부 복원 경고 — 소유권/기존객체 무시 가능)"
+    echo "PostGIS 복원 완료"
+  fi
+fi
 
 # W1: tileserver 헬스 대기 (최대 60초, 5초 간격 × 12회)
 echo "tileserver 헬스 확인 중 (최대 60초)..."

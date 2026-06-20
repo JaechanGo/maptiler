@@ -18,7 +18,7 @@ GEOCODE_DB="$BUILD_HOME/geocode.sqlite"
 # 번들/QC 정본은 BUILD_HOME/tiles 이므로, repo/tiles 에만 있거나 더 최신인 산출물을 여기로 모은다
 # (APFS clonefile=즉시·무추가공간; 타 볼륨이면 일반 복사 폴백). → 번들이 5종을 빠짐없이 담는다.
 mkdir -p "$TILES_DIR"
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ -s "$ROOT/tiles/$mb" ] && { [ ! -s "$TILES_DIR/$mb" ] || [ "$ROOT/tiles/$mb" -nt "$TILES_DIR/$mb" ]; }; then
     echo "  ↪ tiles 통합: tiles/$mb → $TILES_DIR/$mb"
     cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null || cp "$ROOT/tiles/$mb" "$TILES_DIR/$mb"
@@ -35,11 +35,12 @@ else
   "$ROOT/scripts/build-style.sh"
 fi
 
-# tileserver-config.json 이 참조하는 mbtiles 5종 — 하나라도 빠진 번들은
+# tileserver-config.json 이 참조하는 베이스 mbtiles 3종(korea/terrain/dong) — 하나라도 빠진 번들은
 # 폐쇄망에서 TileServer-GL 기동 실패/레이어 누락으로 이어지므로 패키징 단계에서 차단한다.
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles buildings.mbtiles poi.mbtiles; do
+# (buildings/poi/parcel 등 동적 레이어는 PostGIS→martin 서빙 — pg_dump 로 별도 번들, 위 WITH_POSTGIS)
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ ! -s "$TILES_DIR/$mb" ]; then
-    echo "오류: $TILES_DIR/$mb 가 없거나 0바이트 — 02/03/05/10/12 생성 스크립트를 먼저 실행하세요." >&2
+    echo "오류: $TILES_DIR/$mb 가 없거나 0바이트 — 02/03/05 생성 스크립트를 먼저 실행하세요." >&2
     exit 1
   fi
 done
@@ -105,8 +106,24 @@ fi
 # 로컬에 없는 다른 아치 레이어를 참조해 실패한다.
 # 회피책: linux/amd64 단일 플랫폼 다이제스트를 pull 한 뒤 compose 고정 태그로 재태깅하고
 # 태그로 save → RepoTags 가 보존되므로 폐쇄망 docker load 후 바로 compose up 가능.
+# WITH_POSTGIS: PostGIS 지오코더 이미지를 로컬 빌드(psycopg 베이크) → 아래 save 에 포함
+if [ -n "${WITH_POSTGIS:-}" ]; then
+  echo "  PostGIS 지오코더 이미지 빌드: cuvia-geocode-pg:local"
+  docker build --platform linux/amd64 -t cuvia-geocode-pg:local \
+    -f "$ROOT/server/geocode-pg.Dockerfile" "$ROOT/server"
+fi
+
 SAVE_REFS=()
 for tag in "${TAGS[@]}"; do
+  case "$tag" in
+    *:local)   # 로컬 빌드 이미지(cuvia-geocode-pg:local) — registry pull 대상 아님. 존재할 때만 save.
+      if docker image inspect "$tag" >/dev/null 2>&1; then
+        echo "  로컬 이미지 포함: $tag"; SAVE_REFS+=("$tag")
+      else
+        echo "  (건너뜀) 로컬 이미지 미빌드: $tag — PostGIS 포함하려면 WITH_POSTGIS=1 로 재패키징"
+      fi
+      continue;;
+  esac
   # buildx imagetools inspect 출력에서 linux/amd64 플랫폼 전 마지막 Name: 값을 추출
   # (Name: 라인이 Platform: 라인보다 앞에 나오므로 "마지막 Name 추적" 방식 사용)
   # C1: pipefail 환경에서 inspect 실패 시 전체 스크립트가 abort 되지 않도록 || true 를 추가.
@@ -141,6 +158,24 @@ rm -rf "$STAGE"; mkdir -p "$STAGE/geocode"
 cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
   || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # clonefile 불가 시(타 볼륨) 일반 복사 폴백
 
+# WITH_POSTGIS: PostGIS 데이터 덤프(동적 레이어·지오코더 backbone) → postgis/cuvia.dump (pg_dump -Fc)
+STAGE_POSTGIS=""
+if [ -n "${WITH_POSTGIS:-}" ]; then
+  echo "  PostGIS 덤프(pg_dump -Fc → postgis/cuvia.dump)"
+  mkdir -p "$STAGE/postgis"; STAGE_POSTGIS="postgis"
+  PGC="${PG_CONTAINER:-server-postgis-1}"
+  if docker exec "$PGC" pg_isready -U "${PGUSER:-cuvia}" >/dev/null 2>&1; then
+    docker exec "$PGC" pg_dump -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -n public -Fc > "$STAGE/postgis/cuvia.dump"
+  elif command -v pg_dump >/dev/null 2>&1; then
+    PGPASSWORD="${PGPASSWORD:-cuvia}" pg_dump -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" \
+      -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -n public -Fc > "$STAGE/postgis/cuvia.dump"
+  else
+    echo "오류: PostGIS 덤프 불가 — postgis 컨테이너($PGC) 미가동 & host pg_dump 없음." >&2; exit 1
+  fi
+  [ -s "$STAGE/postgis/cuvia.dump" ] || { echo "오류: pg_dump 결과 0바이트" >&2; exit 1; }
+  echo "    → postgis/cuvia.dump ($(du -h "$STAGE/postgis/cuvia.dump" | cut -f1))"
+fi
+
 # M2: vendor/ 는 maplibre·maputnik 등 오프라인 자산 전체를 포함하며 의도적으로 통째로 번들링함.
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 # `tar && mv`로 묶으면 set -e가 tar 실패를 전파하지 못해 stale 번들로 0종료한다 → 분리.
@@ -151,7 +186,7 @@ tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
                    docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
                    THIRD-PARTY-NOTICES.md \
   -C "$BUILD_HOME" tiles \
-  -C "$STAGE"      geocode \
+  -C "$STAGE"      geocode $STAGE_POSTGIS \
   || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"
 rm -rf "$STAGE"
