@@ -90,9 +90,10 @@ lons = [f["geometry"]["coordinates"][0] for f in feats]
 lats = [f["geometry"]["coordinates"][1] for f in feats]
 bounds = (min(lons), min(lats), max(lons), max(lats))
 
+OUT.parent.mkdir(parents=True, exist_ok=True)   # tiles/ 없는 호스트(클린 clone) 대비
 tmp = OUT.with_name(OUT.name + ".tmp")
 tmp.unlink(missing_ok=True)
-db = sqlite3.connect(tmp)
+db = sqlite3.connect(str(tmp))
 db.executescript(
     """
     CREATE TABLE metadata (name TEXT, value TEXT);

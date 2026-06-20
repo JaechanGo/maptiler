@@ -42,6 +42,16 @@ if [ ! -s "$GEOCODE_DB" ]; then
   exit 1
 fi
 
+# 행정경계 폴리곤(역지오코딩 동 판정)·표준 카테고리·법정/행정동 코드는 모두 geocode.sqlite 안에 적재되어
+# 함께 반입된다(별도 areas.sqlite/cat-crosswalk 번들 불필요 — 빌드 시 09 가 DB 에 굽는다).
+# areas 가 비면 역지오 동 폴리곤 없이 배포되므로 경고만(차단 X — areas 는 부가 레이어). 상세검증은 아래 QC 게이트.
+AREAS_N=$(sqlite3 "$GEOCODE_DB" "SELECT count(*) FROM areas" 2>/dev/null || echo 0)
+if [ "${AREAS_N:-0}" -eq 0 ]; then
+  echo "  경고: geocode.sqlite 에 행정경계 areas 0건 — 역지오코딩 동 폴리곤 없이 배포됩니다 (06-gen-areas.py + areas.sqlite 확인)." >&2
+else
+  echo "  geocode.sqlite OK — 행정경계 areas ${AREAS_N}건 포함(역지오 동 폴리곤)"
+fi
+
 # QC 게이트: 구조검사(NFC·좌표범위·시도커버리지·인덱스·스타일↔타일 정합) FAIL 시 번들 차단.
 # (골든질의는 실행중 API가 필요하므로 패키징 단계에선 --api 생략 → 스킵/경고 처리)
 echo "[2/4] QC 검증 게이트"

@@ -58,26 +58,70 @@ def norm(s): return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', s or '')).s
 def rnorm(s): return re.sub(r'[.\s]', '', unicodedata.normalize('NFC', s or ''))
 
 
-def addr_str(r):
+def _g(r, k):                               # Row 에 없는 컬럼도 안전 접근(구 DB 호환)
+    try: return r[k]
+    except (IndexError, KeyError): return None
+
+
+def addr_str(r):                            # 표시용 풀 도로명(법정동 포함) — 검색결과 name
     s = f'{r["sido"]} {r["sigungu"]} {r["emd"]} {r["road"]} {r["main_no"]}'
     if r["sub_no"]: s += f'-{r["sub_no"]}'
     if r["bld"]: s += f' ({r["bld"]})'
     return s
 
 
+def road_str(r):                            # 표준 도로명주소(법정동 제외)
+    s = f'{r["sido"]} {r["sigungu"]} {r["road"]} {r["main_no"]}'
+    if r["sub_no"]: s += f'-{r["sub_no"]}'
+    if r["bld"]: s += f' ({r["bld"]})'
+    return s
+
+
+def parcel_str(r):                          # 지번주소
+    jb = _g(r, 'jibun')
+    return (f'{r["sido"]} {r["sigungu"]} {jb}' if jb
+            else f'{r["sido"]} {r["sigungu"]} {r["emd"]}').strip()
+
+
+def addr_obj(r):
+    """주소 행 → 통합 주소객체. 도로명+지번 동시 + 행정코드(Kakao 로컬 스타일)."""
+    return {
+        'road': road_str(r),
+        'parcel': parcel_str(r),
+        'zipcode': _g(r, 'postal') or '',
+        'bld': _g(r, 'bld') or '',
+        'structure': {
+            'sido': r['sido'], 'sigungu': r['sigungu'], 'emd': r['emd'],
+            'haeng_dong': _g(r, 'haeng_dong'),
+            'road_name': _g(r, 'road'), 'main_no': _g(r, 'main_no'), 'sub_no': _g(r, 'sub_no'),
+            'b_code': _g(r, 'bcode'),       # 법정동코드(VWorld level4LC)
+            'h_code': _g(r, 'hcode'),       # 행정동코드(VWorld level4AC)
+        },
+    }
+
+
+def category_of(r):
+    """biz=대>중분류, OSM=subtype 라벨. 줄 게 없으면 None."""
+    c1 = _g(r, 'cat1'); c2 = _g(r, 'cat2'); sub = _g(r, 'subtype')
+    if c1:
+        cat = {'primary': c1, 'label': ' > '.join(x for x in (c1, c2) if x)}
+        if c2: cat['sub'] = c2
+        return cat
+    return {'label': sub} if sub else None
+
+
 def addr_at(con, lon, lat):
-    """좌표 → 최근접 도로명주소(전체) + 우편번호. 가게/POI 결과에 주소 부착용."""
+    """좌표 → 최근접 도로명주소 객체(역지오코딩/주소부착용). 없으면 None."""
     cf = math.cos(math.radians(lat)) ** 2
     for w in (0.0015, 0.006, 0.025):       # ~150m → 600m → 2.5km 확장
         r = con.execute(
-            """SELECT p.sido,p.sigungu,p.emd,p.road,p.main_no,p.sub_no,p.bld,p.postal,p.jibun FROM place_rtree x
-               JOIN places p ON p.id=x.id
+            """SELECT p.* FROM place_rtree x JOIN places p ON p.id=x.id
                WHERE x.minlon>=? AND x.maxlon<=? AND x.minlat>=? AND x.maxlat<=? AND p.kind='addr'
                ORDER BY (p.lon-?)*(p.lon-?)*?+(p.lat-?)*(p.lat-?) LIMIT 1""",
             (lon - w, lon + w, lat - w, lat + w, lon, lon, cf, lat, lat)).fetchone()
         if r:
-            return addr_str(r), r['postal'], r['jibun']
-    return None, None, None
+            return addr_obj(r)
+    return None
 
 
 def parse(q):
@@ -133,9 +177,8 @@ def geocode(con, q, limit):
         if not cand:
             cand = [(110 + rb(r), r) for r in fetch("", ())]         # 도로명만
         for s, r in cand:
-            results.append((s, {'name': addr_str(r), 'kind': 'addr', 'lon': r['lon'], 'lat': r['lat'],
-                                'building': f"{r['main_no']}" + (f"-{r['sub_no']}" if r['sub_no'] else ""),
-                                'postal': r['postal'], 'jibun': r['jibun']}))
+            results.append((s, {'name': addr_str(r), 'kind': 'addr',
+                                'lon': r['lon'], 'lat': r['lat'], 'address': addr_obj(r)}))
 
     # ---- 이름 경로: 역/지명/POI/건물명 (도로명 질의엔 잡음 억제) ----
     if p['terms'] and (not p['road'] or not results):
@@ -144,15 +187,15 @@ def geocode(con, q, limit):
         m = ' '.join(f'{cols}:"{t}"*' for t in p['terms'])
         base = {'station': 175, 'place': 165, 'dong': 160, 'poi': 140, 'biz': 135, 'road': 120, 'addr': 130}
         nq = norm(q)
-        rk = None
         for r in _fts(con, m):
-            if rk is None: rk = set(r.keys())
             disp = addr_str(r) if r['kind'] == 'addr' else r['name']
             s = base.get(r['kind'], 100) + (30 if (r['name'] or '') == nq else 0)
-            item = {'name': disp, 'kind': r['kind'], 'subtype': r['subtype'], 'lon': r['lon'], 'lat': r['lat']}
-            if 'phone' in rk and r['phone']: item['phone'] = r['phone']
-            if 'opened' in rk and r['opened']: item['opened'] = r['opened']
-            if 'cat1' in rk and r['cat1']: item['cat1'] = r['cat1']
+            item = {'name': disp, 'kind': r['kind'], 'subtype': _g(r, 'subtype'),
+                    'lon': r['lon'], 'lat': r['lat']}
+            cat = category_of(r)
+            if cat: item['category'] = cat
+            if _g(r, 'phone'): item['phone'] = r['phone']
+            if _g(r, 'source'): item['source'] = r['source']
             results.append((s, item))
 
     # ---- 병합·정렬·중복 제거 ----
@@ -165,18 +208,14 @@ def geocode(con, q, limit):
         seen.add(k); out.append(item)
         if len(out) >= limit:
             break
-    for it in out:                              # 결과에 전체주소 부착(가게/POI는 최근접 도로명주소)
-        if it['kind'] == 'addr':
-            it['address'] = it['name']
-        else:
-            a, pc, jb = addr_at(con, it['lon'], it['lat'])
-            it['address'] = a
-            if pc: it['postal'] = pc
-            if jb: it['jibun'] = jb
+    for it in out:                              # 가게/POI 엔 최근접 도로명주소 객체 부착(addr 은 이미 보유)
+        if it['kind'] != 'addr':
+            it['address'] = addr_at(con, it['lon'], it['lat'])
     return out
 
 
 def reverse(con, lon, lat, limit):
+    address = addr_at(con, lon, lat)            # 점이 속한 도로명+지번주소 + 행정코드(VWorld GetAddress both 대응)
     nearest = []
     for w in NEAR_WIN:
         rows = con.execute(
@@ -188,19 +227,21 @@ def reverse(con, lon, lat, limit):
             nearest = []
             for r in rows:
                 nm = addr_str(r) if r['kind'] == 'addr' else r['name']
-                adr = nm if r['kind'] == 'addr' else (addr_at(con, r['lon'], r['lat'])[0])
-                nearest.append({'name': nm, 'address': adr, 'kind': r['kind'], 'subtype': r['subtype'],
-                                'lon': r['lon'], 'lat': r['lat'], 'dist_m': round(r['d'], 1)})
+                item = {'name': nm, 'kind': r['kind'], 'subtype': _g(r, 'subtype'),
+                        'lon': r['lon'], 'lat': r['lat'], 'dist_m': round(r['d'], 1)}
+                cat = category_of(r)
+                if cat: item['category'] = cat
+                nearest.append(item)
             break
     areas = []
     for a in con.execute(
-            """SELECT a.name,a.type,a.rings FROM area_rtree r JOIN areas a ON a.id=r.id
+            """SELECT a.name,a.type,a.code,a.rings FROM area_rtree r JOIN areas a ON a.id=r.id
                WHERE r.minlon<=? AND r.maxlon>=? AND r.minlat<=? AND r.maxlat>=?""",
             (lon, lon, lat, lat)):
         for ring in json.loads(a['rings']):
             if point_in_ring(lon, lat, ring):
-                areas.append({'name': a['name'], 'type': a['type']}); break
-    return {'nearest': nearest, 'areas': areas}
+                areas.append({'name': a['name'], 'type': a['type'], 'code': a['code']}); break
+    return {'address': address, 'nearest': nearest, 'areas': areas}
 
 
 class Handler(BaseHTTPRequestHandler):

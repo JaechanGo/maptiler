@@ -87,7 +87,7 @@ def main():
     files = sorted(glob.glob(os.path.join(SRC, "**", "*.csv"), recursive=True))
     w = csv.writer(open(OUT, "w", encoding="utf-8", newline=""))
     w.writerow(["상호명", "상권업종소분류명", "시도명", "시군구명", "행정동명",
-                "경도", "위도", "전화번호", "인허가일자", "상권업종대분류명"])
+                "경도", "위도", "전화번호", "인허가일자", "상권업종대분류명", "도로명주소", "지번주소"])
     total = 0; skipped = 0
     for f in files:
         rel = os.path.relpath(f, SRC).split(os.sep)
@@ -119,7 +119,7 @@ def main():
                 if not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
                 sido, sgg, emd = parse_region(jibun, doro)
-                w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의"]); n += 1
+                w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
             else:
                 x = str(r.get(c_tmx) or "").strip(); y = str(r.get(c_tmy) or "").strip()
                 if not x or not y:
@@ -130,7 +130,7 @@ def main():
                 if lon is None or not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
                 sido, sgg, emd = parse_region(jibun, doro)
-                w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의"]); n += 1
+                w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
         total += n
         if n:
             print(f"    +{n:,}", file=sys.stderr)
