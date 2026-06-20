@@ -11,14 +11,24 @@ export PGPORT="${PGPORT:-5432}"
 export PGUSER="${PGUSER:-cuvia}"
 export PGDATABASE="${PGDATABASE:-cuvia}"
 
-if ! command -v psql >/dev/null 2>&1; then
-    echo "psql 미설치 — scripts/setup-build-host.sh 실행(PostgreSQL client) 후 재시도" >&2
+# 호스트 psql 우선. 없으면(sudo로 설치 불가 등) postgis 컨테이너의 psql 사용 — 호스트 설치·sudo 불필요.
+REPO="$(cd "$DIR/../../.." && pwd)"
+COMPOSE="docker compose -f $REPO/server/docker-compose.yml"
+if command -v psql >/dev/null 2>&1; then
+    VIA="host psql → ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+    apply() { psql -v ON_ERROR_STOP=1 -q -f "$1"; }
+elif command -v docker >/dev/null 2>&1 && [ -n "$($COMPOSE ps -q postgis 2>/dev/null)" ]; then
+    VIA="postgis 컨테이너 psql (호스트 psql 없음 → sudo 불필요)"
+    apply() { $COMPOSE exec -T postgis psql -v ON_ERROR_STOP=1 -q -U "$PGUSER" -d "$PGDATABASE" < "$1"; }
+else
+    echo "✗ psql 없음 + postgis 컨테이너 미가동." >&2
+    echo "  → cd server && docker compose --profile postgis up -d postgis  후 재시도(호스트 psql 설치 불필요)." >&2
     exit 1
 fi
 
-echo "PostGIS 스키마 적용 → ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+echo "PostGIS 스키마 적용 ($VIA)"
 for f in "$DIR"/*.sql; do
     echo "  [apply] $(basename "$f")"
-    psql -v ON_ERROR_STOP=1 -q -f "$f"
+    apply "$f"
 done
 echo "OK: 스키마 적용 완료"
