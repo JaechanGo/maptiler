@@ -397,7 +397,7 @@ def TARGETS():
         "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
-                 "--out", str(BUILD_HOME/"geocode.sqlite")]),
+                 "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er"]),   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
         "buildings": dict(label="3D 건물 타일", dep=None,
             cmd=["bash", str(ROOT/"scripts/10-gen-buildings.sh"), SRC_GIS]),
         "poi": dict(label="시설 라벨 타일 (poi.mbtiles)", dep="geocode",
