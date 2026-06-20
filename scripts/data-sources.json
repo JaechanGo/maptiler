@@ -228,18 +228,6 @@
    "build_input": {"dest": "staged/facility_src/fire_station", "extract": "zip", "into": "dir"}
   },
   {
-   "key": "shelter_civil",
-   "name": "전국민방위대피시설표준데이터",
-   "category": "시설",
-   "url": "https://www.data.go.kr/data/15021098/standard.do",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "민방위 대피시설(좌표有). file.localdata.go.kr 무인증(한국IP 전용·해외 403). PostGIS public_facility(kind=shelter). ※파일 직링크 경로는 빌드시 standard.do 에서 확인 후 col.url 갱신 필요(현재 추정값).",
-   "collect": {"method": "direct", "url": "https://file.localdata.go.kr/file/civil_defense_shelter_info/info", "mode": "extract"},
-   "default_collect": false,
-   "build_input": {"dest": "staged/facility_src/shelter", "extract": null, "into": "dir"}
-  },
-  {
    "key": "aed",
    "name": "국립중앙의료원_전국 자동심장충격기(AED) 정보",
    "category": "시설",
