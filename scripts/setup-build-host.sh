@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 빌드 호스트 준비 — 내비DB(.7z) 추출용 p7zip 설치 + 빌드 툴체인 점검.
+# 빌드 호스트 준비 — 내비DB(.7z) 추출용 p7zip 설치 + planetiler.jar 부트스트랩 + 빌드 툴체인 점검.
 # OS/패키지매니저 자동감지: Ubuntu·Debian(apt) / RHEL·Rocky·CentOS·BlueOnyx(dnf|yum+EPEL) / macOS(brew).
 #   ./scripts/setup-build-host.sh
 # (폐쇄망 서빙 서버는 불필요 — 빌드는 인터넷 빌드 호스트에서만 7z가 필요)
@@ -7,7 +7,7 @@ set -uo pipefail
 have(){ command -v "$1" >/dev/null 2>&1; }
 SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 
-echo "── [1/2] p7zip(7z) ──────────────────────────────"
+echo "── [1/3] p7zip(7z) ──────────────────────────────"
 if have 7z || have 7za || have 7zr; then
   echo "✓ 이미 설치됨: $(command -v 7z 7za 7zr 2>/dev/null | head -1)"
 elif have apt-get; then
@@ -33,7 +33,38 @@ if have 7z || have 7za || have 7zr; then echo "✓ 7z 사용 가능 → 내비DB
 else echo "✗ 7z 여전히 없음 — 위 메시지 확인(권한/네트워크) 또는 .txt 직접배치"; fi
 
 echo
-echo "── [2/2] 빌드 툴체인 점검(없으면 안내) ───────────"
+echo "── [2/3] planetiler.jar (OSM 벡터타일 빌드) ──────"
+# .gitignore 제외 벤더 바이너리(~90MB) — clone 호스트엔 없으므로 공식 릴리스에서 부트스트랩.
+# 02-gen-vector.sh 가 'java -jar planetiler/planetiler.jar' 로 사용. 없으면 osm_vector 빌드 불가.
+# 재현성 위해 PLANETILER_URL 로 특정 버전 고정 가능(미지정 시 latest).
+PROOT="$(cd "$(dirname "$0")/.." && pwd)"
+JAR="$PROOT/planetiler/planetiler.jar"
+PLANETILER_URL="${PLANETILER_URL:-https://github.com/onthegomap/planetiler/releases/latest/download/planetiler.jar}"
+fetch(){ if have curl; then curl -fSL --retry 3 -o "$1" "$2"; elif have wget; then wget -qO "$1" "$2"; else return 127; fi; }
+if [ -s "$JAR" ]; then
+  echo "✓ 이미 있음: planetiler/planetiler.jar ($(du -h "$JAR" 2>/dev/null | cut -f1))"
+else
+  mkdir -p "$PROOT/planetiler"
+  echo "→ 다운로드: $PLANETILER_URL"
+  if fetch "$JAR.tmp" "$PLANETILER_URL"; then
+    ok=1; sumtool="$(command -v sha256sum || command -v shasum || true)"
+    # .sha256 동봉 — 잘린 파일/HTML 에러페이지를 무결성으로 차단(가능할 때만).
+    if [ -n "$sumtool" ] && fetch "$JAR.sha256" "$PLANETILER_URL.sha256" 2>/dev/null; then
+      want="$(awk '{print $1}' "$JAR.sha256")"; got="$($sumtool "$JAR.tmp" | awk '{print $1}')"
+      [ -n "$want" ] && [ "$want" != "$got" ] && { ok=0; echo "✗ sha256 불일치 — 다운로드 손상"; }
+      rm -f "$JAR.sha256"
+    fi
+    if [ "$ok" = 1 ]; then mv "$JAR.tmp" "$JAR"; else rm -f "$JAR.tmp"; fi
+  else
+    rm -f "$JAR.tmp" 2>/dev/null || true
+    echo "✗ 다운로드 실패(curl/wget 미설치 또는 네트워크) — planetiler.jar 수동 배치: $JAR"
+  fi
+  if [ -s "$JAR" ]; then echo "✓ 받음: planetiler/planetiler.jar ($(du -h "$JAR" 2>/dev/null | cut -f1))"
+  else echo "✗ planetiler.jar 확보 실패 — OSM 벡터타일(osm_vector) 빌드 불가"; fi
+fi
+
+echo
+echo "── [3/3] 빌드 툴체인 점검(없으면 안내) ───────────"
 for t in python3 java ogr2ogr gdaltransform tippecanoe tile-join; do
   if have "$t"; then echo "  ✓ $t"; else echo "  ✗ $t (없음 — 해당 빌드 단계에 필요)"; fi
 done

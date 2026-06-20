@@ -243,7 +243,30 @@ def _v_building(files):
     return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
 
 
-_VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building}
+def _v_boundary(files):
+    # 행정구역 경계 shp(zip 내부) — admin 은 BND_ADM_DONG_PG.shp 직배치, legal 은 시도별 zip-of-zips.
+    zips = [f for f in files if f.suffix.lower() == ".zip"]
+    shps = [f for f in files if f.suffix.lower() == ".shp"]
+    if zips:
+        shp_n = nested = 0
+        for z in zips:
+            try:
+                with zipfile.ZipFile(z) as zf:
+                    names = zf.namelist()
+                    shp_n += sum(1 for n in names if n.lower().endswith(".shp"))
+                    nested += sum(1 for n in names if n.lower().endswith(".zip"))
+            except Exception:
+                return ("warn", f"zip {len(zips)}개 (일부 열기 실패)")
+        if shp_n:   return ("ok", f"zip {len(zips)}개 · shp {shp_n}개")
+        if nested:  return ("ok", f"zip {len(zips)}개 · 중첩 zip {nested}개(시도별 묶음 — 빌드 시 재귀추출)")
+        return ("warn", f"zip {len(zips)}개지만 .shp/중첩 zip 없음")
+    if shps:
+        return ("ok", f"shp {len(shps)}개")
+    return ("fail", "zip(.shp 포함) 또는 .shp 가 필요합니다")
+
+
+_VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building,
+               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary}
 
 
 def _validate_source(key):
@@ -434,6 +457,13 @@ def TARGETS():
 
 CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "areas", "buildings", "poi", "qc", "package"]
 
+
+def _deps(t):
+    """TARGETS 항목의 dep(None|str|list) → dep 키 리스트로 평탄화."""
+    d = t.get("dep") if isinstance(t, dict) else None
+    if not d: return []
+    return [d] if isinstance(d, str) else list(d)
+
 def progress_of(kind, line, st):
     """스크립트 stderr 라인 → 진행률(0..1) 휴리스틱. st는 대상별 누적 상태(dict)."""
     l = line.strip()
@@ -497,7 +527,7 @@ class Manager:
             t = T.get(k)
             if not t or k in plan: continue
             plan.add(k)
-            for d in (([t["dep"]] if isinstance(t["dep"], str) else (t["dep"] or [])) if t["dep"] else []):
+            for d in _deps(t):
                 if d in T: stack.append(d)
         ordered = [k for k in CANON if k in plan]
         # jobs 변형은 subscribe()의 스냅샷과 같은 lock으로 보호(동시 SSE 연결 중 dict 크기변경 크래시 방지).
@@ -526,7 +556,18 @@ class Manager:
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"], "line": line})
 
     def _run(self, kind):
-        j = self.jobs[kind]; j["status"] = "running"
+        j = self.jobs[kind]
+        # 상위(dep) 작업이 실패/스킵이면 하위는 실행하지 않고 skipped 처리.
+        # 단일 워커 FIFO + CANON 정렬이라 상위는 이미 종료상태. 상위 산출물 부재로 인한
+        # 혼란스러운 연쇄 에러(예: osm_vector 실패 → osm_sqlite 가 없는 korea.mbtiles 열다 죽음) 방지.
+        bad = next((d for d in _deps(TARGETS().get(kind, {}))
+                    if (self.jobs.get(d) or {}).get("status") in ("error", "skipped")), None)
+        if bad:
+            j["status"] = "skipped"
+            self._emit(kind, f"[건너뜀] 상위 작업 '{bad}' 실패/스킵 — 실행하지 않음")
+            self.publish({"kind": kind, "status": "skipped", "progress": j["progress"]})
+            return
+        j["status"] = "running"
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
             cmd = TARGETS()[kind]["cmd"]
@@ -1235,7 +1276,7 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .tcard{padding:11px 13px;border:1px solid var(--bd);border-radius:9px;margin-bottom:9px}
  .tcard .h{display:flex;justify-content:space-between;align-items:center;font-size:13px}
  .st{font-size:11px;padding:2px 8px;border-radius:99px;background:#0c1018;color:var(--mut)}
- .st.running{color:#7fd1ff} .st.done{color:#7ee0a0} .st.error{color:#ff8585} .st.queued{color:#d9c07a}
+ .st.running{color:#7fd1ff} .st.done{color:#7ee0a0} .st.error{color:#ff8585} .st.queued{color:#d9c07a} .st.skipped{color:#9aa3ad}
  button{background:var(--ac);color:#06121f;border:0;border-radius:8px;padding:9px 16px;font-weight:600;cursor:pointer}
  button.ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
  button:disabled{opacity:.5;cursor:default}
@@ -1309,7 +1350,7 @@ function card(kind,label){if(cards[kind])return;const el=document.createElement(
 const LBL={};
 function lbl(k){const t=TARGETS.find(x=>x.kind===k);return t?t.label:k}
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
- if(s){const m={queued:'대기',running:'진행중',done:'완료',error:'오류'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
+ if(s){const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
 function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
