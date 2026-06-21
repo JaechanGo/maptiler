@@ -420,6 +420,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT); renderTiers();
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
+     // maplibre 워커는 document base 가 없어 스타일의 상대경로 /dyn/* (martin 동적타일=건물·필지·POI)로
+     // Request 생성에 실패한다("Failed to parse URL"). 타일 베이스(스타일을 받은 host:TPORT)로 절대화
+     // — demo/js/map.js 와 동일 처리. TPORT=게이트웨이(18080)면 /dyn 도 게이트웨이 경유로 정상 로드.
+     transformRequest:(u)=>(u&&u.charAt(0)==='/'?{url:`http://${location.hostname}:${TPORT}`+u}:{url:u}),
      center:[126.9784,37.5666], zoom:14.5, pitch:55, bearing:-18, attributionControl:false});
    map.addControl(new maplibregl.NavigationControl());
    const zl=()=>{const e=$('#zlevel'); if(e)e.textContent='현재 z '+map.getZoom().toFixed(1);};
