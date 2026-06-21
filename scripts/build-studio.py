@@ -1106,15 +1106,31 @@ def _vworld_list_filenos(ds, col):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie,
                                                "Referer": url})
     html = urllib.request.urlopen(req, timeout=60, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
-    pairs = re.findall(r'class="tit min">([^<]+)</div>.*?listFnc\.download\(\s*\'(\d+)\'\s*,\s*\'(\d+)\'', html, re.S)
-    level = col.get("level", "sigungu"); out = []
-    for fname, _d, fno in pairs:
-        nm = re.sub(r'\.zip$', '', fname.strip(), flags=re.I)
-        nm = re.sub(r'_\d{8}$', '', nm)                       # 건물 AL_D010_11_20260609 → 날짜 접미 제거
-        body = re.sub(r'^.*?(?:LDREG_|AL_D\d+_)', '', nm)     # 데이터셋 접두 제거 → 행정구역부('충북'|'충북_충주시'|'11')
-        is_sido = "_" not in body                            # 시도 통합(시군구 분할 아님)
+    return _vworld_parse_filenos(html, col.get("level", "sigungu"))
+
+
+def _vworld_parse_filenos(html, level="sigungu"):
+    """다운로드센터 HTML → 행정구역별 fileNo(dsFileSq) 리스트. (네트워크 분리 — 단위테스트 가능)
+    항목 <li> 단위로: fileNo = listFnc.download('<dsFileId>','<fileNo>','<size>') 의 2번째 인자.
+      1번째 dsFileId 는 연속지적=숫자('30563')·건물=영숫자('20171128DS00010') 둘 다라 [^']* 로 무시(★건물 0건 원인).
+    행정구역 = <span class="sigunguNm1">전체명(서울특별시·경기도 …) 우선, 없으면 <div class="tit min"> 파일명 템플릿.
+    시도판별 = 전체시도명 접미(특별시/광역시/특별자치시/특별자치도/도) 또는 파일명 약어(시군구 분할 '_' 없음)."""
+    out = []
+    for blk in re.split(r'<li\b', html):              # 다운로드 항목 1개 = <li> 블록
+        mf = re.search(r"listFnc\.download\(\s*'[^']*'\s*,\s*'(\d+)'", blk)
+        if not mf:
+            continue
+        fno = mf.group(1)
+        mr = (re.search(r'class="sigunguNm1">\s*([^<]+?)\s*</span>', blk)
+              or re.search(r'class="tit min">\s*([^<]+?)\s*</div>', blk))
+        rg = re.sub(r'\s+', ' ', mr.group(1)).strip() if mr else ""
+        rg = re.sub(r'^.*?(?:LDREG_|AL_D\d+_)', '', rg)        # 파일명 템플릿 접두 제거(연속지적 등)
+        rg = re.sub(r'\.zip$', '', rg, flags=re.I)
+        rg = re.sub(r'_\d{6,8}$', '', rg).strip()             # 날짜 접미 제거
+        is_sido = bool(re.match(r'^[가-힣]{2,}(특별시|광역시|특별자치시|특별자치도|도)$', rg)) \
+                  or (rg != "" and "_" not in rg and not re.search(r'[시군구]$', rg))
         # 세종(단층 시도)은 시군구 하위파일이 없어 sigungu level 에서도 포함해야 누락 안 됨
-        if level == "sigungu" and is_sido and "세종" not in body: continue
+        if level == "sigungu" and is_sido and "세종" not in rg: continue
         if level == "sido" and not is_sido: continue
         out.append(fno)
     return out
