@@ -9,7 +9,7 @@ server/geocode-api.py(SQLite FTS5+R-tree)의 **엔드포인트 계약·응답 �
 연결: DATABASE_URL 또는 PG* 환경변수. GEOCODE_PORT(기본 8082).
 
 전환 단계:
-  5b(shadow): 별도 포트로 띄워 SQLite판과 병행, 13c-eval-golden.py 로 parity 측정.
+  5b(shadow): 별도 포트(8092)로 띄워 SQLite판(8082)과 병행, scripts/13d-geocode-parity.py 로 질의 parity 측정.
   5c(전환):  게이트웨이 /geocode·/reverse upstream 을 이 서비스로 교체.
 """
 import json, math, os, re, sys, unicodedata

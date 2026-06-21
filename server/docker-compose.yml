@@ -59,7 +59,7 @@ services:
       - cuvia
 
   # ── PostGIS 지오코더 (Phase 5 — 5b shadow / 5c 전환) ─────────────
-  # SQLite 지오코더(geocode:8082)와 병행. 8092 로 노출해 parity 측정(13c-eval-golden.py).
+  # SQLite 지오코더(geocode:8082)와 병행. 8092 로 노출해 질의 parity 측정(scripts/13d-geocode-parity.py).
   # 5c 전환 시 게이트웨이 /geocode·/reverse upstream 을 geocode-pg:8082 로 바꾼다.
   # ※air-gap: 런타임 pip 대신 psycopg 를 베이크한 이미지 필요(Phase 6 패키징).
   geocode-pg:
