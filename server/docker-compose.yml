@@ -91,6 +91,33 @@ services:
     platform: linux/amd64
     profiles: ["postgis"]
     restart: unless-stopped
+    # PostgreSQL 튜닝 — 기본 compose 값은 소형 머신(≈8GB)에서도 안전하면서 postgres 순정 기본값(shared_buffers 128MB·
+    # maintenance 64MB·work_mem 4MB)보다 크게 개선. 대형 빌드호스트(예 128GB)는 .env/환경변수로 상향(권장값:
+    # scripts/postgis/README.md §0). 전부 영속 안전값 — fsync/synchronous_commit 등 위험옵션은 미포함
+    # (벌크적재 가속은 load_parcel.sh 가 세션단위 synchronous_commit=off 로 처리, 서빙 내구성 유지).
+    shm_size: ${PG_SHM:-1g}                              # 병렬 워커 공유메모리(Docker 기본 64MB는 병렬쿼리/대용량 work_mem에 부족)
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}         # 128GB 호스트: 16GB~32GB
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-3GB}  # 128GB 호스트: 96GB (플래너 힌트 — OS page cache 포함 추정)
+      - -c
+      - maintenance_work_mem=${PG_MAINT_MEM:-512MB}      # 128GB 호스트: 8GB (39.6M GiST/btree 인덱스 빌드 가속)
+      - -c
+      - work_mem=${PG_WORK_MEM:-32MB}                    # 128GB 호스트: 128MB (공간조인/정렬 인메모리)
+      - -c
+      - max_wal_size=${PG_MAX_WAL:-4GB}                  # 128GB 호스트: 16GB (벌크적재 중 체크포인트 빈도↓)
+      - -c
+      - min_wal_size=${PG_MIN_WAL:-1GB}
+      - -c
+      - checkpoint_completion_target=0.9                 # 체크포인트 I/O 분산
+      - -c
+      - max_parallel_workers_per_gather=${PG_PARALLEL:-4}
+      - -c
+      - max_parallel_maintenance_workers=${PG_PARALLEL_MAINT:-4}   # 병렬 인덱스 빌드(btree)
+      - -c
+      - random_page_cost=1.1                             # SSD/NVMe (HDD면 4.0)
     environment:
       POSTGRES_USER: ${PGUSER:-cuvia}
       POSTGRES_PASSWORD: ${PGPASSWORD:-cuvia}

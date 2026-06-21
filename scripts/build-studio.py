@@ -24,6 +24,7 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
 # 업로드는 raw 바디 스트리밍(청크→디스크)이라 용량 상한 없음 — 대용량 내비DB/건물DB 웹 업로드 지원.
 DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)
+ARTIFACTS = BUILD_HOME / "artifacts"             # 빌드 산출물 스냅샷 보존(geocode.sqlite — 재적재·재수집 teardown 으로부터 보호)
 DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON — 최초 1회 DB로 마이그레이션 후 .bak 보존
 DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
@@ -757,6 +758,35 @@ def record_build_sig(kind):
         pass
 
 
+def backup_geocode_artifact(keep=None):
+    """geocode.sqlite 를 BUILD_HOME/artifacts/ 에 타임스탬프 스냅샷으로 보존.
+    배경: load_postgis 적재 후 다음 빌드의 재수집(staged/navi rmtree)·geocode 재생성이 직전 산출물을
+      덮어/지워, 분석·롤백용 geocode.sqlite 가 소실됨(사용자 관찰). 빌드 산출물을 산출 즉시 보존한다.
+    멱등: 동일본(size,mtime) 이미 보존됐으면 건너뜀(재빌드 1회당 1스냅샷). 최신 keep 개만 유지.
+    keep: 보존 개수(기본 env GEOCODE_BACKUP_KEEP=3; 0 이면 비활성). 반환: 새 스냅샷 경로 | None."""
+    if keep is None:
+        keep = int(os.environ.get("GEOCODE_BACKUP_KEEP", "3"))
+    if keep <= 0:
+        return None
+    src = BUILD_HOME / "geocode.sqlite"
+    if not src.exists() or src.stat().st_size < 1_000_000:   # 미생성/손상 스텁 제외
+        return None
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    sig = f"{src.stat().st_size}_{int(src.stat().st_mtime)}"
+    sigf = ARTIFACTS / ".last_sig"
+    if sigf.exists() and sigf.read_text(encoding="utf-8").strip() == sig:
+        return None   # 동일본 이미 보존(중복 복사 방지)
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime(src.stat().st_mtime))
+    dst = ARTIFACTS / f"geocode_{ts}.sqlite"
+    shutil.copy2(src, dst)
+    sigf.write_text(sig, encoding="utf-8")
+    snaps = sorted(ARTIFACTS.glob("geocode_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in snaps[keep:]:   # 최신 keep 개 초과분 제거(디스크 보호)
+        try: old.unlink()
+        except OSError: pass
+    return dst
+
+
 def required_sources(kinds):
     """선택 타겟 + 전이 의존(빌드 dep & 산출물 dep)이 필요로 하는 소스키 집합."""
     T = TARGETS(); plan = set(); stack = list(kinds)
@@ -913,6 +943,11 @@ class Manager:
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
             record_build_sig(kind)   # 성공 시그니처 기록 → 다음 빌드에서 변경없으면 자동 건너뜀
+            if kind in ("geocode", "areas"):   # geocode.sqlite 산출 직후 스냅샷 보존(재적재·재수집 teardown 전에)
+                try:
+                    b = backup_geocode_artifact()
+                    if b: self._emit(kind, f"[artifact 보존] {b.name} → {ARTIFACTS}")
+                except Exception as e: self._emit(kind, f"[artifact 보존 경고] {e}")
             if kind == "package":   # 빌드(패키징) 완료 → 매니페스트 자동저장(번들 포함)
                 try: save_manifest(with_bundle=True)
                 except Exception as e: self._emit(kind, f"[프로필 저장 실패] {e}")

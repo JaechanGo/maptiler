@@ -10,6 +10,25 @@ cd server && docker compose --profile postgis up -d postgis martin   # PostGIS+m
 ```
 연결은 libpq 환경변수. 기본 `cuvia/cuvia@localhost:5433`(맵 전용 postgis 컨테이너 호스트포트 — 빌드호스트의 기존 host PostgreSQL 5432와 충돌 회피). 다른 포트면 `export PGPORT=...`, 비번 변경 시 `export PGPASSWORD=...`. 호스트 psql 없으면 apply-schema 가 컨테이너 psql 자동 사용.
 
+### PostgreSQL 메모리 튜닝 (대형 빌드호스트)
+compose 의 postgis 는 **소형 머신(≈8GB)에서도 안전한 보수적 기본값**(shared_buffers 1GB 등)으로 뜬다. 순정 postgres 기본값(shared_buffers 128MB·maintenance 64MB·work_mem 4MB)보다는 크게 낫지만, **대형 빌드호스트(예: 128GB RAM)에서는 하드웨어를 못 살린다** — 특히 전국 필지(≈39.6M) GiST 인덱스 빌드·공간조인이 메모리 부족으로 디스크 스필. `server/.env` 또는 환경변수로 상향 후 `up -d`(컨테이너 재생성) 하면 적용:
+```bash
+# server/.env — 128GB RAM 빌드호스트 예시 (RAM 비례 스케일)
+PG_SHARED_BUFFERS=16GB     # 캐시·쓰기버퍼 (RAM ~12%; 32GB까지 가능)
+PG_EFFECTIVE_CACHE=96GB    # 플래너 힌트 (RAM ~75%, OS page cache 포함 추정)
+PG_MAINT_MEM=8GB           # 인덱스 빌드 가속 (GiST/btree)
+PG_WORK_MEM=128MB          # 공간조인/정렬 인메모리
+PG_MAX_WAL=16GB            # 벌크적재 중 체크포인트 빈도↓
+PG_MIN_WAL=2GB
+PG_SHM=8g                  # 병렬 워커 공유메모리(shm_size)
+PG_PARALLEL=8              # max_parallel_workers_per_gather
+PG_PARALLEL_MAINT=6        # 병렬 인덱스 빌드
+```
+벌크적재 시엔 추가로 `PARCEL_JOBS=16 PARCEL_MAINT_MEM=8GB scripts/postgis/load_parcel.sh --shp <폴더> --fresh`
+(코어수만큼 워커↑·인덱스 일괄재생성 시 maintenance_work_mem↑). 적재 세션은 load_parcel.sh 가 `synchronous_commit=off`
+로 자동 가속한다(서빙 내구성에 영향 없음 — 세션 한정). `fsync` 는 영속 끄지 말 것(서빙 DB 손상 위험; 재적재 가능한
+일회성 벌크에 한해 임시로만).
+
 ## 1. 스키마 적용 (멱등)
 ```bash
 scripts/postgis/apply-schema.sh
