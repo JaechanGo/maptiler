@@ -116,6 +116,22 @@ fi
 if have gdaltransform && have ogr2ogr; then echo "✓ GDAL 사용 가능"; else echo "✗ GDAL 여전히 없음 — localdata/buildings 빌드 불가(권한/네트워크 확인)"; fi
 
 echo
+# rio-rgbify(+rasterio): scripts/03-gen-terrain.sh 의 Terrain-RGB 인코딩(지형 음영 타일 terrain.mbtiles) 전용. (선택)
+#   terrain 은 정적 산출물 — 빌드호스트에서 생성하거나, 기존 빌드/배포본 terrain.mbtiles 를 tiles/ 로 반입해도 동일.
+if python3 -c 'import rio_rgbify' 2>/dev/null; then
+  echo "✓ 이미 설치됨: rio-rgbify (지형 타일)"
+elif python3 -m pip --version >/dev/null 2>&1; then
+  echo "→ pip: rio-rgbify rasterio (지형 타일 생성용 — 선택)"
+  python3 -m pip install --user -q rio-rgbify rasterio 2>/dev/null \
+    || python3 -m pip install --break-system-packages -q rio-rgbify rasterio 2>/dev/null || true
+  if python3 -c 'import rio_rgbify' 2>/dev/null; then
+    echo "✓ rio-rgbify 설치 완료 (rio 가 PATH 에 없으면: export PATH=\$HOME/.local/bin:\$PATH)"
+  else echo "△ rio-rgbify 미설치 — terrain 단계는 기존 terrain.mbtiles 를 tiles/ 로 반입해 대체 가능(필수 아님)."; fi
+else
+  echo "△ pip 없음 — rio-rgbify 미설치(terrain 은 기존 산출물 반입으로 대체)."
+fi
+
+echo
 # tippecanoe·tile-join: buildings·poi 벡터타일 생성/병합에 필수. apt/dnf 패키지 없음 → brew 또는 소스 빌드.
 if have tippecanoe && have tile-join; then
   echo "✓ 이미 설치됨: tippecanoe ($(command -v tippecanoe))"

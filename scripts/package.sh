@@ -21,7 +21,9 @@ mkdir -p "$TILES_DIR"
 for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ -s "$ROOT/tiles/$mb" ] && { [ ! -s "$TILES_DIR/$mb" ] || [ "$ROOT/tiles/$mb" -nt "$TILES_DIR/$mb" ]; }; then
     echo "  ↪ tiles 통합: tiles/$mb → $TILES_DIR/$mb"
-    cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null || cp "$ROOT/tiles/$mb" "$TILES_DIR/$mb"
+    cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null \
+      || cp "$ROOT/tiles/$mb" "$TILES_DIR/$mb" \
+      || { echo "오류: tiles 통합 복사 실패: tiles/$mb → $TILES_DIR/$mb (대용량 복사 중단/축출 의심 — repo 가 iCloud면 'brctl download tiles/$mb' 로 materialize 후 재시도)" >&2; exit 1; }
   fi
 done
 
@@ -40,7 +42,13 @@ fi
 # (buildings/poi/parcel 등 동적 레이어는 PostGIS→martin 서빙 — pg_dump 로 별도 번들, 위 WITH_POSTGIS)
 for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ ! -s "$TILES_DIR/$mb" ]; then
-    echo "오류: $TILES_DIR/$mb 가 없거나 0바이트 — 02/03/05 생성 스크립트를 먼저 실행하세요." >&2
+    if [ "$mb" = terrain.mbtiles ]; then
+      echo "오류: $TILES_DIR/$mb 없음 — 지형타일은 정적 산출물(빌드 그래프 'terrain' 단계=03-gen-terrain.sh)." >&2
+      echo "  → Build Studio 에서 '지형 음영 타일' 단계를 빌드(온라인 SRTM·rio-rgbify 필요)하거나," >&2
+      echo "    기존 빌드/배포본 terrain.mbtiles 를 $ROOT/tiles/ 에 두고 재패키징(tileserver-config 가 3종 고정 참조 → 필수)." >&2
+    else
+      echo "오류: $TILES_DIR/$mb 가 없거나 0바이트 — 이 빌드가 생성하는 베이스 타일(02/05). 먼저 생성 후 재시도." >&2
+    fi
     exit 1
   fi
 done
@@ -73,7 +81,7 @@ else
 fi
 
 # QC 게이트: 구조검사(NFC·좌표범위·시도커버리지·인덱스·스타일↔타일 정합) FAIL 시 번들 차단.
-# (골든질의는 실행중 API가 필요하므로 패키징 단계에선 --api 생략 → 스킵/경고 처리)
+# 골든질의는 13-qc 가 geocode.sqlite 를 인프로세스 직접질의(서버 불필요) → --api "" 라도 회귀 검사 실동작.
 echo "[2/4] QC 검증 게이트"
 if [ -f "$ROOT/scripts/13-qc-check.py" ]; then
   python3 "$ROOT/scripts/13-qc-check.py" \

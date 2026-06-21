@@ -590,6 +590,8 @@ def TARGETS():
             cmd=[py, str(ROOT/"scripts/osm-from-mbtiles.py")]),
         "dong": dict(label="아파트 동 라벨 (dong.mbtiles)", dep=None,
             cmd=["bash", "-c", f'python3 "{ROOT/"scripts/04-gen-dong-labels.py"}" && python3 "{ROOT/"scripts/05-gen-dong-tiles.py"}"']),
+        "terrain": dict(label="지형 음영 타일 (terrain.mbtiles)", dep=None,
+            cmd=["bash", str(ROOT/"scripts/03-gen-terrain.sh")]),   # SRTM30m→Terrain-RGB(온라인·정적). 반입본 있으면 freshness=fresh 로 스킵
         "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
@@ -611,7 +613,7 @@ def TARGETS():
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
 
 
 def _deps(t):
@@ -635,6 +637,8 @@ TFRESH = {
                    "out": [BUILD_HOME / "osm.sqlite"]},
     "dong": {"src": ["osm"], "scripts": ["scripts/04-gen-dong-labels.py", "scripts/05-gen-dong-tiles.py"],
              "out": [ROOT / "tiles/dong.mbtiles"]},
+    "terrain": {"out_only": True, "scripts": ["scripts/03-gen-terrain.sh"],
+                "out": [ROOT / "tiles/terrain.mbtiles"]},   # 정적 SRTM 산출물 — 파일 존재=최신(반입본 보존·재다운로드 방지)
     "localdata": {"src": ["localdata"], "scripts": ["scripts/11-build-localdata.py"],
                   "out": [BUILD_HOME / "poi-all/localdata_clean.csv"]},
     "facility": {"src": ["facility"], "scripts": ["scripts/11b-build-facility.py"],
@@ -722,8 +726,12 @@ def target_freshness(kind, ver=None, state=None):
     if m.get("always"):
         return "always"
     outs = m.get("out", [])
-    if not outs or not all(pathlib.Path(o).exists() for o in outs):
+    out_ok = all(pathlib.Path(o).exists() for o in outs)   # outs=[] → True(검사할 파일 없음)
+    if m.get("out_only"):   # 정적 외부 산출물(terrain 등) — 파일 존재만으로 최신(시그니처 무시 → 반입본 보존)
+        return "fresh" if (outs and out_ok) else "missing"
+    if outs and not out_ok:   # 파일 산출물이 정의됐는데 없음 → 재빌드
         return "missing"
+    # 파일 산출물 없는 적재형 타깃(load_postgis)은 입력 시그니처로만 최신 판정(DB 적재 멱등)
     if state is None:
         state = load_build_state()
     if ver is None:
@@ -794,6 +802,10 @@ def progress_of(kind, line, st):
         if m: return min(0.95, 0.1 + 0.85*int(m.group(1))/max(int(m.group(2)), 1))
         if l.startswith("OK: load-all"): return 1.0
         if l.startswith("━━"): return 0.1
+    elif kind == "terrain":   # 03-gen-terrain.sh: '[1/4]'~'[4/4]' + '지형 타일 생성 완료'
+        m = re.search(r"\[(\d)/4\]", l)
+        if m: return 0.1 + 0.85*int(m.group(1))/4
+        if "생성 완료" in l: return 1.0
     elif kind in ("localdata", "package"):
         if l.startswith("OK:") or "반입 대상" in l: return 1.0
     elif kind == "qc":

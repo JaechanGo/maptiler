@@ -11,7 +11,7 @@
     --style style/style.json --config server/tileserver-config.json \
     --api http://localhost:8082
 """
-import argparse, json, math, os, sqlite3, sys, unicodedata, urllib.parse, urllib.request, pathlib
+import argparse, json, math, os, sqlite3, sys, unicodedata, urllib.parse, urllib.request, urllib.error, pathlib
 
 R = []  # (sev, name, detail)  sev: PASS/WARN/FAIL
 ICON = {"PASS": "✓", "WARN": "△", "FAIL": "✗"}
@@ -149,22 +149,66 @@ GOLDEN = [
     ("스타벅스 강남", "스타벅스", None),
     ("강남역", "강남", None),
 ]
-def check_golden(api):
-    if not api:
-        rec("WARN", "골든 질의", "--api 미지정 — 스킵"); return
+def _load_geocoder(db_path):
+    """server/geocode-api.py 를 인프로세스 로드 — connect()/geocode() 순수함수 재사용(서버 불필요).
+    geocode.sqlite 를 직접 질의해 골든 회귀를 빌드 단계에서도 '실제로' 검사한다(서버 미기동에 의존 X)."""
+    import importlib.util
+    gp = pathlib.Path(__file__).resolve().parent.parent / "server" / "geocode-api.py"
+    if not gp.exists():
+        return None
+    os.environ["GEOCODE_DB"] = str(db_path)   # 모듈 로드 시 DB_PATH 가 이 env 를 읽음(기본 ~/geocode-build)
+    spec = importlib.util.spec_from_file_location("geocode_api_inproc", str(gp))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _golden_check(get_top, mode):
+    """get_top(q)->top문자열. 전건 일치 PASS, 오답 FAIL. (인프로세스/HTTP 공용)"""
     ok = 0
     for q, must, must2 in GOLDEN:
+        top = get_top(q)
+        if top is None:   # 조회 자체 불가(연결실패 등) → 호출부가 처리
+            return None
+        hit = bool(top) and must in top and (must2 is None or must2 in top)
+        ok += hit
+        if not hit:
+            rec("FAIL", f"골든: {q}", f"기대 '{must}'{('+'+must2) if must2 else ''} 불일치 (top={top[:80]})")
+    if ok == len(GOLDEN):
+        rec("PASS", "골든 질의", f"{ok}/{len(GOLDEN)} 통과 ({mode})")
+    return ok
+
+
+def check_golden(api, db_path=None):
+    # 1순위: geocode.sqlite 인프로세스 직접질의 — 서버 불필요. 빌드 단계에서도 회귀가드가 실동작한다.
+    if db_path and os.path.exists(db_path):
+        try:
+            mod = _load_geocoder(db_path)
+            if mod is not None:
+                con = mod.connect()
+                def top_inproc(q):
+                    res = mod.geocode(con, q, 5) or []
+                    return json.dumps(res[0], ensure_ascii=False) if res else ""
+                _golden_check(top_inproc, "인프로세스"); return
+        except Exception as e:
+            rec("WARN", "골든 질의", f"인프로세스 지오코더 실패 — HTTP 폴백 ({str(e)[:80]})")
+    # 2순위: HTTP API. 연결실패=WARN 스킵(서버 미기동 ≠ 데이터결함), HTTP오류/오답=FAIL.
+    if not api:
+        rec("WARN", "골든 질의", "인프로세스 불가 + --api 미지정 — 스킵"); return
+    def top_http(q):
         try:
             url = f"{api.rstrip('/')}/geocode?q=" + urllib.parse.quote(q)
             d = json.load(urllib.request.urlopen(url, timeout=8))
-            res = d.get("results", [])
-            top = (json.dumps(res[0], ensure_ascii=False) if res else "")
-            hit = bool(res) and must in top and (must2 is None or must2 in top)
-            ok += hit
-            if not hit: rec("FAIL", f"골든: {q}", f"기대 '{must}'{('+'+must2) if must2 else ''} 불일치 (top={top[:80]})")
+        except urllib.error.HTTPError as e:
+            rec("FAIL", f"골든: {q}", f"API HTTP {e.code}"); return ""
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+            return None   # 서버 미기동 → 스킵 신호
         except Exception as e:
-            rec("FAIL", f"골든: {q}", f"API 오류 {e}")
-    if ok == len(GOLDEN): rec("PASS", "골든 질의", f"{ok}/{len(GOLDEN)} 통과")
+            rec("FAIL", f"골든: {q}", f"API 응답오류 {e}"); return ""
+        res = d.get("results", [])
+        return json.dumps(res[0], ensure_ascii=False) if res else ""
+    if _golden_check(top_http, "HTTP") is None:
+        rec("WARN", "골든 질의", f"지오코드 API({api}) 연결 실패 — 골든 스킵(서버 미기동)")
 
 
 # ── G. 타일 + 스타일↔mbtiles 정합성 ───────────────────────────────
@@ -250,7 +294,7 @@ def main():
         check_nfc(db); check_db_scan(db); check_index(db); check_areas(db); check_categories(db, a.taxonomy); db.close()
     else:
         rec("FAIL", "DB", f"{a.db} 없음")
-    check_golden(a.api)
+    check_golden(a.api, a.db)
     check_tiles(a.tiles, a.style, a.config)
 
     n_fail = sum(s == "FAIL" for s, _, _ in R); n_warn = sum(s == "WARN" for s, _, _ in R)
