@@ -52,9 +52,11 @@ fi
 if has building; then
   GIS="$BUILD_HOME/staged/gis"
   # --mgt-field A1 = GIS건물통합식별번호(컬럼정의서+ogrinfo 실측 확정) → 중복 SHP/행 ON CONFLICT 방어.
-  #   데이터 버전별 A코드 변동 시 BUILDING_MGT_FIELD 로 override(빈값이면 중복방어 OFF).
+  # --pnu-field A2 = PNU(19자리) → building.pnu 적재(필지↔건물 조인키, parcel.pnu 와 대칭).
+  #   데이터 버전별 A코드 변동 시 BUILDING_MGT_FIELD·BUILDING_PNU_FIELD 로 override(빈값이면 각각 OFF).
   if [ -d "$GIS" ]; then
-    run "$HERE/load_building.sh" --shp "$GIS" --fresh --mgt-field "${BUILDING_MGT_FIELD:-A1}" \
+    run "$HERE/load_building.sh" --shp "$GIS" --fresh \
+        --mgt-field "${BUILDING_MGT_FIELD:-A1}" --pnu-field "${BUILDING_PNU_FIELD:-A2}" \
       || { echo "  ✗ 건물 적재 실패 — building 미완·인덱스 누락 가능. 재실행: STEPS=building $0" >&2; fail=1; }
   else
     echo "  (건너뜀) 건물 SHP 없음: $GIS"

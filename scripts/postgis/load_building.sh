@@ -19,12 +19,13 @@ MPW="${BUILDING_MAINT_WORKERS:-4}"        # 병렬 인덱스 빌드 워커(GiST 
 _cores=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 JOBS="${BUILDING_JOBS:-$(( _cores < 8 ? _cores : 8 ))}"   # 시도 병렬 적재 워커수(코어 자동감지, 기본 상한 8; 1M파일 다수면 RAM 보고 ↓)
 
-SHP="" SRS="EPSG:5186" HF="A16" LF="A26" ENC="CP949" FRESH=0 SIDO="" MGTF=""
+SHP="" SRS="EPSG:5186" HF="A16" LF="A26" PNUF="A2" ENC="CP949" FRESH=0 SIDO="" MGTF=""
 while [ $# -gt 0 ]; do case "$1" in
   --shp) SHP="$2"; shift 2;;
   --srs) SRS="$2"; shift 2;;
   --height-field) HF="$2"; shift 2;;
   --levels-field) LF="$2"; shift 2;;
+  --pnu-field) PNUF="$2"; shift 2;;       # 필지↔건물 조인키 필드. AL_D010=A2(PNU,19자리); 빈값이면 pnu 미적재
   --encoding) ENC="$2"; shift 2;;
   --sido) SIDO="$2"; shift 2;;            # 파일명에서 자동추출 실패 시 강제 지정
   --mgt-field) MGTF="$2"; shift 2;;       # 건물 고유키 필드(중복방어). AL_D010=A1(GIS건물통합식별번호); 빈값이면 OFF
@@ -45,6 +46,17 @@ if [ -n "$MGTF" ]; then
   MGT_INS_SEL="bld_mgt_no, "
   MGT_CONFLICT="ON CONFLICT (sido_cd, bld_mgt_no) WHERE bld_mgt_no IS NOT NULL DO NOTHING"
   echo "→ 중복방어 ON: bld_mgt_no ← 필드 '$MGTF' (ON CONFLICT sido_cd,bld_mgt_no)"
+fi
+
+# 필지↔건물 조인키 pnu(기본 ON, load_parcel 의 pnu 적재와 대칭) — AL_D010 의 A2(PNU,19자리).
+#  · 필지당 다건물이라 고유키 아님(중복방어는 bld_mgt_no 담당) → building_pnu_idx 는 비유니크 btree.
+#  · sido_cd 는 파일명에서 받으므로(left(pnu,2) 아님) pnu 가 NULL 인 건물도 정상 적재 — pnu 는 조인용 부가 컬럼.
+#  · A코드는 데이터 버전마다 달라질 수 있어 override 가능: --pnu-field '' 이면 미적재(pnu NULL → 필지조인 불가).
+PNU_OGR_SEL="" PNU_INS_COL="" PNU_INS_SEL=""
+if [ -n "$PNUF" ]; then
+  PNU_OGR_SEL="\"$PNUF\" AS pnu, "
+  PNU_INS_COL="pnu, "
+  PNU_INS_SEL="pnu, "
 fi
 
 # --fresh(전국 재적재)일 때만 geom GiST·pnu 인덱스를 내렸다가 적재 후 일괄 재생성.
@@ -76,7 +88,7 @@ load_one() {
   PG_USE_COPY=YES SHAPE_ENCODING="$ENC" ogr2ogr -f PostgreSQL "$PG_OGR" "$shp" \
     -nln "$stg" -overwrite -lco GEOMETRY_NAME=geom -lco UNLOGGED=YES -nlt PROMOTE_TO_MULTI \
     -s_srs "$SRS" -t_srs EPSG:4326 -skipfailures \
-    -dialect SQLITE -sql "SELECT ${MGT_OGR_SEL}
+    -dialect SQLITE -sql "SELECT ${MGT_OGR_SEL}${PNU_OGR_SEL}
         CASE WHEN CAST(\"$HF\" AS REAL) > 0 THEN ROUND(CAST(\"$HF\" AS REAL),1)
              WHEN CAST(\"$LF\" AS REAL) > 0 THEN ROUND(CAST(\"$LF\" AS REAL)*3.3,1)
              ELSE 6 END AS render_height,
@@ -92,8 +104,8 @@ load_one() {
   psql -v ON_ERROR_STOP=1 -q -c "
     BEGIN;
     ${lock_sql}
-    INSERT INTO building(sido_cd, ${MGT_INS_COL}render_height, levels, geom)
-    SELECT '${sido}', ${MGT_INS_SEL}render_height, levels,
+    INSERT INTO building(sido_cd, ${MGT_INS_COL}${PNU_INS_COL}render_height, levels, geom)
+    SELECT '${sido}', ${MGT_INS_SEL}${PNU_INS_SEL}render_height, levels,
            ST_Multi(ST_CollectionExtract(ST_MakeValid(geom),3))
     FROM ${stg} WHERE geom IS NOT NULL
     ${MGT_CONFLICT};
