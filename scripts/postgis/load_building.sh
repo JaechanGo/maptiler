@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --levels-field) LF="$2"; shift 2;;
   --encoding) ENC="$2"; shift 2;;
   --sido) SIDO="$2"; shift 2;;            # 파일명에서 자동추출 실패 시 강제 지정
-  --mgt-field) MGTF="$2"; shift 2;;       # 건물관리번호 필드(opt-in 중복방어). ogrinfo -so 로 확인 후 지정
+  --mgt-field) MGTF="$2"; shift 2;;       # 건물 고유키 필드(중복방어). AL_D010=A1(GIS건물통합식별번호); 빈값이면 OFF
   --fresh) FRESH=1; shift;;
   *) echo "알 수 없는 인자: $1" >&2; exit 2;;
 esac; done

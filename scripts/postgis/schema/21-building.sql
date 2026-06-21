@@ -5,7 +5,7 @@
 
 CREATE TABLE IF NOT EXISTS building (
     id            bigint GENERATED ALWAYS AS IDENTITY,
-    bld_mgt_no    text,                 -- 건물관리번호
+    bld_mgt_no    text,                 -- 건물 고유키 = GIS건물통합식별번호(AL_D010 의 A1, 28자리)
     pnu           text,
     name          text,                 -- 건물명
     road_addr     text,                 -- 도로명주소
@@ -43,8 +43,8 @@ CREATE TABLE IF NOT EXISTS building_default PARTITION OF building DEFAULT;
 
 CREATE INDEX IF NOT EXISTS building_geom_gix ON building USING gist (geom);
 CREATE INDEX IF NOT EXISTS building_pnu_idx  ON building (pnu);
--- 중복방어(opt-in) — 고유키=건물관리번호(bld_mgt_no). 부분 UNIQUE 라 미적재(NULL)면 빈 인덱스(무비용·무효과),
---   load_building.sh --mgt-field <필드> 로 적재하면 ON CONFLICT (sido_cd,bld_mgt_no) 의 arbiter 가 됨.
---   필드명은 소스마다 달라 추측 금지 — ogrinfo -so 로 확인(AL_D010 은 A코드 필드; A16=높이·A26=층수만 검증됨).
---   PNU 는 한 필지에 다건물이라 고유키 아님.
+-- 중복방어 — 건물 고유키 bld_mgt_no = GIS건물통합식별번호(컬럼정의서 확정; AL_D010 의 A1, 28자리, 전건 채워짐).
+--   load-all.sh 가 load_building.sh --mgt-field A1 로 적재 → ON CONFLICT (sido_cd,bld_mgt_no) 가 중복 SHP/행 방어.
+--   부분 UNIQUE 라 미적재(NULL)면 빈 인덱스(무비용). A코드↔의미는 데이터 버전마다 달라질 수 있어(컬럼정의서에
+--   복수 layout 존재) 변경 시 ogrinfo 로 재확인. PNU(A2)는 필지당 다건물이라 고유키 아님.
 CREATE UNIQUE INDEX IF NOT EXISTS building_mgt_uix ON building (sido_cd, bld_mgt_no) WHERE bld_mgt_no IS NOT NULL;

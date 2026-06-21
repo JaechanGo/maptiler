@@ -38,7 +38,9 @@ fi
 # 3) 건물통합정보 (시도 파티션)
 if has building; then
   GIS="$BUILD_HOME/staged/gis"
-  [ -d "$GIS" ] && run "$HERE/load_building.sh" --shp "$GIS" --fresh \
+  # --mgt-field A1 = GIS건물통합식별번호(컬럼정의서+ogrinfo 실측 확정) → 중복 SHP/행 ON CONFLICT 방어.
+  #   데이터 버전별 A코드 변동 시 BUILDING_MGT_FIELD 로 override(빈값이면 중복방어 OFF).
+  [ -d "$GIS" ] && run "$HERE/load_building.sh" --shp "$GIS" --fresh --mgt-field "${BUILDING_MGT_FIELD:-A1}" \
                 || echo "  (건너뜀) 건물 SHP 없음: $GIS"
 fi
 
