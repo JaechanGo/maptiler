@@ -112,7 +112,8 @@
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
     "pick": "max"
    },
-   "collect": {"method": "vworld_session", "ds_id": "18", "level": "sido", "file_nos": []},
+   "collect": {"method": "vworld_session", "ds_id": "18", "level": "sido", "file_nos": [],
+    "list_url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=100&svcCde=NA&fileGbnCd=AL"},
    "default_collect": false,
    "build_input": {
     "dest": "staged/gis",

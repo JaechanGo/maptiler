@@ -1106,7 +1106,16 @@ def _vworld_list_filenos(ds, col):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie,
                                                "Referer": url})
     html = urllib.request.urlopen(req, timeout=60, context=ssl._create_unverified_context()).read().decode("utf-8", "replace")
-    return _vworld_parse_filenos(html, col.get("level", "sigungu"))
+    nos = _vworld_parse_filenos(html, col.get("level", "sigungu"))
+    if not nos:   # 0개 = 원인 구분(다운로드 버튼 유무)으로 명확한 조치 안내
+        has_btn = "listFnc.download" in html
+        raise RuntimeError(
+            "VWorld 목록 fileNo 0개 — " + (
+                "다운로드 버튼은 있으나 level 필터 결과 0(level/페이지 구조 확인)" if has_btn else
+                "목록 HTML에 다운로드 버튼 없음 → 세션 쿠키 만료(로그인 페이지) 또는 list_url 오류. "
+                "Build Studio 에서 VWorld 쿠키(PJSESSIONID·vworld) 재입력 후 재시도")
+            + f"  [url={url} · html={len(html)}B]")
+    return nos
 
 
 def _vworld_parse_filenos(html, level="sigungu"):
