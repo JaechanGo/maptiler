@@ -66,7 +66,9 @@ echo "건물 적재 → building (${N}개 SHP, 병렬 ${JOBS} 워커)"
 
 # 단일 SHP 적재 워커 — 워커별 스테이징 테이블(${STG_BASE}_<idx>)로 이름 충돌 회피.
 # render_height/levels 는 ogr2ogr SQLite 방언에서 A16/A26 으로 산정해 스테이징에 적재.
-# building 파티션으로의 동시 INSERT 는 PG 가 동시삽입 안전(ON CONFLICT 없음=중복 방어 없음, 단순 append).
+# ★ 중복방어 ON(--mgt-field) 일 때만 같은 시도(=파티션) INSERT 를 advisory lock 으로 직렬화한다.
+#   ON CONFLICT(sido_cd,bld_mgt_no) 의 speculative-insert 락이 두 워커 동시진입 시 교착날 수 있어서다(parcel 과 동종).
+#   강원 42→51·전북 45→52 는 동일 파티션이라 락키 통일. 단순 append(미지정)면 UNIQUE arbiter 가 없어 락 불필요·전 워커 병렬.
 # --fresh 로 인덱스를 내린 상태면 인덱스 경합도 없어 병렬 효율 최대.
 load_one() {
   local shp="$1" idx="$2" sido="$3" stg="${STG_BASE}_$2"
@@ -81,20 +83,33 @@ load_one() {
         CAST(\"$LF\" AS INTEGER) AS levels,
         GEOMETRY
       FROM \"$lyr\" WHERE GEOMETRY IS NOT NULL" 2>/dev/null
-  local cnt
-  cnt=$(psql_q -c "
+  # 중복방어 ON 일 때만 같은 시도(=파티션) INSERT 를 advisory lock 으로 직렬화(교착 방지). 미지정이면 락 없이 병렬.
+  local lock_sql=""
+  if [ -n "$MGTF" ]; then
+    local lsido="$sido"; case "$sido" in 42) lsido=51;; 45) lsido=52;; esac
+    lock_sql="SELECT pg_advisory_xact_lock(4002, ${lsido});"
+  fi
+  psql -v ON_ERROR_STOP=1 -q -c "
+    BEGIN;
+    ${lock_sql}
     INSERT INTO building(sido_cd, ${MGT_INS_COL}render_height, levels, geom)
     SELECT '${sido}', ${MGT_INS_SEL}render_height, levels,
            ST_Multi(ST_CollectionExtract(ST_MakeValid(geom),3))
     FROM ${stg} WHERE geom IS NOT NULL
     ${MGT_CONFLICT};
-    SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL;")
+    COMMIT;" >/dev/null
+  local cnt
+  cnt=$(psql_q -c "SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL;")
   psql -v ON_ERROR_STOP=1 -q -c "DROP TABLE IF EXISTS ${stg};" >/dev/null
   echo "  [$idx/${N}] $lyr (시도 $sido) → ${cnt}건"
 }
 
 # 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
+# fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
+# jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료. 정상 종료 시 목록이 비어 무동작.
+_kill_workers() { local p; for p in $(jobs -p 2>/dev/null); do pkill -TERM -P "$p" 2>/dev/null; kill -TERM "$p" 2>/dev/null; done; }
+trap _kill_workers EXIT
 # 시도코드: --sido 우선, 없으면 파일명 [AC]_D010_<NN>_ 에서 추출. (1) 접미는 재다운로드 중복으로 보고 스킵.
 i=0
 for shp in "${SHPS[@]}"; do

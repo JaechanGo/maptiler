@@ -53,7 +53,10 @@ N=${#SHPS[@]}
 echo "연속지적 적재 → parcel (${N}개 SHP, 병렬 ${JOBS} 워커)"
 
 # 단일 SHP 적재 워커 — 워커별 스테이징 테이블(${STG_BASE}_<idx>)로 이름 충돌 회피.
-# parcel 파티션으로의 동시 INSERT 는 PG 행수준 잠금이라 안전(ON CONFLICT DO NOTHING → 교착 없음).
+# ★ 같은 시도(=같은 파티션) INSERT 는 시도별 advisory lock 으로 직렬화한다.
+#   ON CONFLICT 는 UNIQUE(sido_cd,pnu) arbiter 에 speculative-insert 락을 잡는데, 두 워커가
+#   같은 파티션에 중복 PNU 를 다른 순서로 꽂으면 순환대기→교착(실측 parcel_36). 행수준 잠금으론 못 막음.
+#   ogr2ogr 재투영/스테이징은 락 밖이라 전 워커 병렬 유지 — 직렬화되는 건 partition INSERT 한 스텝뿐.
 # --fresh 로 GiST 를 내린 상태면 인덱스 경합도 없어 병렬 효율 최대.
 load_one() {
   local shp="$1" idx="$2" stg="${STG_BASE}_$2"
@@ -62,21 +65,41 @@ load_one() {
     -nln "$stg" -overwrite -lco GEOMETRY_NAME=geom -lco UNLOGGED=YES -nlt PROMOTE_TO_MULTI \
     -s_srs "$SRS" -t_srs EPSG:4326 -skipfailures \
     -dialect SQLITE -sql "SELECT \"$PNUF\" AS pnu, \"$JIBUNF\" AS jibun, GEOMETRY FROM \"$lyr\"" 2>/dev/null
-  local cnt
-  cnt=$(psql_q -c "
+  # 같은 시도(=파티션) INSERT 직렬화: pg_advisory_xact_lock(4001, 파티션시도) 를 잡고 ON CONFLICT 수행 →
+  # speculative-insert 락 교착 원천차단. 강원 42→51·전북 45→52 는 동일 파티션이라 락키도 통일.
+  # ★ INSERT 는 행마다 left(pnu,2) 로 파티션 라우팅하므로(단일 SELECT 1건만 잠그면 혼재/디폴트행 미직렬화→재교착),
+  #   스테이징에 존재하는 '모든' 라우팅 키를 오름차순으로 잠근다(키 획득순서 통일=락순서 교착도 방지).
+  #   명시 17 시도 외(=parcel_default 로 라우팅되는 비정상 코드)는 단일 sentinel 0 으로 묶어 default 도 직렬화.
+  psql -v ON_ERROR_STOP=1 -q -c "
+    BEGIN;
+    SELECT pg_advisory_xact_lock(4001, k) FROM (
+      SELECT DISTINCT CASE
+               WHEN left(pnu,2) IN ('11','26','27','28','29','30','31','36','41','43','44','46','47','48','50','51','52')
+                    THEN left(pnu,2)::int
+               WHEN left(pnu,2) = '42' THEN 51
+               WHEN left(pnu,2) = '45' THEN 52
+               ELSE 0 END AS k
+      FROM ${stg} WHERE pnu IS NOT NULL AND length(pnu) >= 2
+    ) d ORDER BY k;
     INSERT INTO parcel(pnu, jibun, sido_cd, sgg_cd, emd_cd, geom)
     SELECT pnu, jibun, left(pnu,2), left(pnu,5), left(pnu,8),
            ST_Multi(ST_CollectionExtract(ST_MakeValid(geom),3))
     FROM ${stg}
     WHERE geom IS NOT NULL AND pnu IS NOT NULL AND length(pnu) >= 2
     ON CONFLICT (sido_cd, pnu) DO NOTHING;
-    SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL AND pnu IS NOT NULL;")
+    COMMIT;" >/dev/null
+  local cnt
+  cnt=$(psql_q -c "SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL AND pnu IS NOT NULL;")
   psql -v ON_ERROR_STOP=1 -q -c "DROP TABLE IF EXISTS ${stg};" >/dev/null
   echo "  [$idx/${N}] $lyr → ${cnt}건"
 }
 
 # 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
+# fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
+# jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료. 정상 종료 시 목록이 비어 무동작.
+_kill_workers() { local p; for p in $(jobs -p 2>/dev/null); do pkill -TERM -P "$p" 2>/dev/null; kill -TERM "$p" 2>/dev/null; done; }
+trap _kill_workers EXIT
 i=0
 for shp in "${SHPS[@]}"; do
   case "$shp" in *"(1)"*) echo "  (중복 제외) $(basename "$shp")"; continue;; esac

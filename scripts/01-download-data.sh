@@ -47,12 +47,13 @@ if [ ! -d "$ROOT/style/glyphs/KlokanTech Noto Sans Regular" ]; then
 fi
 
 echo "[4/5] MapLibre GL JS (로컬 번들, 소비 프론트와 동일 메이저)"
-if [ ! -f "$ROOT/vendor/maplibre/maplibre-gl.js" ]; then
+# [ ! -s ] (존재 & 크기>0) — 0바이트 스텁(iCloud evict·중단된 다운로드)이면 재다운로드. [ ! -f ]는 0바이트를 통과시켜 영구 잔존.
+if [ ! -s "$ROOT/vendor/maplibre/maplibre-gl.js" ]; then
   curl -fL -o "$ROOT/vendor/maplibre/maplibre-gl.js.tmp" \
     https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.js \
     && mv "$ROOT/vendor/maplibre/maplibre-gl.js.tmp" "$ROOT/vendor/maplibre/maplibre-gl.js"
 fi
-if [ ! -f "$ROOT/vendor/maplibre/maplibre-gl.css" ]; then
+if [ ! -s "$ROOT/vendor/maplibre/maplibre-gl.css" ]; then
   curl -fL -o "$ROOT/vendor/maplibre/maplibre-gl.css.tmp" \
     https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.css \
     && mv "$ROOT/vendor/maplibre/maplibre-gl.css.tmp" "$ROOT/vendor/maplibre/maplibre-gl.css"

@@ -53,13 +53,26 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
   fi
 done
 
-# vendor 오프라인 자산이 비어있지(0바이트) 않은지 검증.
-# iCloud(com~apple~CloudDocs) 경로에서 evict 되면 dataless 0바이트로 번들되어
-# 폐쇄망 데모가 깨진다(빈 maplibre-gl.js → 지도 미초기화). [ -s ] = 존재 & 크기>0.
-for asset in vendor/maplibre/maplibre-gl.js vendor/maplibre/maplibre-gl.css; do
-  if [ ! -s "$ROOT/$asset" ]; then
-    echo "오류: $asset 가 없거나 0바이트입니다 (iCloud evict 의심)." >&2
-    echo "  → 01-download-data.sh 재실행 또는 'cat $asset >/dev/null' 로 materialize 후 다시 시도." >&2
+# vendor 오프라인 자산이 비어있지(0바이트) 않은지 검증 — 없으면 자동 복구(unpkg 재다운로드) 후 재검증.
+# vendor/maplibre/* 는 .gitignore 대상이라 clone 본(빌드호스트)엔 없고 01-download-data.sh 가 채운다.
+# build-studio 빌드그래프에 01 단계가 없어 비어있을 수 있으므로 패키징 직전 자동 복구한다.
+# 맥(iCloud) 작업본에서 evict 되면 dataless 0바이트로 번들돼 폐쇄망 데모가 깨진다. [ -s ] = 존재 & 크기>0.
+MAPLIBRE_VER="${MAPLIBRE_VERSION:-5.16.0}"   # 01-download-data.sh 와 동일 메이저 고정
+for asset in maplibre-gl.js maplibre-gl.css; do
+  dst="$ROOT/vendor/maplibre/$asset"
+  if [ ! -s "$dst" ]; then
+    echo "  vendor 자산 누락/0바이트: vendor/maplibre/$asset → unpkg 재다운로드(@${MAPLIBRE_VER}) …" >&2
+    mkdir -p "$ROOT/vendor/maplibre"
+    if curl -fLs -o "$dst.tmp" "https://unpkg.com/maplibre-gl@${MAPLIBRE_VER}/dist/$asset" && [ -s "$dst.tmp" ]; then
+      mv "$dst.tmp" "$dst"
+    else
+      rm -f "$dst.tmp"
+    fi
+  fi
+  if [ ! -s "$dst" ]; then
+    echo "오류: vendor/maplibre/$asset 가 없거나 0바이트입니다(자동 복구 실패)." >&2
+    echo "  · 빌드호스트(인터넷 불가/에어갭): scripts/01-download-data.sh 로 vendor 자산을 먼저 받아두세요." >&2
+    echo "  · 맥(iCloud) 작업본: evict 의심 — 'brctl download \"$dst\"' 또는 'cat \"$dst\" >/dev/null' 로 materialize 후 재시도." >&2
     exit 1
   fi
 done
@@ -169,16 +182,45 @@ cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
 # WITH_POSTGIS: PostGIS 데이터 덤프(동적 레이어·지오코더 backbone) → postgis/cuvia.dump (pg_dump -Fc)
 STAGE_POSTGIS=""
 if [ -n "${WITH_POSTGIS:-}" ]; then
-  echo "  PostGIS 덤프(pg_dump -Fc → postgis/cuvia.dump)"
   mkdir -p "$STAGE/postgis"; STAGE_POSTGIS="postgis"
   PGC="${PG_CONTAINER:-server-postgis-1}"
+  # 접속 경로 1회 판정(컨테이너 우선, 없으면 host) → 무결성 게이트·덤프가 동일 경로 사용.
   if docker exec "$PGC" pg_isready -U "${PGUSER:-cuvia}" >/dev/null 2>&1; then
+    PG_MODE=container
+  elif command -v pg_dump >/dev/null 2>&1 && command -v psql >/dev/null 2>&1; then
+    PG_MODE=host
+  else
+    echo "오류: PostGIS 접속 불가 — postgis 컨테이너($PGC) 미가동 & host pg_dump/psql 없음." >&2; exit 1
+  fi
+  pg_psql() {   # psql -tAX -c "$1" — 컨테이너/호스트 공통 라우팅(컨테이너는 소켓 trust)
+    if [ "$PG_MODE" = container ]; then
+      docker exec "$PGC" psql -tAX -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -c "$1"
+    else
+      PGPASSWORD="${PGPASSWORD:-cuvia}" psql -tAX -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" \
+        -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -c "$1"
+    fi
+  }
+
+  # ── 덤프 전 무결성 게이트 ── 교착 등으로 parcel/building 이 미완·무인덱스인 채 폐쇄망 번들로 새어나가는 것을 차단.
+  #   (실측 사고: parcel 5.6M/≈39.6M·GiST 미재생성인데 13-qc-check.py 는 PostGIS 미점검 → 그대로 pg_dump 될 뻔.)
+  #   행수 임계는 전국 기본값(부분/지역 번들이면 PARCEL_MIN/BUILDING_MIN=0 으로 우회). 인덱스 유효성은 지역 무관 강신호.
+  PARCEL_MIN="${PARCEL_MIN:-30000000}"; BUILDING_MIN="${BUILDING_MIN:-5000000}"
+  pcnt=$(pg_psql "SELECT count(*) FROM parcel" 2>/dev/null | tr -dc 0-9 || true); pcnt=${pcnt:-0}
+  bcnt=$(pg_psql "SELECT count(*) FROM building" 2>/dev/null | tr -dc 0-9 || true); bcnt=${bcnt:-0}
+  vidx=$(pg_psql "SELECT count(*) FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid WHERE c.relname IN ('parcel_geom_gix','parcel_pnu_idx','building_geom_gix') AND i.indisvalid" 2>/dev/null | tr -dc 0-9 || true); vidx=${vidx:-0}
+  pg_gate=0
+  [ "$pcnt" -ge "$PARCEL_MIN" ]   || { echo "오류: parcel 행수 $pcnt < 임계 $PARCEL_MIN — 적재 미완 의심(STEPS=parcel 재적재). 우회=PARCEL_MIN=0" >&2; pg_gate=1; }
+  [ "$bcnt" -ge "$BUILDING_MIN" ] || { echo "오류: building 행수 $bcnt < 임계 $BUILDING_MIN — 적재 미완 의심(STEPS=building). 우회=BUILDING_MIN=0" >&2; pg_gate=1; }
+  [ "$vidx" -eq 3 ]               || { echo "오류: parcel/building 핵심 인덱스 유효 $vidx/3 — --fresh 적재가 인덱스 재생성 전 중단된 정황. load_parcel/building.sh 재실행 필요." >&2; pg_gate=1; }
+  [ "$pg_gate" = 0 ] || { echo "✗ PostGIS 무결성 게이트 실패 — 손상 DB 번들링 차단." >&2; exit 1; }
+  echo "  ✓ PostGIS 무결성 OK — parcel $pcnt · building $bcnt · 핵심 인덱스 3/3 유효"
+
+  echo "  PostGIS 덤프(pg_dump -Fc → postgis/cuvia.dump)"
+  if [ "$PG_MODE" = container ]; then
     docker exec "$PGC" pg_dump -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -n public -Fc > "$STAGE/postgis/cuvia.dump"
-  elif command -v pg_dump >/dev/null 2>&1; then
+  else
     PGPASSWORD="${PGPASSWORD:-cuvia}" pg_dump -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" \
       -U "${PGUSER:-cuvia}" -d "${PGDATABASE:-cuvia}" -n public -Fc > "$STAGE/postgis/cuvia.dump"
-  else
-    echo "오류: PostGIS 덤프 불가 — postgis 컨테이너($PGC) 미가동 & host pg_dump 없음." >&2; exit 1
   fi
   [ -s "$STAGE/postgis/cuvia.dump" ] || { echo "오류: pg_dump 결과 0바이트" >&2; exit 1; }
   echo "    → postgis/cuvia.dump ($(du -h "$STAGE/postgis/cuvia.dump" | cut -f1))"
