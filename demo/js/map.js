@@ -15,6 +15,14 @@ const map = new maplibregl.Map({
   pitch: 60,                    // MAP_PITCH.on — 2D 토글 시 0
   bearing: -17.6,
   maxPitch: 75,
+  // maplibre 는 타일을 Web Worker 에서 로드하는데, 워커엔 document base URL 이 없어
+  // 상대경로(예: /dyn/poi/{z}/{x}/{y})로 new Request() 를 만들지 못한다("Failed to parse URL").
+  // tileserver 는 자기 mbtiles 소스만 Host 기준 절대 URL 로 재작성하고, 스타일에 인라인된
+  // /dyn/* (martin 동적타일=건물·필지·POI) 는 상대경로로 남는다. → same-origin 상대경로를
+  // 페이지 origin(게이트웨이) 기준 절대 URL 로 승격해 동적 레이어가 브라우저에서 로드되게 한다.
+  transformRequest: (u) => (
+    u && u.charAt(0) === '/' ? { url: (TILESERVER || location.origin) + u } : { url: u }
+  ),
 });
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
 window.cuviaMap = map;   // buildings.js / terrain.js / markers-example.js 가 사용
