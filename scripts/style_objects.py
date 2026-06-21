@@ -256,9 +256,14 @@ def apply_icons(style, icons, overrides=None):
 
 # ── POI 노출 우선순위 티어 (카테고리별 줌 게이트) ─────────────────────
 def _gate_inner(expr):
-    """줌×카테고리 게이트(["case",cond,inner,""])면 inner 반환, 아니면 그대로(idempotent)."""
+    """줌×카테고리 게이트에서 inner(원래 값)를 반환, 아니면 그대로(idempotent).
+    두 형태 지원 — 구형 ["case",cond,inner,""], 신형 ["step",["zoom"],"",z,["case",["<=",mz,z],inner,""],...]."""
     if isinstance(expr, list) and len(expr) >= 4 and expr[0] == "case":
         return expr[2]
+    if isinstance(expr, list) and len(expr) >= 5 and expr[0] == "step":
+        out = expr[4]   # 첫 stop 출력 = ["case",["<=",mz,z],inner,""]
+        if isinstance(out, list) and len(out) >= 4 and out[0] == "case":
+            return out[2]
     return expr
 
 
@@ -293,9 +298,18 @@ def apply_poi_tiers(style, tiers, cat_tier):
     sk = _tier_value_expr(tiers, cat_tier, lambda t, i: i)   # 티어 index = 충돌 우선순위(낮을수록 먼저)
     lay = L.setdefault("layout", {})
     inner_icon = _gate_inner(lay.get("icon-image"))
-    lay["text-field"] = ["case", [">=", ["zoom"], mz], ["get", "name"], ""]
+    # 카테고리별 줌 게이트 — style-spec은 ["zoom"]을 step/interpolate 최상위 입력으로만 허용한다.
+    # ["case",[">=",["zoom"],mz],V,""](불법: zoom을 case/비교 안에 중첩)를, 줌 step의 각 stop에서
+    # '데이터식 mz'를 그 stop 줌값과 비교하는 형태로 표현(동작 동일, mz<=현재stop줌이면 V, 아니면 "").
+    zlevels = sorted({int(t.get("minzoom", 15)) for t in tiers})
+    def _zoom_gate(value):
+        g = ["step", ["zoom"], ""]
+        for z in zlevels:
+            g += [z, ["case", ["<=", mz, z], value, ""]]
+        return g
+    lay["text-field"] = _zoom_gate(["get", "name"])
     if inner_icon is not None:
-        lay["icon-image"] = ["case", [">=", ["zoom"], mz], inner_icon, ""]
+        lay["icon-image"] = _zoom_gate(inner_icon)
     lay["symbol-sort-key"] = sk
     L["minzoom"] = min(t.get("minzoom", 15) for t in tiers)
     return 1

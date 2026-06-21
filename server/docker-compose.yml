@@ -6,7 +6,9 @@ services:
     platform: linux/amd64        # 폐쇄망 x86_64와 동일 아키텍처 강제 (Apple Silicon에서도 에뮬레이션 구동)
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # loopback 전용 — 외부(LAN)는 게이트웨이(:80) /styles 경유로 서빙. 서버 자신·SSH터널에서만 직결.
+      # (Style Studio 원격 프리뷰는 브라우저가 :8080 직호출 → 그때만 SSH로 8080 함께 터널)
+      - "127.0.0.1:8080:8080"
     volumes:
       - ../tiles:/data/tiles:ro
       - ../style/glyphs:/data/glyphs:ro
@@ -42,7 +44,8 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     ports:
-      - "8082:8082"
+      # loopback 전용 — 외부는 게이트웨이(:80) /geocode·/reverse 경유. 서버 자신·SSH터널에서만 직결.
+      - "127.0.0.1:8082:8082"
     volumes:
       - ../geocode:/data/geocode:ro
       - ./geocode-api.py:/app/geocode-api.py:ro
@@ -71,7 +74,7 @@ services:
     profiles: ["postgis"]
     restart: unless-stopped
     ports:
-      - "8092:8082"   # shadow 비교용(폐쇄망 전환 후 제거)
+      - "127.0.0.1:8092:8082"   # shadow 비교용(loopback 전용 — parity 측정은 서버 자신/SSH터널. 전환 후 제거)
     environment:
       DATABASE_URL: postgresql://${PGUSER:-cuvia}:${PGPASSWORD:-cuvia}@postgis:5432/${PGDATABASE:-cuvia}
       GEOCODE_PORT: "8082"
@@ -125,9 +128,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      # 호스트 5433→컨테이너 5432. 기본 5433 = 빌드호스트의 기존 host PostgreSQL(5432)과 충돌 회피.
+      # loopback 전용(외부 비노출) — DB 직결은 서버 자신/SSH터널. 호스트 5433→컨테이너 5432.
+      # 기본 5433 = 빌드호스트의 기존 host PostgreSQL(5432)과 충돌 회피.
       # (컨테이너 내부는 항상 5432 — martin/geocode-pg 는 postgis:5432 로 접속). 다른 포트면 PGPORT 로 덮어쓰기.
-      - "${PGPORT:-5433}:5432"
+      - "127.0.0.1:${PGPORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-cuvia} -d ${PGDATABASE:-cuvia}"]
       interval: 10s
@@ -156,7 +160,8 @@ services:
       - cuvia
 
   # 단일 도메인 게이트웨이(reverse proxy) — 모든 서비스를 한 포트로 통합. 공개망 권장.
-  # GATEWAY_PORT 기본 80. 게이트웨이만 노출하려면 위 서비스들의 ports 매핑을 제거하면 됨.
+  # GATEWAY_PORT 기본 80. ★외부(LAN)에 노출되는 유일한 포트★ — 위 tileserver/geocode/postgis 직결
+  # 포트는 127.0.0.1 loopback 전용(서버 자신/SSH터널만). 방화벽도 이 포트 하나만 열면 된다.
   gateway:
     image: nginx:1.31.1-alpine
     platform: linux/amd64

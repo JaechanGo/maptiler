@@ -85,10 +85,16 @@ until curl -sf http://localhost:8080/health >/dev/null 2>&1; do
 done
 echo "tileserver 정상 응답 확인"
 
-echo "기동 완료:"
-echo "  스타일  http://<이서버IP>:8080/styles/cuvia/style.json"
-echo "  데모    http://<이서버IP>:8081/demo/"
+# 게이트웨이 외부 포트 — 환경변수 우선, 없으면 server/.env, 그래도 없으면 80.
+GW_PORT="${GATEWAY_PORT:-$(sed -n 's/^GATEWAY_PORT=//p' "$ROOT/server/.env" 2>/dev/null | tail -1 | tr -dc 0-9)}"
+GW_PORT="${GW_PORT:-80}"; GW_SFX=""; [ "$GW_PORT" = "80" ] || GW_SFX=":$GW_PORT"
+echo "기동 완료 — 외부 노출은 게이트웨이 한 포트(GATEWAY_PORT=$GW_PORT):"
+echo "  데모    http://<이서버IP>${GW_SFX}/demo/"
+echo "  스타일  http://<이서버IP>${GW_SFX}/styles/cuvia/style.json"
+echo "  지오코딩 http://<이서버IP>${GW_SFX}/geocode?q=서울시청"
+echo "  (tileserver:8080·geocode:8082 직결은 loopback 전용 — 외부엔 :$GW_PORT 만 노출. 방화벽도 그 포트만 개방)"
 echo
-echo "스타일 디자인(Style Studio)을 현장에서 띄우려면(선택):"
-echo "  STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → http://<이서버IP>:8091/?token=…"
-echo "  (저장 시 style.json 갱신 + tileserver 자동 재시작. 색·POI·글꼴 테마 현장 지정)"
+echo "스타일 디자인(Style Studio)은 관리툴 — LAN 비노출, SSH 터널 권장:"
+echo "  서버: STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh"
+echo "  PC:   ssh -L 8091:localhost:8091 -L 8080:localhost:8080 <user>@<이서버IP>  # → http://localhost:8091/?token=…"
+echo "  (프리뷰가 브라우저에서 tileserver:8080 을 직접 호출하므로 8080 도 함께 터널)"
