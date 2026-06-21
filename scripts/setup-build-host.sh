@@ -120,15 +120,23 @@ echo
 #   terrain 은 정적 산출물 — 빌드호스트에서 생성하거나, 기존 빌드/배포본 terrain.mbtiles 를 tiles/ 로 반입해도 동일.
 if python3 -c 'import rio_rgbify' 2>/dev/null; then
   echo "✓ 이미 설치됨: rio-rgbify (지형 타일)"
-elif python3 -m pip --version >/dev/null 2>&1; then
-  echo "→ pip: rio-rgbify rasterio (지형 타일 생성용 — 선택)"
-  python3 -m pip install --user -q rio-rgbify rasterio 2>/dev/null \
-    || python3 -m pip install --break-system-packages -q rio-rgbify rasterio 2>/dev/null || true
-  if python3 -c 'import rio_rgbify' 2>/dev/null; then
-    echo "✓ rio-rgbify 설치 완료 (rio 가 PATH 에 없으면: export PATH=\$HOME/.local/bin:\$PATH)"
-  else echo "△ rio-rgbify 미설치 — terrain 단계는 기존 terrain.mbtiles 를 tiles/ 로 반입해 대체 가능(필수 아님)."; fi
 else
-  echo "△ pip 없음 — rio-rgbify 미설치(terrain 은 기존 산출물 반입으로 대체)."
+  if ! python3 -m pip --version >/dev/null 2>&1; then   # pip 없으면 부트스트랩(best-effort)
+    if have apt-get;   then echo "→ apt: python3-pip"; $SUDO apt-get install -y python3-pip
+    elif have dnf;     then echo "→ dnf: python3-pip"; $SUDO dnf install -y --disablerepo='pgdg*' python3-pip
+    elif have yum;     then echo "→ yum: python3-pip"; $SUDO yum install -y --disablerepo='pgdg*' python3-pip
+    fi
+  fi
+  if python3 -m pip --version >/dev/null 2>&1; then
+    echo "→ pip: rio-rgbify rasterio (지형 타일 생성용 — 선택)"
+    python3 -m pip install --user -q rio-rgbify rasterio 2>/dev/null \
+      || python3 -m pip install --break-system-packages -q rio-rgbify rasterio 2>/dev/null || true
+    if python3 -c 'import rio_rgbify' 2>/dev/null; then
+      echo "✓ rio-rgbify 설치 완료 (rio 가 PATH 에 없으면: export PATH=\$HOME/.local/bin:\$PATH)"
+    else echo "△ rio-rgbify 설치 실패 — terrain 단계는 기존 terrain.mbtiles 를 tiles/ 로 반입해 대체 가능(필수 아님)."; fi
+  else
+    echo "△ pip 미설치(python3-pip 설치 실패/불가) — terrain 은 기존 terrain.mbtiles 를 tiles/ 로 반입해 대체."
+  fi
 fi
 
 echo
