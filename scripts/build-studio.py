@@ -1120,19 +1120,20 @@ def _vworld_list_filenos(ds, col):
 
 
 def _vworld_parse_filenos(html, level="sigungu"):
-    """다운로드센터 HTML → 행정구역별 fileNo(dsFileSq) 리스트. (네트워크 분리 — 단위테스트 가능)
-    항목 <li> 단위로: fileNo = listFnc.download('<dsFileId>','<fileNo>','<size>') 의 2번째 인자.
-      1번째 dsFileId 는 연속지적=숫자('30563')·건물=영숫자('20171128DS00010') 둘 다라 [^']* 로 무시(★건물 0건 원인).
+    """다운로드센터 HTML → 행정구역별 (dsFileId, fileNo) 쌍 리스트. (네트워크 분리 — 단위테스트 가능)
+    항목 <li> 단위로 listFnc.download('<dsFileId>','<fileNo=dsFileSq>','<size>') 의 1·2번째 인자.
+      다운로드는 ds_id=dsFileId(1번째)·fileNo=dsFileSq(2번째). 연속지적은 dsFileId 가 페이지 dsId(30563)와
+      같지만 건물은 '20171128DS00010' 이라 페이지 dsId(18)로는 일반페이지가 응답됨 → 반드시 1번째 인자 사용.
     행정구역 = <span class="sigunguNm1">전체명(서울특별시·경기도 …) 우선, 없으면 <div class="tit min"> 파일명 템플릿.
     시도판별 = 전체시도명 접미(특별시/광역시/특별자치시/특별자치도/도) 또는 파일명 약어(시군구 분할 '_' 없음).
     ★갱신 누적: 한 데이터셋에 같은 행정구역의 구버전이 쌓이므로(건물=204건) 행정구역별 '최신 1건'(목록 상단=최신,
     첫 등장)만 취한다 — 결과적으로 시도 17건/시군구 N건."""
     out = []; seen = set()
     for blk in re.split(r'<li\b', html):              # 다운로드 항목 1개 = <li> 블록(목록은 최신순)
-        mf = re.search(r"listFnc\.download\(\s*'[^']*'\s*,\s*'(\d+)'", blk)
+        mf = re.search(r"listFnc\.download\(\s*'([^']*)'\s*,\s*'(\d+)'", blk)
         if not mf:
             continue
-        fno = mf.group(1)
+        fid, fno = mf.group(1), mf.group(2)           # (dsFileId, fileNo=dsFileSq) — 다운로드는 ds_id=dsFileId 사용
         mr = (re.search(r'class="sigunguNm1">\s*([^<]+?)\s*</span>', blk)
               or re.search(r'class="tit min">\s*([^<]+?)\s*</div>', blk))
         rg = re.sub(r'\s+', ' ', mr.group(1)).strip() if mr else ""
@@ -1145,7 +1146,7 @@ def _vworld_parse_filenos(html, level="sigungu"):
         if level == "sigungu" and is_sido and "세종" not in rg: continue
         if level == "sido" and not is_sido: continue
         if rg in seen: continue                               # 같은 행정구역의 구버전(갱신 누적) 제거 — 최신 1건만
-        seen.add(rg); out.append(fno)
+        seen.add(rg); out.append((fid, fno))
     return out
 
 
@@ -1191,13 +1192,18 @@ def _collect_plan(item_key):
     if method == "vworld_session":   # VWorld 다운로드센터 — 로그인 세션 쿠키로 downloadResourceFile.do GET
         base = col.get("download_url", "https://www.vworld.kr/dtmk/downloadResourceFile.do")
         ds = str(col.get("ds_id", ""))
-        nos = [str(n) for n in (col.get("file_nos") or [])]
-        if ds and not nos:           # file_nos 미지정 → 쿠키로 목록 페이지에서 fileNo 자동 발견(level=시군구 기본)
-            nos = _vworld_list_filenos(ds, col)
-        if not (ds and nos):
-            raise RuntimeError(f"vworld_session({skey}): ds_id 필요. file_nos 미지정 시 쿠키로 목록 자동조회 — "
-                               "VWORLD_COOKIE 설정 후 재시도(또는 file_nos 명시).")
-        urls = [f"{base}?ds_id={ds}&fileNo={urllib.parse.quote(str(n))}" for n in nos]
+        manual = [str(n) for n in (col.get("file_nos") or [])]
+        # ds_id 파라미터 = listFnc.download 1번째 인자(dsFileId). 연속지적은 페이지 dsId(30563)와 같지만
+        # 건물은 dsFileId('20171128DS00010')라 페이지 dsId(18)로는 일반페이지가 응답됨 → 첫 인자를 그대로 사용.
+        if manual:
+            specs = [(ds, n) for n in manual]                # 수동 fileNo 는 config ds_id 와 페어
+        elif ds or col.get("list_url"):
+            specs = _vworld_list_filenos(ds, col)            # [(dsFileId, fileNo), ...]
+        else:
+            specs = []
+        if not specs:
+            raise RuntimeError(f"vworld_session({skey}): 다운로드 항목 0개 — ds_id/list_url 또는 쿠키(목록 자동조회) 확인.")
+        urls = [f"{base}?ds_id={urllib.parse.quote(a)}&fileNo={urllib.parse.quote(b)}" for a, b in specs]
         return src, urls, BUILD_HOME / src.get("build_input", {}).get("dest", "staged/gis"), "extract"
     raise RuntimeError(f"수집 미지원: {skey}")
 
