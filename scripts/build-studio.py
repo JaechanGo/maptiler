@@ -1979,7 +1979,7 @@ function updateBusy(){
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
  if(s){JOB[k]=s;const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;
    const rt=$('#rt_'+k); if(rt)rt.style.display=(s==='error'||s==='skipped')?'inline-block':'none';}}   // 실패/건너뜀 단계에만 재시도 노출
-function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
+function logln(t){const p=$('#log');let s=p.textContent+t+'\n';const MAX=800,a=s.split('\n');if(a.length>MAX)s=a.slice(-MAX).join('\n');p.textContent=s;p.scrollTop=p.scrollHeight}   // DOM 줄 수 상한(MAX) — 노이즈 폭주 시 브라우저 정지 방지
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
  if(d.snapshot){for(const k in d.snapshot)setStatus(k,d.snapshot[k].status,d.snapshot[k].progress);optBuild=optCollect=false;updateBusy();return}

@@ -49,6 +49,9 @@ echo "[3/4] Terrain-RGB 인코딩 (z5~z12)"
 #   힐셰이드 등 참조용으로만 보존(멱등 가드로 1회만 생성).
 # rio-rgbify 는 출력 "마지막 확장자"로 포맷 판별(tif|mbtiles) → 임시파일도 .mbtiles 로 끝나야 함
 rm -f "$ROOT/tiles/terrain.tmp.mbtiles"
+# 4326 VRT 직접 입력(위 WORKAROUND) 탓에 rasterio 가 타일마다 NotGeoreferencedWarning 을 뱉어
+#   로그·SSE 가 폭주(브라우저 로그창 정지)한다 → 해당 경고만 억제(타일 산출은 영향 없음).
+PYTHONWARNINGS="ignore::rasterio.errors.NotGeoreferencedWarning" \
 rio rgbify -b -10000 -i 0.1 --min-z 5 --max-z 12 \
   -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)" --format png \
   "$ROOT/data/dem/korea.vrt" "$ROOT/tiles/terrain.tmp.mbtiles"
