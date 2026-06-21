@@ -64,7 +64,9 @@ def parse_doro_gaz(s):
             roads = road.get((sido, sgg)) or (road.get((sido, "")) if sido.startswith("세종") else None)
             if roads:
                 rn = _JIHA.sub("", rnorm(a))               # '지하' 제거 후 정규화
-                for rd in roads:                           # 실재 도로명 최장일치(가지번호길까지 정확)
+                pre = rnorm(sido) + rnorm(sgg)             # 시도+시군구 접두를 먼저 consume → 남은 데서 도로명 검색
+                if rn.startswith(pre): rn = rn[len(pre):]  # ('종로'가 '종로구' 안에서 잘못 매칭되는 충돌 방지)
+                for rd in roads:                           # 남은 부분에서 실재 도로명 최장일치(가지번호길까지 정확)
                     if rd and rd in rn:
                         m = re.match(r"(\d+)(?:-(\d+))?", rn[rn.find(rd) + len(rd):])
                         if m:
