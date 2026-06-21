@@ -47,14 +47,15 @@ echo "[3/4] Terrain-RGB 인코딩 (z5~z12)"
 #   transform_bounds(densify_pts=0) 버그 발생 → EPSG:4326 VRT 를 직접 입력.
 #   gdalwarp 결과(korea-3857.tif)는 현재 파이프라인에서 미사용 — QGIS 검수/향후
 #   힐셰이드 등 참조용으로만 보존(멱등 가드로 1회만 생성).
-rm -f "$ROOT/tiles/terrain.mbtiles.tmp"
+# rio-rgbify 는 출력 "마지막 확장자"로 포맷 판별(tif|mbtiles) → 임시파일도 .mbtiles 로 끝나야 함
+rm -f "$ROOT/tiles/terrain.tmp.mbtiles"
 rio rgbify -b -10000 -i 0.1 --min-z 5 --max-z 12 \
   -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)" --format png \
-  "$ROOT/data/dem/korea.vrt" "$ROOT/tiles/terrain.mbtiles.tmp"
+  "$ROOT/data/dem/korea.vrt" "$ROOT/tiles/terrain.tmp.mbtiles"
 
 echo "[4/4] mbtiles 메타데이터 보강 (TileServer-GL 서빙용)"
 # INSERT OR REPLACE 는 UNIQUE 제약 없는 테이블에서 중복 행을 만들므로 DELETE+INSERT 로 교체
-sqlite3 "$ROOT/tiles/terrain.mbtiles.tmp" <<'SQL'
+sqlite3 "$ROOT/tiles/terrain.tmp.mbtiles" <<'SQL'
 BEGIN;
 DELETE FROM metadata WHERE name IN ('name','format','minzoom','maxzoom','bounds');
 INSERT INTO metadata VALUES('name','terrain');
@@ -64,5 +65,5 @@ INSERT INTO metadata VALUES('maxzoom','12');
 INSERT INTO metadata VALUES('bounds','124.0,33.0,132.0,39.0');
 COMMIT;
 SQL
-mv "$ROOT/tiles/terrain.mbtiles.tmp" "$ROOT/tiles/terrain.mbtiles"
+mv "$ROOT/tiles/terrain.tmp.mbtiles" "$ROOT/tiles/terrain.mbtiles"
 echo "지형 타일 생성 완료: tiles/terrain.mbtiles"
