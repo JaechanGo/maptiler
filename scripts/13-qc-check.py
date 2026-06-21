@@ -304,12 +304,21 @@ def _find_zoom_violations(style):
             if not in_curve_input:           # step/interpolate 입력 슬롯이 아니면 위반
                 viol.append(where)
             return
+        if op == "literal":                  # ["literal", <원시데이터>] — 2번째 인자는 표현식이 아님(해석 금지).
+            return                            #   안 그러면 ["literal",["zoom",…]] 의 데이터를 zoom 으로 오탐 → 정상 번들 오차단.
         if op == "step":                     # ["step", input, out0, stop1, out1, ...] — input(=[1])만 zoom 허용
             for i, ch in enumerate(node[1:], 1):
                 walk(ch, i == 1, where)
-        elif op in INTERP_OPS:               # ["interpolate", type, input, ...] — input(=[2])만 zoom 허용
+        elif op in INTERP_OPS:               # ["interpolate(-hcl/-lab)", type, input, ...] — input(=[2])만 zoom 허용
             for i, ch in enumerate(node[1:], 1):
                 walk(ch, i == 2, where)
+        elif op == "match":                  # ["match", input, label, out, …, default] — label 슬롯은 원시데이터(표현식 아님) → 스킵
+            walk(node[1], False, where)       # input (zoom 이 여기 오면 위반=정탐)
+            body = node[2:]
+            for j in range(0, len(body) - 1, 2):
+                walk(body[j + 1], False, where)   # out 만 walk(label=body[j] 은 데이터라 스킵)
+            if len(body) % 2 == 1:
+                walk(body[-1], False, where)       # 마지막 = default(표현식)
         else:                                # 그 외 표현식의 인자에는 zoom 중첩 불허
             for ch in node[1:]:
                 walk(ch, False, where)

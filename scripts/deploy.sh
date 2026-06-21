@@ -129,7 +129,7 @@ style_smoke() {   # /styles.json 비어있지 않음 + 설정의 각 style id �
   fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    code="$(curl -s -o /dev/null -w '%{http_code}' "$TS/styles/$id/style.json" 2>/dev/null || echo 000)"
+    code="$(curl -s -o /dev/null -w '%{http_code}' "$TS/styles/$id/style.json" 2>/dev/null || true)"  # 실패해도 curl 이 -w 로 000 출력
     if [ "$code" = "200" ]; then
       echo "  ✓ 스타일 로드 확인: /styles/$id/style.json (200)"
     else
