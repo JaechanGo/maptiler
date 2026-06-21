@@ -1029,7 +1029,8 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
                     head = r.read(1 << 16)
                     low = head[:300].lstrip().lower()
                     if low.startswith(b"<!doctype html") or b"<html" in low:
-                        raise RuntimeError("파일 아님(HTML 에러페이지) — 한국 IP/세션 확인")
+                        txt = re.sub(rb'\s+', b' ', re.sub(rb'<[^>]+>', b' ', head)).strip().decode("utf-8", "replace")[:160]
+                        raise RuntimeError(f"파일 아님(HTML 에러페이지) — 세션/URL 확인 · 응답본문:[{txt}]")
                     o.write(head)
                     while True:
                         chunk = r.read(1 << 20)
@@ -1041,7 +1042,7 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
             last = e
             if attempt < retries - 1:
                 time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"다운로드 실패({retries}회): {str(last)[:140]}")
+    raise RuntimeError(f"다운로드 실패({retries}회): {str(last)[:220]}  [url={url}]")
 
 
 def _extract_into(src, dest_dir, orig_name=None):
@@ -1123,9 +1124,11 @@ def _vworld_parse_filenos(html, level="sigungu"):
     항목 <li> 단위로: fileNo = listFnc.download('<dsFileId>','<fileNo>','<size>') 의 2번째 인자.
       1번째 dsFileId 는 연속지적=숫자('30563')·건물=영숫자('20171128DS00010') 둘 다라 [^']* 로 무시(★건물 0건 원인).
     행정구역 = <span class="sigunguNm1">전체명(서울특별시·경기도 …) 우선, 없으면 <div class="tit min"> 파일명 템플릿.
-    시도판별 = 전체시도명 접미(특별시/광역시/특별자치시/특별자치도/도) 또는 파일명 약어(시군구 분할 '_' 없음)."""
-    out = []
-    for blk in re.split(r'<li\b', html):              # 다운로드 항목 1개 = <li> 블록
+    시도판별 = 전체시도명 접미(특별시/광역시/특별자치시/특별자치도/도) 또는 파일명 약어(시군구 분할 '_' 없음).
+    ★갱신 누적: 한 데이터셋에 같은 행정구역의 구버전이 쌓이므로(건물=204건) 행정구역별 '최신 1건'(목록 상단=최신,
+    첫 등장)만 취한다 — 결과적으로 시도 17건/시군구 N건."""
+    out = []; seen = set()
+    for blk in re.split(r'<li\b', html):              # 다운로드 항목 1개 = <li> 블록(목록은 최신순)
         mf = re.search(r"listFnc\.download\(\s*'[^']*'\s*,\s*'(\d+)'", blk)
         if not mf:
             continue
@@ -1141,7 +1144,8 @@ def _vworld_parse_filenos(html, level="sigungu"):
         # 세종(단층 시도)은 시군구 하위파일이 없어 sigungu level 에서도 포함해야 누락 안 됨
         if level == "sigungu" and is_sido and "세종" not in rg: continue
         if level == "sido" and not is_sido: continue
-        out.append(fno)
+        if rg in seen: continue                               # 같은 행정구역의 구버전(갱신 누적) 제거 — 최신 1건만
+        seen.add(rg); out.append(fno)
     return out
 
 
