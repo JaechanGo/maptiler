@@ -73,7 +73,7 @@ fi
 # 행정경계 폴리곤(역지오코딩 동 판정)·표준 카테고리·법정/행정동 코드는 모두 geocode.sqlite 안에 적재되어
 # 함께 반입된다(별도 areas.sqlite/cat-crosswalk 번들 불필요 — 빌드 시 09 가 DB 에 굽는다).
 # areas 가 비면 역지오 동 폴리곤 없이 배포되므로 경고만(차단 X — areas 는 부가 레이어). 상세검증은 아래 QC 게이트.
-AREAS_N=$(sqlite3 "$GEOCODE_DB" "SELECT count(*) FROM areas" 2>/dev/null || echo 0)
+AREAS_N=$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('SELECT count(*) FROM areas').fetchone()[0])" "$GEOCODE_DB" 2>/dev/null || echo 0)   # sqlite3 CLI 대신 python3 내장 모듈(리눅스 빌드호스트 미설치 대비)
 if [ "${AREAS_N:-0}" -eq 0 ]; then
   echo "  경고: geocode.sqlite 에 행정경계 areas 0건 — 역지오코딩 동 폴리곤 없이 배포됩니다 (06-gen-areas.py + areas.sqlite 확인)." >&2
 else

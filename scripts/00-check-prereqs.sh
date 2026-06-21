@@ -18,7 +18,7 @@ need python3 "brew install python"
 # GDAL 바이너리 2종 (둘 다 brew install gdal 로 설치됨)
 need gdalwarp     "brew install gdal"
 need gdalbuildvrt "brew install gdal"
-need sqlite3 "macOS 기본 포함"
+# sqlite3 CLI 는 더 이상 불필요 — terrain 메타데이터·package areas 카운트는 python3 내장 sqlite3 모듈 사용
 need jq      "brew install jq"
 need curl    "macOS 기본 포함"
 need rio     "pipx install --include-deps rio-rgbify (rio 명령은 rasterio 가 제공)"

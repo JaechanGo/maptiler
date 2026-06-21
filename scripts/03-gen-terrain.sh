@@ -59,16 +59,20 @@ rio rgbify -b -10000 -i 0.1 --min-z 5 --max-z 12 \
   "$ROOT/data/dem/korea.vrt" "$ROOT/tiles/terrain.tmp.mbtiles"
 
 echo "[4/4] mbtiles 메타데이터 보강 (TileServer-GL 서빙용)"
-# INSERT OR REPLACE 는 UNIQUE 제약 없는 테이블에서 중복 행을 만들므로 DELETE+INSERT 로 교체
-sqlite3 "$ROOT/tiles/terrain.tmp.mbtiles" <<'SQL'
-BEGIN;
+# INSERT OR REPLACE 는 UNIQUE 제약 없는 테이블에서 중복 행을 만들므로 DELETE+INSERT 로 교체.
+# sqlite3 CLI 는 macOS 기본 포함이나 리눅스 빌드호스트엔 미설치 → python3 내장 sqlite3 모듈 사용(python3 는 필수).
+python3 - "$ROOT/tiles/terrain.tmp.mbtiles" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript("""
 DELETE FROM metadata WHERE name IN ('name','format','minzoom','maxzoom','bounds');
 INSERT INTO metadata VALUES('name','terrain');
 INSERT INTO metadata VALUES('format','png');
 INSERT INTO metadata VALUES('minzoom','5');
 INSERT INTO metadata VALUES('maxzoom','12');
 INSERT INTO metadata VALUES('bounds','124.0,33.0,132.0,39.0');
-COMMIT;
-SQL
+""")
+db.commit(); db.close()
+PY
 mv "$ROOT/tiles/terrain.tmp.mbtiles" "$ROOT/tiles/terrain.mbtiles"
 echo "지형 타일 생성 완료: tiles/terrain.mbtiles"
