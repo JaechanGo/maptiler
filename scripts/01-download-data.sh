@@ -3,9 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 에어갭 재현성을 위해 버전 고정 (latest 리다이렉트 사용 금지)
-PLANETILER_VERSION="v0.10.2"
-FONTS_VERSION="v2.0"
+# 에어갭 재현성을 위해 버전 고정 (latest 리다이렉트 사용 금지) — 단일출처 scripts/versions.sh (package.sh 공용).
+source "$ROOT/scripts/versions.sh"
 
 # 부분 다운로드 임시 파일 정리 트랩 (bash 3.2 호환)
 TMP_ZIP=""
@@ -50,12 +49,12 @@ echo "[4/5] MapLibre GL JS (로컬 번들, 소비 프론트와 동일 메이저)
 # [ ! -s ] (존재 & 크기>0) — 0바이트 스텁(iCloud evict·중단된 다운로드)이면 재다운로드. [ ! -f ]는 0바이트를 통과시켜 영구 잔존.
 if [ ! -s "$ROOT/vendor/maplibre/maplibre-gl.js" ]; then
   curl -fL -o "$ROOT/vendor/maplibre/maplibre-gl.js.tmp" \
-    https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.js \
+    "https://unpkg.com/maplibre-gl@${MAPLIBRE_VERSION}/dist/maplibre-gl.js" \
     && mv "$ROOT/vendor/maplibre/maplibre-gl.js.tmp" "$ROOT/vendor/maplibre/maplibre-gl.js"
 fi
 if [ ! -s "$ROOT/vendor/maplibre/maplibre-gl.css" ]; then
   curl -fL -o "$ROOT/vendor/maplibre/maplibre-gl.css.tmp" \
-    https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.css \
+    "https://unpkg.com/maplibre-gl@${MAPLIBRE_VERSION}/dist/maplibre-gl.css" \
     && mv "$ROOT/vendor/maplibre/maplibre-gl.css.tmp" "$ROOT/vendor/maplibre/maplibre-gl.css"
 fi
 

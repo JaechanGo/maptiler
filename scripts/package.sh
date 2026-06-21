@@ -2,6 +2,7 @@
 # [온라인 단계] 폐쇄망 반입용 번들 생성: Docker 이미지 tar + 산출물 tgz
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/versions.sh"   # MAPLIBRE_VERSION 등 자산 버전 핀(01-download-data.sh 공용 단일출처)
 # 산출물(images.tar + 멀티GB tgz)도 iCloud 밖에 둔다(기본 BUILD_HOME/dist). DIST 로 재정의 가능.
 DIST="${DIST:-${BUILD_HOME:-$HOME/geocode-build}/dist}"
 mkdir -p "$DIST"
@@ -57,14 +58,13 @@ done
 # vendor/maplibre/* 는 .gitignore 대상이라 clone 본(빌드호스트)엔 없고 01-download-data.sh 가 채운다.
 # build-studio 빌드그래프에 01 단계가 없어 비어있을 수 있으므로 패키징 직전 자동 복구한다.
 # 맥(iCloud) 작업본에서 evict 되면 dataless 0바이트로 번들돼 폐쇄망 데모가 깨진다. [ -s ] = 존재 & 크기>0.
-MAPLIBRE_VER="${MAPLIBRE_VERSION:-5.16.0}"   # 01-download-data.sh 와 동일 메이저 고정
 for asset in maplibre-gl.js maplibre-gl.css; do
   dst="$ROOT/vendor/maplibre/$asset"
   if [ ! -s "$dst" ]; then
-    echo "  vendor 자산 누락/0바이트: vendor/maplibre/$asset → unpkg 재다운로드(@${MAPLIBRE_VER}) …" >&2
+    echo "  vendor 자산 누락/0바이트: vendor/maplibre/$asset → unpkg 재다운로드(@${MAPLIBRE_VERSION}) …" >&2
     mkdir -p "$ROOT/vendor/maplibre"
-    if curl -fLs -o "$dst.tmp" "https://unpkg.com/maplibre-gl@${MAPLIBRE_VER}/dist/$asset" && [ -s "$dst.tmp" ]; then
-      mv "$dst.tmp" "$dst"
+    if curl -fLs -o "$dst.tmp" "https://unpkg.com/maplibre-gl@${MAPLIBRE_VERSION}/dist/$asset" && [ -s "$dst.tmp" ]; then
+      mv "$dst.tmp" "$dst" || rm -f "$dst.tmp"
     else
       rm -f "$dst.tmp"
     fi
@@ -76,6 +76,10 @@ for asset in maplibre-gl.js maplibre-gl.css; do
     exit 1
   fi
 done
+# maputnik(오프라인 스타일 편집기)은 선택 자산 — vendor 전체를 통째 번들하므로 없으면 번들에서 빠진다.
+# 01-download-data.sh 가 받지만 build-studio 빌드그래프엔 01 단계가 없어 비어있을 수 있음(데모 지도 자체는 무관) → WARN 만.
+[ -s "$ROOT/vendor/maputnik/dist/index.html" ] || \
+  echo "  경고: vendor/maputnik 없음 — 번들에 오프라인 스타일 편집기 미포함(데모 동작엔 무관). 필요시 scripts/01-download-data.sh 실행." >&2
 
 # geocode 서비스가 참조하는 통합 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
 if [ ! -s "$GEOCODE_DB" ]; then

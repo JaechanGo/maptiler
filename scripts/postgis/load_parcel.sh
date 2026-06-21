@@ -70,7 +70,11 @@ load_one() {
   # ★ INSERT 는 행마다 left(pnu,2) 로 파티션 라우팅하므로(단일 SELECT 1건만 잠그면 혼재/디폴트행 미직렬화→재교착),
   #   스테이징에 존재하는 '모든' 라우팅 키를 오름차순으로 잠근다(키 획득순서 통일=락순서 교착도 방지).
   #   명시 17 시도 외(=parcel_default 로 라우팅되는 비정상 코드)는 단일 sentinel 0 으로 묶어 default 도 직렬화.
-  psql -v ON_ERROR_STOP=1 -q -c "
+  # INSERT 를 CTE+RETURNING 으로 감싸 '실제 적재(inserted)' 건수를 'INS=' 접두로 출력 → dedup(ON CONFLICT)이
+  # 삼킨 양이 staged 대비 보이게(가시화). advisory lock SELECT 의 void 출력은 grep 'INS=' 로 무시.
+  # ON_ERROR_STOP+pipefail 이라 psql SQL 오류 시 substitution 실패→set -e 즉시 중단(fail-fast 유지).
+  local ins
+  ins=$(psql -v ON_ERROR_STOP=1 -q -t -A -c "
     BEGIN;
     SELECT pg_advisory_xact_lock(4001, k) FROM (
       SELECT DISTINCT CASE
@@ -81,17 +85,21 @@ load_one() {
                ELSE 0 END AS k
       FROM ${stg} WHERE pnu IS NOT NULL AND length(pnu) >= 2
     ) d ORDER BY k;
-    INSERT INTO parcel(pnu, jibun, sido_cd, sgg_cd, emd_cd, geom)
-    SELECT pnu, jibun, left(pnu,2), left(pnu,5), left(pnu,8),
-           ST_Multi(ST_CollectionExtract(ST_MakeValid(geom),3))
-    FROM ${stg}
-    WHERE geom IS NOT NULL AND pnu IS NOT NULL AND length(pnu) >= 2
-    ON CONFLICT (sido_cd, pnu) DO NOTHING;
-    COMMIT;" >/dev/null
+    WITH ins AS (
+      INSERT INTO parcel(pnu, jibun, sido_cd, sgg_cd, emd_cd, geom)
+      SELECT pnu, jibun, left(pnu,2), left(pnu,5), left(pnu,8),
+             ST_Multi(ST_CollectionExtract(ST_MakeValid(geom),3))
+      FROM ${stg}
+      WHERE geom IS NOT NULL AND pnu IS NOT NULL AND length(pnu) >= 2
+      ON CONFLICT (sido_cd, pnu) DO NOTHING
+      RETURNING 1
+    ) SELECT 'INS='||count(*) FROM ins;
+    COMMIT;" | grep -oE 'INS=[0-9]+' | cut -d= -f2)
+  ins=${ins:-0}
   local cnt
   cnt=$(psql_q -c "SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL AND pnu IS NOT NULL;")
   psql -v ON_ERROR_STOP=1 -q -c "DROP TABLE IF EXISTS ${stg};" >/dev/null
-  echo "  [$idx/${N}] $lyr → ${cnt}건"
+  echo "  [$idx/${N}] $lyr → ${ins}/${cnt}건 (적재/스테이징)"
 }
 
 # 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).

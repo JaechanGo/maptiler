@@ -11,7 +11,7 @@
     --style style/style.json --config server/tileserver-config.json \
     --api http://localhost:8082
 """
-import argparse, json, math, os, sqlite3, sys, unicodedata, urllib.parse, urllib.request, urllib.error, pathlib
+import argparse, json, math, os, sqlite3, sys, unicodedata, urllib.parse, urllib.request, urllib.error, pathlib, subprocess, shutil
 
 R = []  # (sev, name, detail)  sev: PASS/WARN/FAIL
 ICON = {"PASS": "✓", "WARN": "△", "FAIL": "✗"}
@@ -285,6 +285,94 @@ def check_tiles(tiles_dir, style_path, config_path):
         rec("PASS", "스타일↔타일 정합", f"{len([L for L in style['layers'] if L.get('source-layer')])}개 레이어 source-layer 일치")
 
 
+# ── H. PostGIS 동적 레이어(martin /dyn 백본) — 적재 완전성·인덱스 무결성 (--pg) ──
+#   위 SQLite/타일/스타일 검사는 PostGIS 를 전혀 보지 않는다. parcel/building 적재가 교착·중단으로
+#   미완(예: parcel 5.6M/≈39.6M)·무인덱스(--fresh 가 DROP 후 재생성 전 중단)여도 PASS 로 통과하던
+#   사각을 메운다. 손상 DB 가 그대로 pg_dump→폐쇄망 번들로 새어나가는 것을 빌드 단계에서 차단.
+#   접속: host psql(PGPORT 기본 5433) 우선 → docker exec <PG_CONTAINER> 폴백. --pg 일 때만 동작.
+PG_SIDO = ['11','26','27','28','29','30','31','36','41','43','44','46','47','48','50','51','52']  # 17 시도
+
+def _pg_runner():
+    """psql 질의 실행기 반환: host psql(우선) → docker exec 폴백. 둘 다 불가면 None.
+    반환 q(sql) -> list[list[str]] (탭분리 행); psql 오류 시 RuntimeError."""
+    env = {**os.environ}
+    for k, v in (("PGHOST","localhost"),("PGPORT","5433"),("PGUSER","cuvia"),
+                 ("PGDATABASE","cuvia"),("PGPASSWORD","cuvia")):
+        env.setdefault(k, v)
+    args = ["-tAX", "-F", "\t", "-v", "ON_ERROR_STOP=1"]
+    container = os.environ.get("PG_CONTAINER", "server-postgis-1")
+    def mk(prefix, use_env):
+        def q(sql, timeout=60):   # timeout=hang 방어(psql/docker 미응답 시 무한대기 방지). TimeoutExpired 는 호출부 except 가 처리.
+            p = subprocess.run(prefix + args + ["-c", sql], capture_output=True, text=True,
+                               env=(env if use_env else None), timeout=timeout)
+            if p.returncode != 0:
+                raise RuntimeError((p.stderr or p.stdout).strip()[:200])
+            return [ln.split("\t") for ln in p.stdout.splitlines() if ln != ""]
+        return q
+    if shutil.which("psql"):                                  # 1) host psql (build host 표준)
+        q = mk(["psql"], True)
+        try: q("SELECT 1", timeout=10); return q
+        except Exception: pass
+    if shutil.which("docker"):                                # 2) 컨테이너 폴백
+        q = mk(["docker","exec","-e",f"PGPASSWORD={env['PGPASSWORD']}",container,
+                "psql","-U",env["PGUSER"],"-d",env["PGDATABASE"]], False)
+        try: q("SELECT 1", timeout=10); return q
+        except Exception: pass
+    return None
+
+
+def check_postgis():
+    q = _pg_runner()
+    if q is None:
+        rec("FAIL", "PostGIS 접속", "psql/docker 로 PostGIS 접속 불가 — compose --profile postgis 기동 확인(--pg 요청됨)")
+        return
+    def scalar(sql):
+        try:
+            r = q(sql); return int(r[0][0]) if r and r[0] and r[0][0] != "" else 0
+        except Exception:
+            return None  # 테이블 없음/조회 실패
+
+    p_min = int(os.environ.get("PARCEL_MIN", 30_000_000))    # package.sh 게이트와 동일 임계(우회 가능)
+    b_min = int(os.environ.get("BUILDING_MIN", 5_000_000))
+    a_min = int(os.environ.get("ADDRESS_MIN", 5_000_000))
+
+    # 1) 적재 행수 밴드 — 부분적재/dedup 붕괴를 전국 합계로 포착(임계 미만=FAIL).
+    for tbl, lo, env_key in (("parcel", p_min, "PARCEL_MIN"), ("building", b_min, "BUILDING_MIN"),
+                             ("address", a_min, "ADDRESS_MIN")):
+        n = scalar(f"SELECT count(*) FROM {tbl}")
+        if n is None:
+            rec("FAIL", f"{tbl} 행수", "조회 실패(테이블 없음·미적재?)")
+        else:
+            rec("FAIL" if n < lo else "PASS", f"{tbl} 행수",
+                f"{n:,} (임계 {lo:,}; 우회 {env_key}=0)" + ("" if n >= lo else " — 적재 미완 의심"))
+    poic = scalar("SELECT count(*) FROM poi")
+    if poic is not None:
+        rec("WARN" if poic == 0 else "PASS", "poi 행수", f"{poic:,}" + (" — 0건(POI 미적재?)" if poic == 0 else ""))
+
+    # 2) 파티션 커버리지 — 17 시도가 모두 비어있지 않아야(교착 중단 시 일부 파티션만 적재됨).
+    for tbl in ("parcel", "building"):
+        try:
+            have = {r[0].strip(): int(r[1]) for r in q(f"SELECT sido_cd, count(*) FROM {tbl} GROUP BY sido_cd")
+                    if len(r) >= 2 and r[1] != ""}
+            empty = [s for s in PG_SIDO if have.get(s, 0) == 0]
+            if empty: rec("FAIL", f"{tbl} 파티션 커버리지", f"빈 시도 {len(empty)}/17: {','.join(empty)} — 부분적재/중단 의심")
+            else:     rec("PASS", f"{tbl} 파티션 커버리지", "17/17 시도 적재")
+        except Exception as e:
+            rec("FAIL", f"{tbl} 파티션 커버리지", f"조회 실패 {str(e)[:80]}")
+
+    # 3) 핵심 인덱스 유효성 — --fresh 가 DROP 후 재생성 전 중단되면 누락 → martin /dyn 이 seq-scan(타임아웃).
+    need = ["parcel_geom_gix", "parcel_pnu_idx", "building_geom_gix"]
+    try:
+        rows = q("SELECT c.relname, i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid "
+                 "WHERE c.relname IN ('parcel_geom_gix','parcel_pnu_idx','building_geom_gix')")
+        valid = {r[0].strip() for r in rows if len(r) >= 2 and r[1].strip() in ("t", "true")}
+        miss = [ix for ix in need if ix not in valid]
+        if miss: rec("FAIL", "PostGIS 핵심 인덱스", f"누락/무효 {','.join(miss)} — --fresh 적재 중단 정황, load_parcel/building 재실행")
+        else:    rec("PASS", "PostGIS 핵심 인덱스", f"{len(need)}종 유효(geom GiST·parcel pnu)")
+    except Exception as e:
+        rec("FAIL", "PostGIS 핵심 인덱스", f"조회 실패 {str(e)[:80]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
@@ -292,6 +380,8 @@ def main():
     ap.add_argument("--style"); ap.add_argument("--config")
     ap.add_argument("--taxonomy", default=str(pathlib.Path(__file__).resolve().parents[1] / "style" / "poi-taxonomy.json"))
     ap.add_argument("--api", default="http://localhost:8082")
+    ap.add_argument("--pg", action="store_true",
+                    help="PostGIS 동적 레이어(parcel/building/address/poi) 적재 완전성·파티션·인덱스 검사. 빌드호스트 compose postgis 필요.")
     a = ap.parse_args()
 
     print(f"QC: {a.db}")
@@ -302,6 +392,9 @@ def main():
         rec("FAIL", "DB", f"{a.db} 없음")
     check_golden(a.api, a.db)
     check_tiles(a.tiles, a.style, a.config)
+    if a.pg:
+        print("PostGIS 동적 레이어 검사 (--pg)")
+        check_postgis()
 
     n_fail = sum(s == "FAIL" for s, _, _ in R); n_warn = sum(s == "WARN" for s, _, _ in R)
     print("=" * 64)

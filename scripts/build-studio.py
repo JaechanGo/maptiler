@@ -606,10 +606,12 @@ def TARGETS():
         # (PostGIS 적재는 빌드호스트에서 compose --profile postgis 기동 후 실행.)
         "load_postgis": dict(label="PostGIS 적재 (필지·건물·POI·시설·행정구역)", dep="geocode",
             cmd=["bash", str(ROOT/"scripts/postgis/load-all.sh")]),
-        "qc": dict(label="QC 검증", dep=None,
+        # dep=load_postgis: PostGIS 적재 후 실행 보장 + 적재 실패 시 qc 스킵(거짓 PASS 차단). qc 는 always=True 라
+        #   적재가 최신이면 자동 재사용(강제 재적재 없음). --pg 로 parcel/building 적재 완전성·인덱스까지 검증.
+        "qc": dict(label="QC 검증", dep="load_postgis",
             cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
                  "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
-                 "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082"]),
+                 "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082", "--pg"]),
         "package": dict(label="폐쇄망 번들 패키징", dep=None,
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
