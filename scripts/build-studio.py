@@ -18,9 +18,9 @@ PORT = int(os.environ.get("PORT", "8090"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))   # 미리보기가 스타일을 읽어올 tileserver 포트
 STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "8091")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
-# 기본은 로컬 전용(127.0.0.1). 외부 노출이 필요할 때만 HOST=0.0.0.0 으로 명시. 인증이 없으므로
-# 0.0.0.0 바인딩 시 같은 LAN의 누구나 빌드 실행/업로드가 가능함을 운영자가 인지해야 함.
-HOST = os.environ.get("HOST", "127.0.0.1")
+# 기본 외부(LAN) 노출(0.0.0.0). 인증이 없으므로 같은 LAN의 누구나 빌드 실행/업로드가 가능함을
+# 운영자가 인지해야 함 — 신뢰망에서만 사용하고, 로컬 전용이 필요하면 HOST=127.0.0.1 로 명시.
+HOST = os.environ.get("HOST", "0.0.0.0")   # 기본 외부(LAN) 노출 — 무인증 콘솔이므로 신뢰망에서만 사용. 로컬 전용은 HOST=127.0.0.1
 MAX_CTRL = 256 * 1024                                           # 제어 API(JSON) 본문 상한
 # 업로드는 raw 바디 스트리밍(청크→디스크)이라 용량 상한 없음 — 대용량 내비DB/건물DB 웹 업로드 지원.
 DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·images·builds.json)

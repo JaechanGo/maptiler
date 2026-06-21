@@ -17,7 +17,7 @@ import style_objects
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
-HOST = os.environ.get("HOST", "127.0.0.1")
+HOST = os.environ.get("HOST", "0.0.0.0")   # 기본 외부(LAN) 노출. 로컬 전용은 HOST=127.0.0.1 (LAN 노출 시 STUDIO_TOKEN 권장)
 PORT = int(os.environ.get("PORT", "8091"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))            # 미리보기·재시작 대상 tileserver 포트
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
