@@ -13,7 +13,7 @@ dedup(is_primary)이 이미 geocode.sqlite `places`(lon/lat=4326)에 다 들어�
 연결은 libpq 환경변수(PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD). 기본 cuvia/cuvia@localhost:5433(맵 전용 컨테이너 호스트포트).
   PGPASSWORD=... scripts/postgis/load_geocode.py [--db ~/geocode-build/geocode.sqlite]
 """
-import argparse, csv, os, subprocess, sys, tempfile, time
+import argparse, csv, os, re, subprocess, sys, tempfile, time
 
 COLS = ["kind","name","subtype","sido","sigungu","emd","road","road_norm","main_no","sub_no",
         "bld","postal","haeng_dong","bd_mgt_sn","bcode","hcode","phone","opened","jibun",
@@ -38,8 +38,15 @@ def export_csv(db_path, csv_path):
 
 
 # 모든 컬럼 TEXT 스테이징 → INSERT 에서 캐스팅(빈칸=NULL). lon/lat 있으면 geom 생성.
+# 무손실 적재 가속(load_parcel/building 과 동일 전략) — 결과 불변, 속도만 단축:
+#  · synchronous_commit=off: 적재 세션 커밋 fsync 대기 제거(벌크 재적재라 안전).
+#  · 대량 INSERT(1,600만+) 전 2차 인덱스 DROP → 적재 후 일괄 재생성. 살아있는 trgm GIN·GiST 의
+#    행단위 증분이 최대 병목 — 벌크빌드가 훨씬 빠르고 인덱스도 덜 부푼다. PK(bigserial 순차)는 저렴해 유지.
+#  · ※스키마(10-base / 11-address-search / 30-poi)와 동기 유지 — 인덱스 추가/변경 시 아래 DROP/CREATE 목록도 갱신.
 SQL = r"""
 \set ON_ERROR_STOP on
+SET synchronous_commit = off;
+
 DROP TABLE IF EXISTS _stg_places;
 CREATE UNLOGGED TABLE _stg_places (
   kind text, name text, subtype text, sido text, sigungu text, emd text,
@@ -51,6 +58,18 @@ CREATE UNLOGGED TABLE _stg_places (
 
 TRUNCATE address;
 TRUNCATE poi;
+
+-- 적재용 2차 인덱스 DROP (PK address_pkey/poi_pkey 는 유지)
+DROP INDEX IF EXISTS address_geom_gix;
+DROP INDEX IF EXISTS address_kind_idx;
+DROP INDEX IF EXISTS address_source_idx;
+DROP INDEX IF EXISTS address_search_trgm;
+DROP INDEX IF EXISTS address_road_addr_idx;
+DROP INDEX IF EXISTS address_addr_geom_gix;
+DROP INDEX IF EXISTS address_region_idx;
+DROP INDEX IF EXISTS poi_geom_gix;
+DROP INDEX IF EXISTS poi_kind_idx;
+DROP INDEX IF EXISTS poi_primary_idx;
 
 INSERT INTO address(kind,name,subtype,sido,sigungu,emd,road,road_norm,main_no,sub_no,bld,postal,
                     haeng_dong,bd_mgt_sn,bcode,hcode,phone,opened,jibun,cat1,cat2,source,is_primary,geom)
@@ -69,6 +88,23 @@ FROM _stg_places
 WHERE kind IN ('biz','facility') AND nullif(lon,'') IS NOT NULL AND nullif(lat,'') IS NOT NULL;
 
 DROP TABLE _stg_places;
+
+-- 인덱스 일괄 재생성(대량 적재 후). trgm GIN 은 maintenance_work_mem 에 가장 민감.
+SET maintenance_work_mem = '__MWM__';
+SET max_parallel_maintenance_workers = __MPW__;   -- btree 한정 가속(GIN/GiST 는 무시)
+CREATE INDEX IF NOT EXISTS address_geom_gix      ON address USING gist (geom);
+CREATE INDEX IF NOT EXISTS address_kind_idx      ON address (kind);
+CREATE INDEX IF NOT EXISTS address_source_idx    ON address (source);
+CREATE INDEX IF NOT EXISTS address_search_trgm   ON address USING gin (search_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS address_road_addr_idx ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
+CREATE INDEX IF NOT EXISTS address_addr_geom_gix ON address USING gist (geom) WHERE kind = 'addr';
+CREATE INDEX IF NOT EXISTS address_region_idx    ON address (sigungu, emd);
+CREATE INDEX IF NOT EXISTS poi_geom_gix          ON poi USING gist (geom);
+CREATE INDEX IF NOT EXISTS poi_kind_idx          ON poi (kind);
+CREATE INDEX IF NOT EXISTS poi_primary_idx       ON poi (is_primary);
+RESET maintenance_work_mem;
+RESET max_parallel_maintenance_workers;
+
 ANALYZE address; ANALYZE poi;
 SELECT 'address' AS t, count(*) FROM address UNION ALL SELECT 'poi', count(*) FROM poi;
 """
@@ -95,7 +131,14 @@ def main():
         n = export_csv(args.db, csv_path)
         print(f"      {n:,} rows → {csv_path} ({os.path.getsize(csv_path)/1e6:.0f}MB)", file=sys.stderr)
         print(f"[2/2] PostGIS 적재(address + poi) …", file=sys.stderr)
-        sql = SQL.replace("__CSV__", csv_path.replace("'", "''"))
+        # 인덱스 재생성 튜닝(env). MWM 은 잘못된 값이면 기본값으로(SQL 주입 방지), MPW 는 int 강제.
+        mwm = os.environ.get("GEOCODE_MAINT_MEM", "2GB")
+        if not re.fullmatch(r"\d+[kKmMgG][bB]?", mwm):
+            mwm = "2GB"
+        mpw = str(int(os.environ.get("GEOCODE_MAINT_WORKERS", "4")))
+        sql = (SQL.replace("__CSV__", csv_path.replace("'", "''"))
+                  .replace("__MWM__", mwm)
+                  .replace("__MPW__", mpw))
         r = subprocess.run(["psql", "-v", "ON_ERROR_STOP=1"], input=sql, text=True, env=env)
         if r.returncode != 0:
             sys.exit("✗ psql 적재 실패")

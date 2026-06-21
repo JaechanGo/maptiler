@@ -43,5 +43,8 @@ CREATE TABLE IF NOT EXISTS building_default PARTITION OF building DEFAULT;
 
 CREATE INDEX IF NOT EXISTS building_geom_gix ON building USING gist (geom);
 CREATE INDEX IF NOT EXISTS building_pnu_idx  ON building (pnu);
--- ※UNIQUE 미적용: 건물 고유키=건물관리번호(bld_mgt_no)인데 현 로더(10-gen-buildings 휴리스틱)가 미적재.
---   PNU 는 한 필지에 다건물이라 고유키 아님. bld_mgt_no 적재 확정 시 UNIQUE(sido_cd,bld_mgt_no) 추가 가능.
+-- 중복방어(opt-in) — 고유키=건물관리번호(bld_mgt_no). 부분 UNIQUE 라 미적재(NULL)면 빈 인덱스(무비용·무효과),
+--   load_building.sh --mgt-field <필드> 로 적재하면 ON CONFLICT (sido_cd,bld_mgt_no) 의 arbiter 가 됨.
+--   필드명은 소스마다 달라 추측 금지 — ogrinfo -so 로 확인(AL_D010 은 A코드 필드; A16=높이·A26=층수만 검증됨).
+--   PNU 는 한 필지에 다건물이라 고유키 아님.
+CREATE UNIQUE INDEX IF NOT EXISTS building_mgt_uix ON building (sido_cd, bld_mgt_no) WHERE bld_mgt_no IS NOT NULL;
