@@ -1792,6 +1792,9 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .bar>i{display:block;height:100%;width:0;background:var(--ac);transition:width .3s}
  .tcard{padding:11px 13px;border:1px solid var(--bd);border-radius:9px;margin-bottom:9px}
  .tcard .h{display:flex;justify-content:space-between;align-items:center;font-size:13px}
+ .tcard .hr{display:flex;align-items:center;gap:7px}
+ .retry{display:none;background:#1a2230;border:1px solid var(--bd);color:#cfe3ff;border-radius:6px;font-size:11px;padding:2px 8px;cursor:pointer}
+ .retry:hover{border-color:var(--ac)} .retry:disabled{opacity:.45;cursor:default}
  .st{font-size:11px;padding:2px 8px;border-radius:99px;background:#0c1018;color:var(--mut)}
  .st.running{color:#7fd1ff} .st.done{color:#7ee0a0} .st.error{color:#ff8585} .st.queued{color:#d9c07a} .st.skipped{color:#9aa3ad} .st.fresh{color:#7ee0a0}
  .tb{display:inline-block;white-space:nowrap;font-size:10px;border-radius:6px;padding:1px 6px;margin-left:4px}
@@ -1888,7 +1891,7 @@ function loadTargets(){return fetch('/api/targets').then(r=>r.json()).then(d=>{
 let _tt; function refreshTargetsSoon(){clearTimeout(_tt);_tt=setTimeout(loadTargets,800);}   // 빌드 종료 후 배지·체크 갱신(디바운스)
 loadTargets();
 function card(kind,label){if(cards[kind])return;const el=document.createElement('div');el.className='tcard';
- el.innerHTML=`<div class=h><span>${label||kind}</span><span class=st id=st_${kind}>대기</span></div><div class=bar><i id=bar_${kind}></i></div>`;
+ el.innerHTML=`<div class=h><span>${label||kind}</span><span class=hr><button class=retry id=rt_${kind} onclick="retry('${kind}')" title="이 단계만 다시 실행 — 완료된 상위 단계는 재사용(건너뜀)">↻ 재시도</button><span class=st id=st_${kind}>대기</span></span></div><div class=bar><i id=bar_${kind}></i></div>`;
  $('#cards').appendChild(el);cards[kind]=el;bars[kind]=$('#bar_'+kind);sts[kind]=$('#st_'+kind);}
 const LBL={};
 function lbl(k){const t=TARGETS.find(x=>x.kind===k);return t?t.label:k}
@@ -1900,10 +1903,12 @@ function updateBusy(){
  const bb=buildBusy(), cb=collectBusy(), any=bb||cb;
  const run=$('#run'); if(run){run.disabled=any; run.textContent=bb?'⏳ 빌드 중…':'빌드 시작';}   // '빌드 중…'은 실제 빌드 때만(수집 중엔 '빌드 시작'·비활성)
  const fa=$('#forceAll'); if(fa)fa.disabled=any;
+ document.querySelectorAll('.retry').forEach(b=>{b.disabled=any;});   // 빌드/수집 중엔 재시도 비활성(중복 트리거 방지)
  const col=$('#collectBtn'); if(col){col.disabled=any; col.textContent=cb?'⏳ 진행 중…':'⬇ 자동수집 시작 (순차)';}
 }
 function setStatus(k,s,p){card(k,lbl(k));if(p!=null)bars[k].style.width=Math.round(p*100)+'%';
- if(s){JOB[k]=s;const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;}}
+ if(s){JOB[k]=s;const m={queued:'대기',running:'진행중',done:'완료',error:'오류',skipped:'건너뜀',fresh:'↻ 최신(재사용)'};sts[k].textContent=m[s]||s;sts[k].className='st '+s;
+   const rt=$('#rt_'+k); if(rt)rt.style.display=(s==='error'||s==='skipped')?'inline-block':'none';}}   // 실패/건너뜀 단계에만 재시도 노출
 function logln(t){const p=$('#log');p.textContent+=t+'\n';p.scrollTop=p.scrollHeight}
 const es=new EventSource('/api/events');
 es.onmessage=e=>{const d=JSON.parse(e.data);
@@ -2103,10 +2108,9 @@ function runBuild(t){
    logln('▶ 큐: '+((d.queued||[]).map(lbl).join(', ')||'없음 — 빌드할 변경 없음'));loadCollect();optBuild=false;updateBusy();}).catch(e=>{optBuild=false;updateBusy();logln('✗ 빌드 시작 실패: '+e);});}
 // 빌드 시작 시엔 '빌드 대상' 체크박스를 건드리지 않는다(사용자 선택 유지). 타겟 목록 갱신(=fresh 자동 체크해제)은
 // 모든 잡이 끝난 뒤(es.onmessage 의 !anyBusy())에만 1회 수행 → 진행 중 초기화/중간 재렌더 방지.
-$('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
- if(!t.length)return alert('빌드할 대상이 없습니다.\n(모두 최신이면, 다시 빌드할 항목을 체크하거나 [강제 재빌드(전체)]를 누르세요)');
+// 사전점검(소스 누락/검증) → 빌드 — #run(체크된 다수)·retry(단일 단계) 공용 경로
+function triggerBuild(t){
  optBuild=true; updateBusy();   // 즉시 빌드-비활성화 — 사전점검·확인 대화 중 중복 클릭/타겟 체크 초기화 방지
- // 사전점검 — 필요한 소스 데이터 누락/검증실패면 경고 팝업(그래도 진행 가능)
  fetch('/api/build/check',{method:'POST',body:JSON.stringify({targets:t})}).then(r=>r.json()).then(c=>{
    const miss=c.missing||[],inval=c.invalid||[];
    if(miss.length||inval.length){
@@ -2118,7 +2122,12 @@ $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:chec
      logln('⚠ 누락 무시하고 진행: '+[...miss.map(m=>m.name),...inval.map(m=>m.name)].join(', '));
    }
    runBuild(t);
- }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);else{optBuild=false;updateBusy();}});};
+ }).catch(e=>{if(confirm('소스 사전점검 실패('+e+').\n그래도 빌드를 진행할까요?'))runBuild(t);else{optBuild=false;updateBusy();}});}
+$('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:checked')].map(x=>x.value);
+ if(!t.length)return alert('빌드할 대상이 없습니다.\n(모두 최신이면, 다시 빌드할 항목을 체크하거나 [강제 재빌드(전체)]를 누르세요)');
+ triggerBuild(t);};
+// 단일 단계 재시도 — 그 단계만 명시 빌드(의존성은 fresh면 자동 건너뜀). 오류/건너뜀 카드의 [↻ 재시도] 버튼.
+function retry(kind){if(anyBusy())return;logln('↻ 재시도: '+lbl(kind)+' (완료 단계는 재사용)');triggerBuild([kind]);}
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;

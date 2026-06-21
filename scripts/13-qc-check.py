@@ -164,12 +164,18 @@ def _load_geocoder(db_path):
 
 
 def _golden_check(get_top, mode):
-    """get_top(q)->top문자열. 전건 일치 PASS, 오답 FAIL. (인프로세스/HTTP 공용)"""
-    ok = 0
+    """get_top(q)->top문자열(없으면 ""). None=조회불가(연결실패). 전건 일치 PASS, 오답 FAIL. (인프로세스/HTTP 공용)"""
+    rows = []
     for q, must, must2 in GOLDEN:
         top = get_top(q)
         if top is None:   # 조회 자체 불가(연결실패 등) → 호출부가 처리
             return None
+        rows.append((q, must, must2, top))
+    if not any(t for _, _, _, t in rows):   # 전건 0응답 → 미적재/미완성 DB(데이터 회귀 아님) → 스킵(WARN)
+        rec("WARN", "골든 질의", f"지오코드 DB 미적재/미완성(골든 {len(rows)}건 0응답) — 회귀검사 스킵 ({mode})")
+        return "skip"
+    ok = 0
+    for q, must, must2, top in rows:
         hit = bool(top) and must in top and (must2 is None or must2 in top)
         ok += hit
         if not hit:
