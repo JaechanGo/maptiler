@@ -72,10 +72,16 @@ load_one() {
   #   명시 17 시도 외(=parcel_default 로 라우팅되는 비정상 코드)는 단일 sentinel 0 으로 묶어 default 도 직렬화.
   # INSERT 를 CTE+RETURNING 으로 감싸 '실제 적재(inserted)' 건수를 'INS=' 접두로 출력 → dedup(ON CONFLICT)이
   # 삼킨 양이 staged 대비 보이게(가시화). advisory lock SELECT 의 void 출력은 grep 'INS=' 로 무시.
-  # ON_ERROR_STOP+pipefail 이라 psql SQL 오류 시 substitution 실패→set -e 즉시 중단(fail-fast 유지).
-  local ins
-  ins=$(psql -v ON_ERROR_STOP=1 -q -t -A -c "
+  # ★ psql 출력+stderr 를 통째 캡처하고 psql 종료코드를 '직접' 검사한다.
+  #   (예전: ins=$(psql … | grep -oE 'INS='|cut) — grep 무매치 시 pipefail+set -e 로 적재 전체가
+  #    '에러 메시지 없이' 죽어 원인이 가려졌다. psql 성공인데 grep 무매치여도 마찬가지로 오인 중단.)
+  #   진짜 SQL 오류면 메시지를 그대로 노출하고 return 1(워커 실패→wait -n→fail-fast 유지). grep 은
+  #   캡처 문자열에서만 돌리고 무매치는 ins=0 으로 흡수 → '가시화 실패'가 '적재 실패'로 둔갑하지 않게.
+  local out ins
+  if ! out=$(psql -v ON_ERROR_STOP=1 -q -t -A -c "
     BEGIN;
+    SET LOCAL statement_timeout = 0;   -- 같은 파티션 직렬화는 advisory lock 대기를 '의도적으로' 시킨다.
+    SET LOCAL lock_timeout = 0;        -- 상속된 statement/lock_timeout 이 대기 워커를 죽이지 않게(트랜잭션 한정).
     SELECT pg_advisory_xact_lock(4001, k) FROM (
       SELECT DISTINCT CASE
                WHEN left(pnu,2) IN ('11','26','27','28','29','30','31','36','41','43','44','46','47','48','50','51','52')
@@ -94,7 +100,13 @@ load_one() {
       ON CONFLICT (sido_cd, pnu) DO NOTHING
       RETURNING 1
     ) SELECT 'INS='||count(*) FROM ins;
-    COMMIT;" | grep -oE 'INS=[0-9]+' | cut -d= -f2)
+    COMMIT;" 2>&1); then
+    echo "  ✗ [$idx/${N}] $lyr INSERT 실패 — 적재 중단(아래 psql 오류):" >&2
+    echo "      (deadlock=교착·canceling statement…timeout=직렬대기 타임아웃·duplicate key=arbiter 등 메시지 확인)" >&2
+    printf '%s\n' "$out" | sed 's/^/      /' >&2
+    return 1
+  fi
+  ins=$(printf '%s' "$out" | grep -oE 'INS=[0-9]+' | cut -d= -f2 || true)
   ins=${ins:-0}
   local cnt
   cnt=$(psql_q -c "SELECT count(*) FROM ${stg} WHERE geom IS NOT NULL AND pnu IS NOT NULL;")
