@@ -71,7 +71,7 @@ STUDIO_TOKEN=$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → htt
 ### 단일 도메인 게이트웨이 (공개망 권장)
 
 `server/docker-compose.yml` 의 `gateway`(nginx) 가 모든 서비스를 한 포트로 통합한다:
-`/`→demo · `/styles /data /fonts`→tileserver · `/geocode /reverse`→geocode. 데모 JS는 게이트웨이
+`/` `/info`→연동 가이드(demo/guide.html) · `/demo/`→인터랙티브 데모 · `/styles /data /fonts /sprites /files`→tileserver · `/geocode /reverse`→geocode · `/dyn`→martin. 데모 JS는 게이트웨이
 경유(80/443/8088 포트)면 자동으로 same-origin(상대경로)으로 호출하므로 CORS·다중포트 노출이 불필요하다.
 
 ```bash

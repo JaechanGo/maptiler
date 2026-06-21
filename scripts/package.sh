@@ -109,6 +109,22 @@ if [ ! -s "$GLYPH_REG" ]; then
 fi
 echo "  glyphs OK — KlokanTech Noto Sans Regular/Bold 포함"
 
+# 연동 가이드(tileserver frontPage + 게이트웨이 /·/info) — demo/guide.html 누락 시 :8080/ frontPage 가
+# 빈 디렉토리로 깨지고 게이트웨이 /·/info 가 404 가 되는데 /health 는 200(과거 frontPage 사고류) → 패키징에서 차단.
+# 특히 클론 빌드호스트엔 git untracked 파일이 존재하지 않으므로(이 파일이 커밋 안 되면 번들에서 조용히 누락) 게이트 필수.
+GUIDE="$ROOT/demo/guide.html"
+if [ ! -s "$GUIDE" ]; then
+  echo "오류: demo/guide.html 가 없거나 0바이트 — 연동 가이드(:8080/ · 게이트웨이 /·/info)가 깨집니다." >&2
+  echo "  · git 에 커밋됐는지 확인하세요 — 클론 빌드호스트엔 untracked 파일이 없습니다." >&2
+  exit 1
+fi
+# frontPage 는 tileserver-gl 이 Handlebars 로 컴파일 → 이중 중괄호(mustache) 토큰이 있으면 렌더가 깨진다. 차단.
+if grep -Fq '{{' "$GUIDE" || grep -Fq '}}' "$GUIDE"; then
+  echo "오류: demo/guide.html 에 Handlebars 이중 중괄호 토큰이 있습니다 — frontPage 렌더가 깨집니다. 제거 후 재패키징." >&2
+  exit 1
+fi
+echo "  guide.html OK — 연동 가이드 포함(Handlebars 토큰 없음)"
+
 # geocode 서비스가 참조하는 통합 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
 if [ ! -s "$GEOCODE_DB" ]; then
   echo "오류: $GEOCODE_DB 가 없습니다 — scripts/09-gen-geocode.py 를 먼저 실행하세요." >&2

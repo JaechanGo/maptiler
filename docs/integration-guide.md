@@ -66,12 +66,12 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 ```js
 // 지오코딩: 이름/주소 → 좌표
 const r = await fetch(`http://<서버>:8082/geocode?q=${encodeURIComponent('증미역')}`).then(r=>r.json());
-// r.results[0] = { name:'증미역', type:'station', lon:126.8618, lat:37.5575 }
+// r.results[0] = { name:'증미역', kind:'station', lon:126.8618, lat:37.5575, address:{…} }
 map.flyTo({ center: [r.results[0].lon, r.results[0].lat], zoom: 16 });
 
 // 역지오코딩: 좌표 → 최근접 장소 + 포함 영역(행정동/지번; areas 데이터 적재 시)
 const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`).then(r=>r.json());
-// rev.nearest = [{name,type,dist_m,...}], rev.areas = [{name,type}]
+// rev.nearest = [{name,kind,dist_m,...}], rev.areas = [{name,type,code}]
 ```
 
 - 검색 대상: 역(전국 ~1,400) · 지명 · 아파트 동 · 도로명 · POI 등 약 67만 건(OSM 기반). 국가 상가정보 CSV(`--poi-csv`)·행정경계 GeoJSON(`--areas-geojson`)로 확장.

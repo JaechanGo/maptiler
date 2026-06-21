@@ -4,9 +4,11 @@
       "root": "/data",
       "fonts": "glyphs",
       "styles": "styles",
-      "mbtiles": "tiles"
+      "mbtiles": "tiles",
+      "files": "files"
     },
-    "serveAllFonts": true
+    "serveAllFonts": true,
+    "frontPage": "demo/guide.html"
   },
   "styles": {
     "cuvia": {

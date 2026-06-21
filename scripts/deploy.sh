@@ -150,10 +150,20 @@ if ! style_smoke; then
 fi
 echo "스타일 실로드 확인 완료"
 
+# 연동 가이드(frontPage) 스모크 — :8080/ 가 guide.html 을 서빙하는지 확인. /health·/styles 만 보는 기존 스모크는
+# frontPage 깨짐(빈 디렉토리/누락)을 못 잡으므로 랜딩을 직접 어서션한다. 가이드는 부가기능이라 실패해도 지도 배포는
+# 막지 않고 경고만(빌드단계 package.sh 의 guide.html 게이트가 1차 차단). 마운트/frontPage 오설정 조기 발견용.
+if curl -sf "$TS/" 2>/dev/null | grep -q 'styles/cuvia/style.json'; then
+  echo "  ✓ 연동 가이드 랜딩 확인: $TS/ (frontPage=demo/guide.html)"
+else
+  echo "  경고: $TS/ 가 연동 가이드를 서빙하지 않습니다 — compose 의 ../demo:/data/demo 마운트·frontPage 설정 확인(지도 자체는 정상)." >&2
+fi
+
 # 게이트웨이 외부 포트 — 환경변수 우선, 없으면 server/.env, 그래도 없으면 80.
 GW_PORT="${GATEWAY_PORT:-$(sed -n 's/^GATEWAY_PORT=//p' "$ROOT/server/.env" 2>/dev/null | tail -1 | tr -dc 0-9)}"
 GW_PORT="${GW_PORT:-80}"; GW_SFX=""; [ "$GW_PORT" = "80" ] || GW_SFX=":$GW_PORT"
 echo "기동 완료 — 외부 노출은 게이트웨이 한 포트(GATEWAY_PORT=$GW_PORT):"
+echo "  가이드  http://<이서버IP>${GW_SFX}/         (연동 가이드 · /info 동일 · :8080/ 직결도 동일)"
 echo "  데모    http://<이서버IP>${GW_SFX}/demo/"
 echo "  스타일  http://<이서버IP>${GW_SFX}/styles/cuvia/style.json"
 echo "  지오코딩 http://<이서버IP>${GW_SFX}/geocode?q=서울시청"
