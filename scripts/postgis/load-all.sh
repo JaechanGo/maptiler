@@ -49,15 +49,27 @@ if has geocode; then
                 || echo "  (건너뜀) geocode.sqlite 없음: $GDB (09-gen-geocode.py 먼저)"
 fi
 
-# 5) 공공시설 CSV — staged/facility_src/<kind>.csv (kind=파일명)
+# 5) 공공시설 — staged/facility_src/ 아래 (a)평면 CSV(<kind>.csv) 또는 (b)종류별 하위폴더(<kind>/).
+#    collect(datago_filedown)는 경찰=staged/facility_src/police/, 소방=fire_station/(zip추출본) 으로 떨군다.
+#    load_facility.py 는 디렉토리 인자를 받으면 하위 최신 CSV 를 자동 선택.
 if has facility; then
   FSRC="$BUILD_HOME/staged/facility_src"
   if [ -d "$FSRC" ]; then
-    for csvf in "$FSRC"/*.csv; do
-      [ -e "$csvf" ] || continue
-      kind="$(basename "$csvf" .csv)"
-      run python3 "$HERE/load_facility.py" --csv "$csvf" --kind "$kind" --source "csv:$kind"
+    found=0
+    for entry in "$FSRC"/*; do
+      [ -e "$entry" ] || continue
+      if [ -f "$entry" ]; then
+        case "$entry" in *.csv) kind="$(basename "$entry" .csv)"; src="csv:$kind";; *) continue;; esac
+      elif [ -d "$entry" ]; then
+        kind="$(basename "$entry")"
+        find "$entry" -iname '*.csv' -print -quit | grep -q . \
+          || { echo "  (건너뜀) $kind: CSV 없음 ($entry)"; continue; }
+        src="dir:$kind"
+      else continue; fi
+      found=1
+      run python3 "$HERE/load_facility.py" --csv "$entry" --kind "$kind" --source "$src"
     done
+    [ "$found" = 1 ] || echo "  (건너뜀) 적재할 공공시설 CSV/폴더 없음: $FSRC"
   else echo "  (건너뜀) 공공시설 CSV 폴더 없음: $FSRC"; fi
 fi
 
