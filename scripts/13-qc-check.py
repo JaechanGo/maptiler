@@ -285,6 +285,91 @@ def check_tiles(tiles_dir, style_path, config_path):
         rec("PASS", "스타일↔타일 정합", f"{len([L for L in style['layers'] if L.get('source-layer')])}개 레이어 source-layer 일치")
 
 
+# ── G2. maplibre style-spec 실검증 (tileserver-gl 실로드 동치) ────────
+#   실측 사고: poi-label 의 icon-image/text-field 가 ["case",[">=",["zoom"],mz],...] 로 zoom 을 case 안에
+#   중첩(spec 은 zoom 을 step/interpolate 최상위 입력으로만 허용) → 파일수준 검사(스타일↔타일 정합)는 통과했으나
+#   폐쇄망 tileserver-gl v5.6.0 이 스타일 전체를 거부 → /styles.json=[] · /styles/<id>/style.json=404 → 지도 미표시.
+#   (베이스 mbtiles·/health 는 200 이라 deploy 가 '성공'으로 보였음.) 이 검사로 빌드 단계에서 차단한다.
+INTERP_OPS = {"interpolate", "interpolate-hcl", "interpolate-lab"}
+
+def _find_zoom_violations(style):
+    """["zoom"] 이 step/interpolate 의 최상위 입력이 아닌 위치(case/match/비교 등 안에 중첩)에 쓰인 곳을 모두 보고.
+    Node 미설치 빌드호스트에서도 동작하는 표적 회귀가드(위 사고류 직접 탐지). 반환: ["layer.group.prop", ...]."""
+    viol = []
+    def walk(node, in_curve_input, where):
+        if not isinstance(node, list) or not node:
+            return
+        op = node[0]
+        if op == "zoom":
+            if not in_curve_input:           # step/interpolate 입력 슬롯이 아니면 위반
+                viol.append(where)
+            return
+        if op == "step":                     # ["step", input, out0, stop1, out1, ...] — input(=[1])만 zoom 허용
+            for i, ch in enumerate(node[1:], 1):
+                walk(ch, i == 1, where)
+        elif op in INTERP_OPS:               # ["interpolate", type, input, ...] — input(=[2])만 zoom 허용
+            for i, ch in enumerate(node[1:], 1):
+                walk(ch, i == 2, where)
+        else:                                # 그 외 표현식의 인자에는 zoom 중첩 불허
+            for ch in node[1:]:
+                walk(ch, False, where)
+    for L in style.get("layers", []):
+        for grp in ("layout", "paint"):
+            for prop, val in (L.get(grp) or {}).items():
+                walk(val, False, f"{L.get('id')}.{grp}.{prop}")
+    return viol
+
+
+def check_style_spec(style_path):
+    if not (style_path and os.path.exists(style_path)):
+        rec("WARN", "스타일 spec 검증", "--style 미지정/없음 — 스킵"); return
+    try:
+        style = json.load(open(style_path, encoding="utf-8"))
+    except Exception as e:
+        rec("FAIL", "스타일 JSON", f"{style_path} 파싱 실패: {str(e)[:120]}"); return
+
+    # (1) 표적 회귀가드 — zoom 중첩(위 사고류). Node 없이도 항상 동작 → 폐쇄망/노드리스 빌드호스트도 보호.
+    viol = _find_zoom_violations(style)
+    if viol:
+        for v in viol[:8]:
+            rec("FAIL", "스타일 zoom 배치", f"{v}: ['zoom']이 step/interpolate 최상위 입력 아님(case 등 중첩) — spec 위반")
+        if len(viol) > 8:
+            rec("FAIL", "스타일 zoom 배치", f"… 외 {len(viol)-8}건")
+    else:
+        rec("PASS", "스타일 zoom 배치", "['zoom'] 모두 step/interpolate 최상위 입력")
+
+    # (2) 권위 검증 — @maplibre/maplibre-gl-style-spec gl-style-validate (tileserver-gl 실로드와 동치).
+    #     검증오류=FAIL(차단), npx 미설치=WARN(스킵), npx/네트워크 실패=WARN(차단 안 함). QC_SKIP_NODE_VALIDATE=1 로 끔.
+    if os.environ.get("QC_SKIP_NODE_VALIDATE"):
+        rec("WARN", "스타일 spec 검증(Node)", "QC_SKIP_NODE_VALIDATE=1 — gl-style-validate 스킵(표적 zoom 검사만 수행)"); return
+    npx = shutil.which("npx")
+    if not npx:
+        rec("WARN", "스타일 spec 검증(Node)",
+            "npx/node 미설치 — @maplibre/maplibre-gl-style-spec 전체검증 스킵(표적 zoom 검사만 수행). 빌드호스트 Node 설치 권장")
+        return
+    try:   # npx -p 형: 이 패키지는 bin 이 여러개라 'npx <pkg> <bin>' 로는 실행 불가('-p' 로 패키지 지정 후 bin 실행).
+        p = subprocess.run(
+            [npx, "-y", "-p", "@maplibre/maplibre-gl-style-spec", "gl-style-validate", style_path],
+            capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        rec("WARN", "스타일 spec 검증(Node)", "gl-style-validate 시간초과(300s) — npx 캐시/네트워크 확인(차단 안 함)"); return
+    except Exception as e:
+        rec("WARN", "스타일 spec 검증(Node)", f"실행 실패: {str(e)[:120]} (차단 안 함)"); return
+    out = (p.stdout or "").strip()
+    err = (p.stderr or "").strip()
+    if p.returncode == 0:
+        rec("PASS", "스타일 spec 검증(Node)", "gl-style-validate 통과(@maplibre/maplibre-gl-style-spec)")
+    elif out:                                # 검증 위반은 stdout 에 1건/라인 출력 → 차단(FAIL)
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        for ln in lines[:12]:
+            rec("FAIL", "스타일 spec 위반", ln[:200])
+        if len(lines) > 12:
+            rec("FAIL", "스타일 spec 위반", f"… 외 {len(lines)-12}건")
+    else:                                    # stdout 비고 비0 종료 → npx 패키지 패치/네트워크 등 도구 실패 → 차단 안 함
+        rec("WARN", "스타일 spec 검증(Node)",
+            f"gl-style-validate 미수행(code={p.returncode}) — npx 패키지 패치 실패 의심: {err[:160]} (표적 zoom 검사만 적용)")
+
+
 # ── H. PostGIS 동적 레이어(martin /dyn 백본) — 적재 완전성·인덱스 무결성 (--pg) ──
 #   위 SQLite/타일/스타일 검사는 PostGIS 를 전혀 보지 않는다. parcel/building 적재가 교착·중단으로
 #   미완(예: parcel 5.6M/≈39.6M)·무인덱스(--fresh 가 DROP 후 재생성 전 중단)여도 PASS 로 통과하던
@@ -392,6 +477,7 @@ def main():
         rec("FAIL", "DB", f"{a.db} 없음")
     check_golden(a.api, a.db)
     check_tiles(a.tiles, a.style, a.config)
+    check_style_spec(a.style)
     if a.pg:
         print("PostGIS 동적 레이어 검사 (--pg)")
         check_postgis()

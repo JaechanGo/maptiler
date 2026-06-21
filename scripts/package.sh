@@ -97,7 +97,9 @@ else
   echo "  geocode.sqlite OK — 행정경계 areas ${AREAS_N}건 포함(역지오 동 폴리곤)"
 fi
 
-# QC 게이트: 구조검사(NFC·좌표범위·시도커버리지·인덱스·스타일↔타일 정합) FAIL 시 번들 차단.
+# QC 게이트: 구조검사(NFC·좌표범위·시도커버리지·인덱스·스타일↔타일 정합) + 스타일 spec 실검증
+#   (maplibre gl-style-validate = tileserver-gl 실로드 동치 — Node 자동감지, 미설치 시 표적 zoom 검사로 폴백)
+#   FAIL 시 번들 차단 → spec 위반 스타일이 폐쇄망에서 /styles.json=[]·404 로 새어나가던 사고를 빌드 단계에서 막는다.
 # 골든질의는 13-qc 가 geocode.sqlite 를 인프로세스 직접질의(서버 불필요) → --api "" 라도 회귀 검사 실동작.
 echo "[2/4] QC 검증 게이트"
 if [ -f "$ROOT/scripts/13-qc-check.py" ]; then
