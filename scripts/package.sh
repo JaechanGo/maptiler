@@ -81,6 +81,34 @@ done
 [ -s "$ROOT/vendor/maputnik/dist/index.html" ] || \
   echo "  경고: vendor/maputnik 없음 — 번들에 오프라인 스타일 편집기 미포함(데모 동작엔 무관). 필요시 scripts/01-download-data.sh 실행." >&2
 
+# glyphs(폰트 PBF)도 vendor 와 동일 — .gitignore 라 clone 본엔 없고 01-download-data.sh [3/5] 가 채운다.
+# 누락 시 tileserver /fonts 가 400 → 라벨이 폴백으로만 렌더(한글은 localIdeographFontFamily 로 뜨지만 라틴·숫자 깨짐).
+# 베이스 mbtiles 만 보는 QC 로는 안 잡히므로(실측: glyphs 빈 채 폐쇄망 반입) 패키징 직전 자동 복구 + 게이트.
+GLYPH_REG="$ROOT/style/glyphs/KlokanTech Noto Sans Regular/0-255.pbf"
+if [ ! -s "$GLYPH_REG" ]; then
+  echo "  glyphs 누락/0바이트 → openmaptiles/fonts noto-open-sans(@${FONTS_VERSION:-v2.0}) 재다운로드 …" >&2
+  if command -v unzip >/dev/null 2>&1; then
+    _gz="$(mktemp /tmp/noto-open-sans.XXXXXX.zip)"; _gd="$(mktemp -d /tmp/noto_extract.XXXXXX)"
+    if curl -fLs -o "$_gz" "https://github.com/openmaptiles/fonts/releases/download/${FONTS_VERSION:-v2.0}/noto-open-sans.zip" \
+       && unzip -oq "$_gz" -d "$_gd"; then
+      mkdir -p "$ROOT/style/glyphs"
+      rm -rf "$ROOT/style/glyphs/KlokanTech Noto Sans Regular" "$ROOT/style/glyphs/KlokanTech Noto Sans Bold"
+      mv "$_gd/Noto Sans Regular" "$ROOT/style/glyphs/KlokanTech Noto Sans Regular" 2>/dev/null || true
+      mv "$_gd/Noto Sans Bold"    "$ROOT/style/glyphs/KlokanTech Noto Sans Bold"    2>/dev/null || true
+    fi
+    rm -rf "$_gz" "$_gd"
+  else
+    echo "  (unzip 미설치 — glyph 자동 복구 불가)" >&2
+  fi
+fi
+if [ ! -s "$GLYPH_REG" ]; then
+  echo "오류: style/glyphs 폰트(KlokanTech Noto Sans Regular/0-255.pbf)가 없습니다(자동 복구 실패)." >&2
+  echo "  · 빌드호스트: scripts/01-download-data.sh [3/5] 로 글리프를 먼저 받아두세요(unzip 필요)." >&2
+  echo "  · 누락 채로 번들되면 폐쇄망에서 /fonts 400 → 라벨 폰트가 폴백으로만 렌더됩니다." >&2
+  exit 1
+fi
+echo "  glyphs OK — KlokanTech Noto Sans Regular/Bold 포함"
+
 # geocode 서비스가 참조하는 통합 지오코딩 인덱스 — 없으면 geocode 컨테이너가 503 으로 뜨므로 차단.
 if [ ! -s "$GEOCODE_DB" ]; then
   echo "오류: $GEOCODE_DB 가 없습니다 — scripts/09-gen-geocode.py 를 먼저 실행하세요." >&2
