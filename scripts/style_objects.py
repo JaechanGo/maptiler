@@ -707,6 +707,84 @@ def extra_targets():
     return EXTRA_TARGETS
 
 
+# 배치(PLACEMENT) — 라벨/아이콘 위치 layout 속성: 세로 offset / 기준점(anchor) / 충돌 시 생략(bool).
+LABEL_ANCHORS = ["center", "left", "right", "top", "bottom",
+                 "top-left", "top-right", "bottom-left", "bottom-right"]
+# default = 해당 prop 의 MapLibre 스펙 기본값. UI 는 값 미설정 시 빈칸 대신 이 기본값을 표시한다.
+PLACEMENT_TARGETS = [
+    {"key": "off_poi",    "label": "시설 라벨 세로 위치", "layer": "poi-label",       "prop": "text-offset",   "type": "offset", "default": 0},
+    {"key": "ta_poi",     "label": "시설 라벨 기준점",    "layer": "poi-label",       "prop": "text-anchor",   "type": "anchor", "default": "center"},
+    {"key": "ia_poi",     "label": "시설 아이콘 기준점",  "layer": "poi-label",       "prop": "icon-anchor",   "type": "anchor", "default": "center"},
+    {"key": "topt_poi",   "label": "시설 라벨 충돌 시 생략",  "layer": "poi-label",       "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_dong",  "label": "동 라벨 충돌 시 생략",    "layer": "dong-label",      "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_civic", "label": "공공시설 라벨 충돌 시 생략", "layer": "poi-civic-label", "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_peak",  "label": "봉우리 라벨 충돌 시 생략",  "layer": "peak-label",      "prop": "text-optional", "type": "bool", "default": False},
+]
+
+
+def placement_targets():
+    return PLACEMENT_TARGETS
+
+
+def apply_placement(style, cfg):
+    """cfg({key:value}) → 대상 layout 속성 설정. offset=text-offset[1](세로, x는 보존/0),
+    anchor=enum 문자열, bool=text-optional. 반환: 적용 수."""
+    if not cfg:
+        return 0
+    idx = _index(style); tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; n = 0
+    for k, v in cfg.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        L = idx.get(t["layer"])
+        if L is None:
+            continue
+        lay = L.setdefault("layout", {})
+        if t["type"] == "offset":
+            cur = lay.get(t["prop"])
+            x = cur[0] if isinstance(cur, list) and cur and isinstance(cur[0], (int, float)) else 0
+            lay[t["prop"]] = [x, round(float(v), 2)]
+        elif t["type"] == "anchor":
+            lay[t["prop"]] = v
+        else:  # bool
+            lay[t["prop"]] = bool(v)
+        n += 1
+    return n
+
+
+def current_placement(style):
+    idx = _index(style); out = {}
+    for t in PLACEMENT_TARGETS:
+        v = idx.get(t["layer"], {}).get("layout", {}).get(t["prop"])
+        if t["type"] == "offset":
+            out[t["key"]] = v[1] if isinstance(v, list) and len(v) >= 2 and isinstance(v[1], (int, float)) else None
+        elif t["type"] == "anchor":
+            out[t["key"]] = v if (isinstance(v, str) and v in LABEL_ANCHORS) else None
+        else:  # bool
+            out[t["key"]] = v if isinstance(v, bool) else None
+    return out
+
+
+def sanitize_placement(pl):
+    if not isinstance(pl, dict):
+        return {}
+    tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; out = {}
+    for k, v in pl.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        if t["type"] == "offset":
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and -10 <= v <= 10:
+                out[k] = round(float(v), 2)
+        elif t["type"] == "anchor":
+            if isinstance(v, str) and v in LABEL_ANCHORS:
+                out[k] = v
+        elif t["type"] == "bool":
+            if isinstance(v, bool):
+                out[k] = v
+    return out
+
+
 # 속성별 색 그라데이션 — 건물 높이(render_height)에 따른 색 보간.
 GRADIENT_TARGETS = [
     {"key": "bld_height", "label": "건물 높이별 색", "attr": "render_height", "amax": 100,
@@ -852,6 +930,8 @@ def apply_theme(style, theme):
     n += apply_extras(style, sanitize_extras(theme.get("extras") or {}))
     # 속성별 색 그라데이션(건물 높이)
     n += apply_gradient(style, sanitize_gradient(theme.get("gradient") or {}))
+    # 라벨/아이콘 배치(text-offset·anchor·text-optional)
+    n += apply_placement(style, sanitize_placement(theme.get("placement") or {}))
     return n
 
 
