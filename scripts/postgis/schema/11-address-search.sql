@@ -5,6 +5,10 @@
 -- 통합 검색(이름+도로명+지번 = search_text 생성컬럼) — 부분일치 ILIKE '%term%' 가속
 CREATE INDEX IF NOT EXISTS address_search_trgm ON address USING gin (search_text gin_trgm_ops);
 
+-- 건물명(bld) 부분일치 — 이름검색 분기 `search_text ILIKE x OR bld ILIKE x` 의 bld arm.
+-- 없으면 OR 가 BitmapOr 로 안 묶여 1570만행 Seq Scan(구청/역 이름검색 2~11초). load_geocode.py 와 동기 유지.
+CREATE INDEX IF NOT EXISTS address_bld_trgm ON address USING gin (bld gin_trgm_ops);
+
 -- 도로명주소 경로 — road_norm 정확 + 본번/부번. addr 만(전체의 대부분이지만 partial 로 명시)
 CREATE INDEX IF NOT EXISTS address_road_addr_idx
     ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
