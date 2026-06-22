@@ -29,7 +29,7 @@ HEXRE = re.compile(r"^#[0-9a-fA-F]{6}$")
 VALID_KEYS = {o["key"] for o in style_objects.OBJECTS}
 
 
-def apply_style_theme(theme):
+def apply_style_theme(theme, commit_pending=True):
     # 유효 키 + #rrggbb + 설치된 글꼴만 통과(주입 방지) → style/theme.json → build_style → tileserver 재시작
     theme = theme or {}
     # 기존 theme.json 위에 병합 — 부분 저장(색만)이 fonts/zoom 을 지우지 않게
@@ -81,6 +81,8 @@ def apply_style_theme(theme):
     gr = style_objects.sanitize_gradient(theme.get("gradient"))   # 속성별 색 그라데이션
     if gr:
         clean["gradient"] = {**(clean.get("gradient") or {}), **gr}
+    if isinstance(theme.get("poi_colors"), dict):   # 시설 그룹별 글자색 — 전체 맵 교체(빈 {}=전부 해제→평면 복원)
+        clean["poi_colors"] = style_objects.sanitize_poi_colors(theme.get("poi_colors"))
     pt = style_objects.sanitize_poi_tiers(theme.get("poi_tiers"))   # POI 노출 티어(줌)
     if pt:
         clean["poi_tiers"] = pt
@@ -92,22 +94,26 @@ def apply_style_theme(theme):
                 base[lvl] = {**(base.get(lvl) or {}), **ctt[lvl]}
         clean["cat_tiers"] = base
     pend = ROOT / "style" / "icons" / ".pending"   # 스테이징된 아이콘 업로드를 이제 커밋(저장 시점)
-    if pend.is_dir():
+    if commit_pending and pend.is_dir():           # import 경로는 아이콘 스테이징과 무관 → 커밋 안 함
         for f in pend.glob("*.png"):
             try:
                 f.replace(ROOT / "style" / "icons" / f.name)
             except Exception:
                 pass
     (ROOT / "style").mkdir(exist_ok=True)
-    (ROOT / "style" / "theme.json").write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    theme_file = ROOT / "style" / "theme.json"
+    prev_theme = theme_file.read_bytes() if theme_file.is_file() else None   # 빌드 실패 시 롤백용
+    theme_file.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []
     try:
         r = subprocess.run(["python3", str(ROOT / "scripts/build_style.py")],
                            capture_output=True, text=True, cwd=str(ROOT), timeout=60)
         log.append(r.stdout.strip() or r.stderr.strip())
         if r.returncode != 0:
+            if prev_theme is not None: theme_file.write_bytes(prev_theme)   # theme.json 원복(부분상태 방지)
             return {"ok": False, "error": "build_style 실패", "log": log}
     except Exception as e:
+        if prev_theme is not None: theme_file.write_bytes(prev_theme)        # theme.json 원복
         return {"ok": False, "error": f"build_style 오류: {e}", "log": log}
     # tileserver는 스타일을 시작 시 캐시 → 서빙본 갱신엔 재시작 필요. detached로 띄우고 즉시 반환.
     reloaded = "스킵(compose 없음)"
@@ -164,9 +170,10 @@ class H(BaseHTTPRequestHandler):
                 vis_cur = style_objects.current_visibility(style); lang_cur = style_objects.current_language(style)
                 sizes_cur = style_objects.current_sizes(style); extras_cur = style_objects.current_extras(style)
                 iov_cur = style_objects.current_icon_overrides(style); grad_cur = style_objects.current_gradient(style)
+                poicol_cur = style_objects.current_poi_colors(style)
             except Exception:
                 cur = {}; fonts_cur = {}; zoom_cur = {}; opacity_cur = {}; icons_cur = {}; sources_cur = {}
-                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}
+                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {},
                      "visible": bool(vis_cur.get(o["key"], True))}
@@ -196,6 +203,7 @@ class H(BaseHTTPRequestHandler):
                                "opacity_objects": opa, "icon_groups": icon_groups, "source_groups": source_groups,
                                "presets": style_objects.PRESETS,
                                "language": lang_cur,
+                               "poi_colors": poicol_cur,
                                "size_objects": [{"key": t["key"], "label": t["label"], "layer": t["layer"], "prop": t["prop"],
                                                  "min": (sizes_cur.get(t["key"]) or {}).get("min"),
                                                  "max": (sizes_cur.get(t["key"]) or {}).get("max")}
@@ -232,13 +240,24 @@ class H(BaseHTTPRequestHandler):
             if n > MAX_STYLE: return self._json({"error": "style.json 과대(4MB 초과)"}, 413)
             try:
                 imported = json.loads(self.rfile.read(n) or "{}")
-                if not isinstance(imported.get("layers"), list):
-                    return self._json({"error": "style.json 형식 아님(layers 배열 없음)"}, 400)
-                colors = style_objects.current_colors(imported)
             except Exception as e:
                 return self._json({"error": f"style.json 파싱 실패: {e}"}, 400)
-            res = apply_style_theme({k: v for k, v in colors.items() if v})
+            if not isinstance(imported.get("layers"), list) or not imported["layers"]:
+                return self._json({"error": "style.json 형식 아님(layers 배열 없음)"}, 400)
+            # 가져온 스타일에서 '무손실 추출 가능한' 시각 테마(색·시설그룹색·크기)만 뽑아 theme 에 병합.
+            # apply_style_theme 가 기존 theme.json 에 '병합'하므로 글꼴·투명도·줌·그라데이션·티어 등
+            # 나머지 설정은 서버의 현재 값이 그대로 유지된다(가져오기가 그것들을 지우지 않음).
+            # 색/그라데이션 같은 파생값은 추출→재적용이 멱등이 아니라 의도치 않게 평탄화되므로 확장하지 않음.
+            colors = style_objects.current_colors(imported)
+            patch = {k: v for k, v in colors.items() if v}
+            poi_colors = style_objects.current_poi_colors(imported)
+            if poi_colors:                                   # 시설 그룹별 글자색(비면 생략 — 평탄화/덮어쓰기 방지)
+                patch["poi_colors"] = poi_colors
+            patch["sizes"] = {k: mm for k, mm in style_objects.current_sizes(imported).items()
+                              if isinstance(mm, dict) and mm.get("min") is not None and mm.get("max") is not None}
+            res = apply_style_theme(patch, commit_pending=False)   # 병합+빌드+재시작 / 아이콘 스테이징은 미커밋
             res["colors"] = colors
+            res["imported_layers"] = len(imported["layers"])
             return self._json(res)
         if self.path.split("?")[0] == "/api/icon":
             from urllib.parse import urlparse, parse_qs
@@ -353,6 +372,9 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    </div>
    <div class=pane data-p=color>
      <h2>객체</h2><div id=rows></div>
+     <h2>시설 라벨 — 카테고리 그룹별 글자색</h2><div id=poicolrows></div>
+     <p class=hint>그룹별로 시설(POI) 라벨 글자색을 다르게 지정합니다(아이콘과 동일한 10개 대분류 그룹).
+     <br>체크 해제한 그룹은 위 ‘시설 라벨’ 기본색을 따릅니다. 지명·도로·동 라벨 색은 위 ‘객체’에서 종류별로 조정합니다.</p>
    </div>
    <div class=pane data-p=icon hidden>
      <h2>카테고리 아이콘 — 이미지 업로드(투명 PNG 권장)</h2><div id=iconrows></div>
@@ -392,7 +414,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='';
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={};
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -406,6 +428,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    ICONG=d.icon_groups||[]; $('#iconrows').innerHTML=ICONG.map(irow).join(''); ICONG.forEach(wireIcon);
    TAX=d.taxonomy||{}; IOV=d.icon_overrides||{cat2:{},cat:{}}; IOV.cat2=IOV.cat2||{}; IOV.cat=IOV.cat||{};
    INITIOV=JSON.parse(JSON.stringify(IOV)); renderTree();
+   POICOL=ICONG; PCUR=d.poi_colors||{};   // 시설 그룹별 글자색 — 아이콘과 동일 그룹(cats 포함) 재사용
+   $('#poicolrows').innerHTML=POICOL.map(pcrow).join('');
+   INITPC={}; POICOL.forEach(g=>{ if(PCUR[g.key])INITPC[g.key]=PCUR[g.key]; wirePc(g); });
+   ['#c_poilabel','#h_poilabel'].forEach(s=>{const e=$(s); if(e)e.addEventListener('input',applyPoiCol);});
    SRCG=d.source_groups||[]; $('#srcrows').innerHTML=SRCG.map(srow).join(''); SRCG.forEach(g=>{INITS[g.key]=g.on; wireSrc(g);});
    $('#visrows').innerHTML=OBJ.map(visrow).join(''); OBJ.forEach(o=>{INITV[o.key]=o.visible!==false; wireVis(o);});
    INITLANG=d.language||'ko'; $('#langsel').value=INITLANG; $('#langsel').onchange=applyLang;
@@ -438,6 +464,26 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  function setColor(k,v){const c=$('#c_'+k),h=$('#h_'+k); if(c){c.value=v;h.value=v;}}
  function apply(o,color){ if(!map||!map.isStyleLoaded())return;
    o.targets.forEach(t=>{ try{map.setPaintProperty(t[0],t[1],color)}catch(e){} }); }
+ // 시설 라벨 — 카테고리 그룹별 글자색 (cat1 match, 미지정 그룹은 '시설 라벨' 기본색 fallback)
+ function pcFb(){const e=$('#c_poilabel'); return e?e.value:'#e8edf2';}
+ function pcrow(g){const cur=(PCUR||{})[g.key], v=cur||pcFb();
+   return `<div class=row><input type=checkbox id=pck_${g.key} ${cur?'checked':''} style="width:16px;height:16px;accent-color:#5b9bd5;flex:none;cursor:pointer">
+     <label>${g.label}</label>
+     <input type=text id=pch_${g.key} value="${v}" maxlength=7 spellcheck=false>
+     <input type=color id=pcc_${g.key} value="${v}"></div>`;}
+ function wirePc(g){const c=$('#pcc_'+g.key),h=$('#pch_'+g.key),k=$('#pck_'+g.key); if(!c)return;
+   const chk=()=>{if(k&&!k.checked)k.checked=true;};
+   c.oninput=()=>{h.value=c.value; chk(); applyPoiCol();};
+   h.oninput=()=>{if(/^#[0-9a-fA-F]{6}$/.test(h.value)){c.value=h.value; chk(); applyPoiCol();}};
+   if(k)k.onchange=applyPoiCol;}
+ function poiColExpr(){const fb=pcFb(), p=[];
+   (POICOL||[]).forEach(g=>{const k=$('#pck_'+g.key); if(k&&k.checked)p.push(g.cats, $('#pcc_'+g.key).value);});
+   return p.length?['match',['get','cat1']].concat(p,[fb]):fb;}
+ function applyPoiCol(){ if(!map||!map.isStyleLoaded()||!map.getLayer('poi-label'))return;
+   try{map.setPaintProperty('poi-label','text-color', poiColExpr());}catch(e){}
+   $('#status').textContent='시설 글자색 (미저장)'; }
+ function poiColMap(){const m={}; (POICOL||[]).forEach(g=>{const k=$('#pck_'+g.key); if(k&&k.checked)m[g.key]=$('#pcc_'+g.key).value;}); return m;}
+ function poiColChanged(){const m=poiColMap(); return JSON.stringify(m)!==JSON.stringify(INITPC)?m:null;}
  function zrow(o){const z=o.zoom||{};return `<div class=row><label>${o.label}</label>
    <input type=number class=zn id=zmin_${o.key} min=0 max=24 placeholder=0 value="${z.min??''}">
    <span style="color:#8d9bb5">–</span>
@@ -473,6 +519,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();});
    IOV=JSON.parse(JSON.stringify(INITIOV)); IOVdirty=false; renderTree();
    GRAD.forEach(g=>{const i=INITG[g.key]||{}; const c=$('#g_'+g.key); if(c)c.checked=!!i.on; const lo=$('#glo_'+g.key); if(lo)lo.value=i.low||'#3a4a6b'; const hi=$('#ghi_'+g.key); if(hi)hi.value=i.high||'#9db4e0'; const mx=$('#gmx_'+g.key); if(mx)mx.value=i.max||100;});
+   POICOL.forEach(g=>{const cur=INITPC[g.key]; const k=$('#pck_'+g.key); if(k)k.checked=!!cur; const v=cur||pcFb(); const c=$('#pcc_'+g.key),h=$('#pch_'+g.key); if(c){c.value=v;h.value=v;}});
    PT=JSON.parse(INITPT); CTT=JSON.parse(INITCTT); renderTiers();
    map.setStyle(`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,{diff:false});
    $('#status').textContent='되돌림 — 서버 스타일 다시 로드'; };
@@ -482,8 +529,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    $('#status').textContent='가져오는 중…';
    f.text().then(t=>post('/api/style/import',t))
     .then(r=>r.json()).then(d=>{ if(!d.ok){$('#status').textContent='✗ '+(d.error||'오류');return;}
-      OBJ.forEach(o=>{const v=d.colors[o.key]; if(v){setColor(o.key,v); apply(o,v);}});
-      $('#status').textContent=`✓ 가져옴 ${d.applied}개 · 타일서버 ${d.reloaded}`;
+      OBJ.forEach(o=>{const v=(d.colors||{})[o.key]; if(v){setColor(o.key,v); apply(o,v);}});
+      $('#status').textContent=`✓ 색·시설색·크기 반영 (글꼴·투명도 등 나머지는 현재 설정 유지) · 타일서버 ${d.reloaded} — 재시작 후 새로고침`;
     }).catch(err=>$('#status').textContent='✗ 실패: '+err); };
  // 탭 전환
  document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
@@ -573,7 +620,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      for(let i=4;i<v.length;i+=2)if(typeof v[i]==='number')v[i]=Math.round((mn+(v[i]-a)/sp*(mx-mn))*100)/100; return v;} return v; }
  function applySize(t){ if(!map||!map.isStyleLoaded())return;
    const mn=$('#szmin_'+t.key).value, mx=$('#szmax_'+t.key).value; if(mn===''||mx==='')return;
-   const lay=t.prop==='text-size'; let v;
+   const lay=(t.prop==='text-size'||t.prop==='icon-size'); let v;
    try{ v=lay?map.getLayoutProperty(t.layer,t.prop):map.getPaintProperty(t.layer,t.prop);}catch(e){return;}
    const nv=remapJS(v,+mn,+mx);
    try{ lay?map.setLayoutProperty(t.layer,t.prop,nv):map.setPaintProperty(t.layer,t.prop,nv);}catch(e){} }
@@ -678,6 +725,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const fc=fontsChanged(); if(fc) theme.fonts=fc;
    if(IOVdirty) theme.icon_overrides=IOV;
    const grc=gradChanged(); if(grc) theme.gradient=grc;
+   const pcc=poiColChanged(); if(pcc) theme.poi_colors=pcc;
    const tc=tiersChanged(); if(tc){ if(tc.poi_tiers)theme.poi_tiers=tc.poi_tiers; if(tc.cat_tiers)theme.cat_tiers=tc.cat_tiers; }
    $('#status').textContent='적용 중…';
    post('/api/style',JSON.stringify({theme})).then(r=>r.json()).then(d=>{
@@ -692,6 +740,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)INITF[k]=e.value;}); if($('#font_all'))$('#font_all').value='';
        INITIOV=JSON.parse(JSON.stringify(IOV)); IOVdirty=false;
        GRAD.forEach(g=>{INITG[g.key]={on:$('#g_'+g.key).checked,low:$('#glo_'+g.key).value,high:$('#ghi_'+g.key).value,max:+$('#gmx_'+g.key).value};});
+       INITPC=poiColMap();
        PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();}); renderTree();
        INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT);
      }

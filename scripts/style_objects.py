@@ -254,6 +254,80 @@ def apply_icons(style, icons, overrides=None):
     return (len(icons or {})) + len(ov.get("cat2") or {}) + len(ov.get("cat") or {})
 
 
+# ── POI 카테고리 그룹별 글자색 (cat1 → 그룹색, 미지정 그룹은 '시설 라벨' 단일색 fallback) ──
+# 아이콘과 동일한 ICON_GROUPS(10개) 단위. poi-label text-color 를 cat1 match 식으로 만든다.
+def _match_default(v):
+    """match 식이면 default(마지막 원소) 반환, 아니면 None."""
+    if isinstance(v, list) and v and v[0] == "match" and len(v) >= 4:
+        return v[-1]
+    return None
+
+
+def build_poi_cat_color(colors, fallback):
+    """그룹별 글자색({group_key:#hex}) → cat1 match(그룹 cats→색), default=fallback.
+    지정된 그룹이 없으면 fallback(평면색) 그대로 반환."""
+    pairs = []
+    for g in ICON_GROUPS:
+        c = (colors or {}).get(g["key"])
+        if c:
+            pairs.append((list(g["cats"]), c))
+    if not pairs:
+        return fallback
+    expr = ["match", ["get", "cat1"]]
+    for cats, c in pairs:
+        expr += [cats, c]
+    expr.append(fallback)
+    return expr
+
+
+def apply_poi_cat_colors(style, colors):
+    """그룹별 시설 글자색을 poi-label text-color 에 적용. fallback = 현재 text-color
+    (평면색 또는 기존 match 의 default). colors 비면 평면색으로 복원. 반환 적용 수."""
+    L = _index(style).get(POI_ICON_LAYER)   # poi-label
+    if L is None:
+        return 0
+    paint = L.setdefault("paint", {})
+    cur = paint.get("text-color")
+    fb = _match_default(cur) if isinstance(cur, list) else cur
+    fb = fb if isinstance(fb, str) else "#e8edf2"
+    if not colors:
+        if isinstance(cur, list):           # 기존 그룹색 → 평면 복원
+            paint["text-color"] = fb
+            return 1
+        return 0
+    paint["text-color"] = build_poi_cat_color(colors, fb)
+    return 1
+
+
+def current_poi_colors(style):
+    """poi-label text-color match 에서 그룹별 색 추출 → {group_key:#hex}(미지정 그룹 제외)."""
+    v = _index(style).get(POI_ICON_LAYER, {}).get("paint", {}).get("text-color")
+    out = {}
+    if isinstance(v, list) and v and v[0] == "match":
+        pairs = list(zip(v[2:-1:2], v[3:-1:2]))
+        for g in ICON_GROUPS:
+            for labels, col in pairs:
+                labs = labels if isinstance(labels, list) else [labels]
+                if set(labs) == set(g["cats"]):
+                    h = to_hex(col)
+                    if h:
+                        out[g["key"]] = h
+                    break
+    return out
+
+
+def sanitize_poi_colors(colors):
+    """theme['poi_colors'] 정제(주입 방지) — 유효 그룹키 + #rrggbb 만."""
+    if not isinstance(colors, dict):
+        return {}
+    keys = {g["key"] for g in ICON_GROUPS}
+    out = {}
+    for k, v in colors.items():
+        if k in keys and isinstance(v, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", v or ""):
+            out[k] = v
+    return out
+
+
 # ── POI 노출 우선순위 티어 (카테고리별 줌 게이트) ─────────────────────
 def _gate_inner(expr):
     """줌×카테고리 게이트에서 inner(원래 값)를 반환, 아니면 그대로(idempotent).
@@ -522,6 +596,7 @@ SIZE_TARGETS = [
     {"key": "sz_place", "label": "지명 라벨 크기", "layer": "place-label", "prop": "text-size"},
     {"key": "sz_road",  "label": "도로 라벨 크기", "layer": "road-label",  "prop": "text-size"},
     {"key": "sz_poi",   "label": "시설 라벨 크기", "layer": "poi-label",   "prop": "text-size"},
+    {"key": "sz_poi_icon", "label": "시설 아이콘 크기", "layer": "poi-label", "prop": "icon-size"},
     {"key": "sz_dong",  "label": "동 라벨 크기",   "layer": "dong-label",  "prop": "text-size"},
     {"key": "r_dong",   "label": "동 점 크기",     "layer": "dong-dot",    "prop": "circle-radius"},
     {"key": "w_minor",  "label": "도로-소로 두께", "layer": "road-minor",  "prop": "line-width"},
@@ -584,7 +659,9 @@ def apply_sizes(style, cfg):
             continue
         where = _size_where(t["prop"])
         cur = L.get(where, {}).get(t["prop"])
-        L.setdefault(where, {})[t["prop"]] = _remap(cur, float(mm["min"]), float(mm["max"]))
+        # cur 부재 시 _remap 은 None 을 반환 → style-spec 위반(null layout/paint). max 로 평면값 설정.
+        L.setdefault(where, {})[t["prop"]] = (round(float(mm["max"]), 2) if cur is None
+                                              else _remap(cur, float(mm["min"]), float(mm["max"])))
         n += 1
     return n
 
@@ -748,6 +825,8 @@ def apply_theme(style, theme):
             if L is None:
                 continue
             L.setdefault("paint", {})[prop] = color; n += 1
+    # POI 카테고리 그룹별 글자색 — 평면색 직후(방금 깐 '시설 라벨' 평면색을 fallback으로 감쌈)
+    n += apply_poi_cat_colors(style, sanitize_poi_colors(theme.get("poi_colors") or {}))
     # 글꼴(layout text-font)
     n += apply_fonts(style, theme.get("fonts") or {})
     # 노출 줌(레이어 minzoom/maxzoom)
@@ -888,10 +967,12 @@ def current_zoom(style):
 
 
 def current_colors(style):
-    """각 객체의 현재 색(첫 대상 레이어 기준)을 #hex 로. 식이면 None."""
+    """각 객체의 현재 색(첫 대상 레이어 기준)을 #hex 로. 식이면 None(단, match는 default색)."""
     idx = _index(style); out = {}
     for o in OBJECTS:
         layer_id, prop = o["targets"][0]
         L = idx.get(layer_id, {})
-        out[o["key"]] = to_hex(L.get("paint", {}).get(prop))
+        raw = L.get("paint", {}).get(prop)
+        d = _match_default(raw)
+        out[o["key"]] = to_hex(d if d is not None else raw)
     return out

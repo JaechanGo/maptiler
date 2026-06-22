@@ -33,7 +33,7 @@
           ["숙박"], "lodging",
           ["보건의료", "건강", "동물"], "health",
           "retail"],
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 15, 0.65, 18, 1.0],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 15, 0.9, 18, 1.4],
         "icon-anchor": "bottom",
         "text-optional": true,
         "text-field": [
@@ -59,7 +59,7 @@
         "text-anchor": "top",
         "text-offset": [
           0,
-          0.55
+          0.2
         ],
         "symbol-sort-key": [
           "get",
