@@ -26,8 +26,8 @@ def parse_jibun(c):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
-    ap.add_argument("--navi", default=os.path.expanduser("~/geocode-build/staged/navi"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--navi", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/navi"))
     args = ap.parse_args()
     db_path = pathlib.Path(args.db); navi = pathlib.Path(args.navi)
     if not db_path.exists(): sys.exit(f"DB 없음: {db_path}")

@@ -2,9 +2,10 @@
 # geocode.sqlite의 시설(kind=biz) → poi.mbtiles (지도 라벨용, 줌별 밀도 자동조절)
 set -e
 export PATH="/opt/homebrew/bin:$PATH"
-DB="$HOME/geocode-build/geocode.sqlite"
-JL="$HOME/geocode-build/poi.geojsonl"
-OUT="$HOME/geocode-build/tiles/poi.mbtiles"
+BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
+DB="$BUILD_HOME/geocode.sqlite"
+JL="$BUILD_HOME/poi.geojsonl"
+OUT="$BUILD_HOME/tiles/poi.mbtiles"
 
 echo "[1/2] biz → GeoJSONSeq (출처별 전건 적재 — 표시용 중복제거는 is_primary로)"
 python3 - "$DB" "$JL" <<'PY'

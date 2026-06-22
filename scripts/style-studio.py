@@ -81,6 +81,9 @@ def apply_style_theme(theme, commit_pending=True):
     gr = style_objects.sanitize_gradient(theme.get("gradient"))   # 속성별 색 그라데이션
     if gr:
         clean["gradient"] = {**(clean.get("gradient") or {}), **gr}
+    pl = style_objects.sanitize_placement(theme.get("placement"))   # 라벨 배치(offset·anchor·생략)
+    if pl:
+        clean["placement"] = {**(clean.get("placement") or {}), **pl}
     if isinstance(theme.get("poi_colors"), dict):   # 시설 그룹별 글자색 — 전체 맵 교체(빈 {}=전부 해제→평면 복원)
         clean["poi_colors"] = style_objects.sanitize_poi_colors(theme.get("poi_colors"))
     pt = style_objects.sanitize_poi_tiers(theme.get("poi_tiers"))   # POI 노출 티어(줌)
@@ -171,9 +174,10 @@ class H(BaseHTTPRequestHandler):
                 sizes_cur = style_objects.current_sizes(style); extras_cur = style_objects.current_extras(style)
                 iov_cur = style_objects.current_icon_overrides(style); grad_cur = style_objects.current_gradient(style)
                 poicol_cur = style_objects.current_poi_colors(style)
+                place_cur = style_objects.current_placement(style)
             except Exception:
                 cur = {}; fonts_cur = {}; zoom_cur = {}; opacity_cur = {}; icons_cur = {}; sources_cur = {}
-                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}
+                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}; place_cur = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {},
                      "visible": bool(vis_cur.get(o["key"], True))}
@@ -211,6 +215,11 @@ class H(BaseHTTPRequestHandler):
                                "extra_objects": [{"key": t["key"], "label": t["label"], "type": t["type"],
                                                   "layer": t["layer"], "prop": t["prop"],
                                                   "value": extras_cur.get(t["key"])} for t in style_objects.extra_targets()],
+                               "placement_objects": [{"key": t["key"], "label": t["label"], "type": t["type"],
+                                                      "layer": t["layer"], "prop": t["prop"],
+                                                      "anchors": (style_objects.LABEL_ANCHORS if t["type"] == "anchor" else None),
+                                                      "default": t.get("default"),
+                                                      "value": place_cur.get(t["key"])} for t in style_objects.placement_targets()],
                                "taxonomy": taxonomy, "icon_overrides": iov_cur,
                                "poi_tiers": poi_tiers, "cat_tiers": cat_tiers,
                                "gradient_objects": [{"key": g["key"], "label": g["label"], **(grad_cur.get(g["key"]) or {})}
@@ -255,6 +264,8 @@ class H(BaseHTTPRequestHandler):
                 patch["poi_colors"] = poi_colors
             patch["sizes"] = {k: mm for k, mm in style_objects.current_sizes(imported).items()
                               if isinstance(mm, dict) and mm.get("min") is not None and mm.get("max") is not None}
+            patch["placement"] = {k: v for k, v in style_objects.current_placement(imported).items()
+                                  if v is not None}   # 배치(offset·anchor·생략) — 정확값이라 멱등, 라운드트립 안전
             res = apply_style_theme(patch, commit_pending=False)   # 병합+빌드+재시작 / 아이콘 스테이징은 미커밋
             res["colors"] = colors
             res["imported_layers"] = len(imported["layers"])
@@ -395,6 +406,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div class=pane data-p=zoom hidden>
      <h2>노출 레벨(줌) · min–max <span id=zlevel style="color:#5b9bd5;font-weight:500;margin-left:4px">현재 z 14.5</span></h2><div id=zoomrows></div>
      <h2>크기 · 줌 min~max 값 (글자·선·점)</h2><div id=sizerows></div>
+     <h2>라벨 배치 — 세로 위치 · 기준점 · 충돌 시 생략</h2><div id=placerows></div>
      <h2>투명도(불투명도) %</h2><div id=oprows></div>
    </div>
    <div class=pane data-p=adv hidden>
@@ -414,7 +426,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={};
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={};
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -439,6 +451,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    SIZ.forEach(t=>{INITSZ[t.key]={min:t.min,max:t.max}; wireSize(t);});
    EXTRA=d.extra_objects||[]; $('#extrarows').innerHTML=EXTRA.map(exrow).join('');
    EXTRA.forEach(t=>{INITX[t.key]=t.value; wireExtra(t);});
+   PLACE=d.placement_objects||[]; $('#placerows').innerHTML=PLACE.map(plrow).join('');
+   PLACE.forEach(t=>{INITPL[t.key]=plDisp(t); wirePlace(t);});
    renderFonts(d.fonts||{});
    GRAD=d.gradient_objects||[]; $('#gradrows').innerHTML=GRAD.map(gradrow).join('');
    GRAD.forEach(g=>{INITG[g.key]={on:g.on,low:g.low,high:g.high,max:g.max}; wireGrad(g);});
@@ -514,6 +528,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    OBJ.forEach(o=>{const e=$('#v_'+o.key); if(e)e.checked=INITV[o.key];}); $('#langsel').value=INITLANG;
    SIZ.forEach(t=>{const i=INITSZ[t.key]||{}; $('#szmin_'+t.key).value=i.min??''; $('#szmax_'+t.key).value=i.max??'';});
    EXTRA.forEach(t=>{ if(t.type==='color'){const v=INITX[t.key]||'#000000',c=$('#xc_'+t.key),h=$('#xh_'+t.key); if(c){c.value=v;h.value=v;}} else {const e=$('#xn_'+t.key); if(e)e.value=INITX[t.key]??'';}});
+   PLACE.forEach(t=>{const e=$('#pl_'+t.key); if(!e)return; if(t.type==='bool')e.checked=!!INITPL[t.key]; else e.value=INITPL[t.key]??'';});
    Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)e.value=INITF[k]||'';}); if($('#font_all'))$('#font_all').value='';
    fetch('/api/icon/discard',{method:'POST',headers:{'X-Studio-Token':TOKEN}}).catch(()=>{});
    PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();});
@@ -643,6 +658,28 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    EXTRA.forEach(t=>{let v; if(t.type==='color'){v=$('#xh_'+t.key).value; if(!/^#[0-9a-fA-F]{6}$/.test(v))return;}
      else{const e=$('#xn_'+t.key).value; if(e==='')return; v=+e;}
      if(v!==INITX[t.key]){x[t.key]=v; ch=true;}}); return ch?x:null;}
+ // 배치(라벨 offset·anchor·충돌생략) — layout 속성
+ function plDisp(t){ return (t.value!=null)?t.value:t.default; }   // 값 미설정 시 기본값 표시(빈칸 방지)
+ function plrow(t){
+   if(t.type==='offset') return `<div class=row><label>${t.label}</label>
+     <input type=number class=zn id=pl_${t.key} step=0.05 min=-10 max=10 value="${plDisp(t)??0}"></div>`;
+   if(t.type==='anchor'){ const sel=plDisp(t); const o=(t.anchors||[]).map(a=>`<option value="${a}"${a===sel?' selected':''}>${a}</option>`).join('');
+     return `<div class=row><label>${t.label}</label><select class=zn id=pl_${t.key}>${o}</select></div>`;}
+   return `<div class=row><label>${t.label}</label><input type=checkbox id=pl_${t.key}${plDisp(t)?' checked':''}></div>`;}
+ function wirePlace(t){ const e=$('#pl_'+t.key); if(!e)return;
+   if(t.type==='bool') e.onchange=()=>applyPlace(t,e.checked);
+   else if(t.type==='anchor') e.onchange=()=>applyPlace(t,e.value||null);
+   else e.oninput=()=>applyPlace(t, e.value===''?null:+e.value); }
+ function applyPlace(t,v){ if(!map||!map.isStyleLoaded())return; try{
+     if(t.type==='offset'){ if(v==null)return; const c=map.getLayoutProperty(t.layer,'text-offset'); const x=(Array.isArray(c)&&typeof c[0]==='number')?c[0]:0; map.setLayoutProperty(t.layer,t.prop,[x,v]); }
+     else if(t.type==='anchor'){ if(v==null)return; map.setLayoutProperty(t.layer,t.prop,v); }
+     else map.setLayoutProperty(t.layer,t.prop,!!v);
+   }catch(e){} }
+ function placeChanged(){ const p={}; let ch=false;
+   PLACE.forEach(t=>{ if(t.type==='bool'){ const v=$('#pl_'+t.key).checked; if(v!==(INITPL[t.key]===true)){p[t.key]=v; ch=true;} return; }
+     let v; if(t.type==='anchor'){ const s=$('#pl_'+t.key).value; v=s===''?null:s; }
+     else { const e=$('#pl_'+t.key).value; v=e===''?null:+e; }
+     if(v!=null && v!==INITPL[t.key]){p[t.key]=v; ch=true;} }); return ch?p:null; }
  // 글꼴
  const FONTMAP={donglabel:['dong-label'],poilabel:['poi-label'],placelabel:['place-label','road-label']};
  function renderFonts(F){ const av=F.available||[], cur=F.current||{}, labs=F.labels||[];
@@ -722,6 +759,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    if($('#langsel').value!==INITLANG) theme.language=$('#langsel').value;
    const szc=sizesChanged(); if(szc) theme.sizes=szc;
    const xc=extrasChanged(); if(xc) theme.extras=xc;
+   const plc=placeChanged(); if(plc) theme.placement=plc;
    const fc=fontsChanged(); if(fc) theme.fonts=fc;
    if(IOVdirty) theme.icon_overrides=IOV;
    const grc=gradChanged(); if(grc) theme.gradient=grc;
@@ -737,6 +775,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        OBJ.forEach(o=>{INITV[o.key]=$('#v_'+o.key).checked;}); INITLANG=$('#langsel').value;
        SIZ.forEach(t=>{const mn=$('#szmin_'+t.key).value,mx=$('#szmax_'+t.key).value; INITSZ[t.key]={min:mn===''?null:+mn,max:mx===''?null:+mx};});
        EXTRA.forEach(t=>{INITX[t.key]= t.type==='color'?$('#xh_'+t.key).value : ($('#xn_'+t.key).value===''?null:+$('#xn_'+t.key).value);});
+       PLACE.forEach(t=>{const e=$('#pl_'+t.key); if(!e)return; INITPL[t.key]= t.type==='bool'?e.checked : (t.type==='anchor'?(e.value===''?null:e.value):(e.value===''?null:+e.value));});
        Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)INITF[k]=e.value;}); if($('#font_all'))$('#font_all').value='';
        INITIOV=JSON.parse(JSON.stringify(IOV)); IOVdirty=false;
        GRAD.forEach(g=>{INITG[g.key]={on:$('#g_'+g.key).checked,low:$('#glo_'+g.key).value,high:$('#ghi_'+g.key).value,max:+$('#gmx_'+g.key).value};});
