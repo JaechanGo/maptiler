@@ -79,9 +79,12 @@ print(f"  VRT 래핑 {n}개")
 PY
 gdalbuildvrt -overwrite "$ROOT/data/dem/korea.vrt" "$HGT"/*.vrt
 if [ ! -f "$ROOT/data/dem/korea-3857.tif" ]; then
+  # 참조용(QGIS 검수·향후 힐셰이드) — 파이프라인 미사용. 최소 GDAL 에서 DEFLATE/BIGTIFF 등
+  #   드라이버 옵션이 빠지면 실패할 수 있으나, 실제 타일은 [3/4] 가 korea.vrt 로 만들므로 비치명 처리.
   gdalwarp -overwrite -t_srs EPSG:3857 -r bilinear -multi \
     -co COMPRESS=DEFLATE -co BIGTIFF=YES \
-    "$ROOT/data/dem/korea.vrt" "$ROOT/data/dem/korea-3857.tif"
+    "$ROOT/data/dem/korea.vrt" "$ROOT/data/dem/korea-3857.tif" \
+    || { echo "  ⚠ 참조용 EPSG:3857 GeoTIFF 생성 실패 — 건너뜀(파이프라인 영향 없음)"; rm -f "$ROOT/data/dem/korea-3857.tif"; }
 fi
 
 echo "[3/4] Terrain-RGB 인코딩 (z5~z12)"
