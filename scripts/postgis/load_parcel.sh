@@ -117,9 +117,13 @@ load_one() {
 # 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
 # fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
-# jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료. 정상 종료 시 목록이 비어 무동작.
-_kill_workers() { local p; for p in $(jobs -p 2>/dev/null); do pkill -TERM -P "$p" 2>/dev/null; kill -TERM "$p" 2>/dev/null; done; }
-trap _kill_workers EXIT
+# jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료.
+# ★ kill 에 '|| true' 필수 + 트랩은 'rc=$?; …; exit $rc': 정상 종료 시점엔 워커가 이미 죽어 kill 이
+#   "no such process"(rc≠0)를 반환하는데, set -e 는 EXIT 트랩 안에서도 작동하므로 그 실패가 트랩을 중단시켜
+#   스크립트 종료코드를 1 로 오염시킨다 → load-all 이 멀쩡히 끝난 parcel(39.8M·인덱스 OK)을 거짓 ✗ 로 오판.
+#   '|| true' 로 set -e 트리거를 막고, 트랩 진입 시 $? 를 잡아 cleanup 후 그 코드로 exit → 진짜 실패(1)는 보존.
+_kill_workers() { local p; for p in $(jobs -p 2>/dev/null); do pkill -TERM -P "$p" 2>/dev/null || true; kill -TERM "$p" 2>/dev/null || true; done; }
+trap 'rc=$?; _kill_workers; exit $rc' EXIT
 i=0
 for shp in "${SHPS[@]}"; do
   case "$shp" in *"(1)"*) echo "  (중복 제외) $(basename "$shp")"; continue;; esac
