@@ -469,8 +469,8 @@ def check_postgis():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
-    ap.add_argument("--tiles", default=os.path.expanduser("~/geocode-build/tiles"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--tiles", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "tiles"))
     ap.add_argument("--style"); ap.add_argument("--config")
     ap.add_argument("--taxonomy", default=str(pathlib.Path(__file__).resolve().parents[1] / "style" / "poi-taxonomy.json"))
     ap.add_argument("--api", default="http://localhost:8082")

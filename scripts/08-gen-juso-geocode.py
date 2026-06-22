@@ -108,7 +108,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default="/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
     # 산출물은 iCloud 동기 폴더 밖(로컬)에 둔다 — 2.6GB DB의 sync 부하·evict 회피.
-    ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/geocode-juso.sqlite"))
+    ap.add_argument("--out", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode-juso.sqlite"))
     ap.add_argument("--only", help="시도 일부만(쉼표): seoul,gyunggi")
     args = ap.parse_args()
     only = set(args.only.split(",")) if args.only else None

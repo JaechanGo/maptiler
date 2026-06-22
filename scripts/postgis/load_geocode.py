@@ -114,7 +114,7 @@ SELECT 'address' AS t, count(*) FROM address UNION ALL SELECT 'poi', count(*) FR
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     args = ap.parse_args()
     if not os.path.exists(args.db):
         sys.exit(f"geocode.sqlite 없음: {args.db} (09-gen-geocode.py 먼저)")

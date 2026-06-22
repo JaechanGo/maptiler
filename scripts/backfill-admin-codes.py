@@ -21,8 +21,8 @@ def has_col(db, table, col):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
-    ap.add_argument("--navi", default=os.path.expanduser("~/geocode-build/staged/navi"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--navi", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/navi"))
     ap.add_argument("--vacuum", action="store_true", help="끝나고 VACUUM(파일축소, 5GB 재작성이라 느림)")
     args = ap.parse_args()
     db_path = pathlib.Path(args.db); navi = pathlib.Path(args.navi)

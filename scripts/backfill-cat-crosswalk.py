@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     ap.add_argument("--crosswalk", default=str(ROOT / "cat-crosswalk.json"))
     args = ap.parse_args()
     if not pathlib.Path(args.db).exists(): sys.exit(f"DB 없음: {args.db}")

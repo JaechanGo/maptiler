@@ -323,8 +323,8 @@ def write_taxonomy(db, out_path):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--src", default="/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
-    ap.add_argument("--osm", default=os.path.expanduser("~/geocode-build/osm.sqlite"))
-    ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
+    ap.add_argument("--osm", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "osm.sqlite"))
+    ap.add_argument("--out", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     ap.add_argument("--only")
     ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
     ap.add_argument("--dedup", choices=["legacy","er"], default="legacy",
