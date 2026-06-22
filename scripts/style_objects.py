@@ -58,7 +58,7 @@ CAT_TIER_DEFAULT = {       # 카테고리→티어 기본(대분류 + 랜드마�
 # 데이터 출처 토글 — "이 지도에 어떤 데이터를 쓸지" 체크.
 #  src_visibility: 해당 style source의 모든 레이어 visibility 일괄(레이어 목록 하드코딩 회피).
 #  poi_source: poi 레이어(poi-dot/icon/label)를 source 속성으로 필터(상가/인허가 개별 토글).
-#  terrain: 스타일 레이어 없음 — 클라이언트 map.setTerrain (의도만 theme에 저장).
+#  terrain: 스타일 레이어 없음 — 최상위 terrain 속성(raster-dem 소스) 설정/해제, MapLibre 로드 시 자동 적용.
 SOURCE_GROUPS = [
     {"key": "base",      "label": "기본도(OSM)",       "kind": "src_visibility", "src": "openmaptiles"},
     {"key": "buildings", "label": "건물(GIS·2D/3D)",   "kind": "src_visibility", "src": "buildings"},
@@ -372,7 +372,7 @@ def _apply_poi_source_filter(style, enabled):
 
 
 def apply_sources(style, cfg):
-    """cfg({source_key: bool}) → 레이어 visibility / poi 출처 필터 적용. 반환: 적용 수."""
+    """cfg({source_key: bool}) → 레이어 visibility / poi 출처 필터 / terrain 적용. 반환: 적용 수."""
     if not cfg:
         return 0
     n = 0
@@ -382,6 +382,13 @@ def apply_sources(style, cfg):
             for L in style.get("layers", []):
                 if L.get("source") == g["src"]:
                     L.setdefault("layout", {})["visibility"] = vis; n += 1
+        elif g["kind"] == "terrain" and g["key"] in cfg:
+            # 최상위 terrain 속성 설정/해제 — MapLibre가 로드 시 자동 적용(클라 setTerrain 불필요).
+            # raster-dem 소스가 없으면 설정 금지(스타일 로드 깨짐 방지).
+            if cfg[g["key"]] and "terrain" in style.get("sources", {}):
+                style["terrain"] = {"source": "terrain", "exaggeration": 1.3}; n += 1
+            elif style.pop("terrain", None) is not None:
+                n += 1
     poi_keys = [g["key"] for g in SOURCE_GROUPS if g["kind"] == "poi_source"]
     if any(k in cfg for k in poi_keys):
         enabled = [k for k in poi_keys if cfg.get(k, True)]   # 미지정은 활성으로 간주
@@ -399,14 +406,15 @@ def sanitize_sources(sources):
 
 def current_sources(style):
     """각 출처의 현재 on/off. src_visibility=레이어 하나라도 visible이면 True;
-    poi_source=필터에 그 source 단독 지정이 없으면 True(둘 다 표시 기본); terrain=기본 False."""
+    poi_source=필터에 그 source 단독 지정이 없으면 True(둘 다 표시 기본);
+    terrain=최상위 terrain 속성 존재 여부."""
     idx = _index(style); out = {}
     for g in SOURCE_GROUPS:
         if g["kind"] == "src_visibility":
             ls = [L for L in style.get("layers", []) if L.get("source") == g["src"]]
             out[g["key"]] = any(L.get("layout", {}).get("visibility", "visible") != "none" for L in ls) if ls else True
         elif g["kind"] == "terrain":
-            out[g["key"]] = False
+            out[g["key"]] = bool(style.get("terrain"))
     # poi 출처: poi-label 필터/visibility로 판정
     pd = idx.get("poi-label", {})
     vis = pd.get("layout", {}).get("visibility", "visible")
