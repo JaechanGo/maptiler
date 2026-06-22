@@ -34,8 +34,50 @@ if [ "$HGT_COUNT" -eq 0 ]; then
 fi
 echo "  HGT ${HGT_COUNT}개 확인"
 
-echo "[2/4] 병합(VRT) 및 EPSG:3857 투영"
-gdalbuildvrt -overwrite "$ROOT/data/dem/korea.vrt" "$HGT"/*.hgt
+echo "[2/4] HGT→VRT 래핑(SRTMHGT 드라이버 비의존) 및 병합·투영"
+# 일부 GDAL 빌드(최소/최신)는 SRTMHGT 드라이버가 빠져 .hgt 를 "not recognized" 로 못 연다.
+#   → .hgt(원시 big-endian int16, 헤더 없음)를 GDAL 코어인 VRT raw 밴드로 감싼 사이드카 .vrt 를
+#     만들어 입력으로 준다(드라이버 비의존 — 출처 독립 설계). 좌표계·지오트랜스폼은 SRTM 규약대로 주입.
+rm -f "$HGT"/*.vrt
+python3 - "$HGT" <<'PY'
+import glob, math, os, re, sys
+hgt_dir = sys.argv[1]
+pat = re.compile(r'([NS])(\d{2})([EW])(\d{3})\.hgt$', re.I)   # 파일명에서 SW 코너 위경도
+n = 0
+for f in sorted(glob.glob(os.path.join(hgt_dir, '*.hgt'))):
+    base = os.path.basename(f)
+    m = pat.search(base)
+    if not m:
+        print(f"  건너뜀(이름형식): {base}", file=sys.stderr); continue
+    lat = int(m.group(2)) * (1 if m.group(1).upper() == 'N' else -1)
+    lon = int(m.group(4)) * (1 if m.group(3).upper() == 'E' else -1)
+    size = os.path.getsize(f)
+    side = int(round(math.sqrt(size / 2)))                   # 3601(1-arcsec) | 1201(3-arcsec)
+    if side * side * 2 != size:
+        print(f"  건너뜀(크기이상 {size}): {base}", file=sys.stderr); continue
+    dt = 1.0 / (side - 1)                                     # 1-arcsec → 1/3600 도
+    gt = (lon - dt / 2, dt, 0.0, lat + 1 + dt / 2, 0.0, -dt)  # NW 픽셀 중심이 (lon,lat+1) 에 오도록
+    with open(f[:-4] + '.vrt', 'w') as w:
+        w.write(
+f'''<VRTDataset rasterXSize="{side}" rasterYSize="{side}">
+  <SRS dataAxisToSRSAxisMapping="2,1">EPSG:4326</SRS>
+  <GeoTransform>{gt[0]:.12f}, {gt[1]:.12f}, {gt[2]:.1f}, {gt[3]:.12f}, {gt[4]:.1f}, {gt[5]:.12f}</GeoTransform>
+  <VRTRasterBand dataType="Int16" band="1" subClass="VRTRawRasterBand">
+    <SourceFilename relativeToVRT="1">{base}</SourceFilename>
+    <ImageOffset>0</ImageOffset>
+    <PixelOffset>2</PixelOffset>
+    <LineOffset>{side * 2}</LineOffset>
+    <ByteOrder>MSB</ByteOrder>
+    <NoDataValue>-32768</NoDataValue>
+  </VRTRasterBand>
+</VRTDataset>
+''')
+    n += 1
+if n == 0:
+    sys.exit("오류: 래핑된 HGT 가 0개 — data/dem/hgt 를 확인하세요.")
+print(f"  VRT 래핑 {n}개")
+PY
+gdalbuildvrt -overwrite "$ROOT/data/dem/korea.vrt" "$HGT"/*.vrt
 if [ ! -f "$ROOT/data/dem/korea-3857.tif" ]; then
   gdalwarp -overwrite -t_srs EPSG:3857 -r bilinear -multi \
     -co COMPRESS=DEFLATE -co BIGTIFF=YES \
