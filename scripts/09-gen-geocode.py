@@ -5,7 +5,7 @@
 - 주소(kind='addr')   : 내비게이션용DB match_build_*.txt, 좌표 EPSG:5179→4326(순수파이썬)
 - OSM(kind=type)      : 기존 geocode.sqlite(07 산출물)에서 복사 — station/place/dong/road/poi/biz + areas
 통합 스키마:
-  places(id,kind,name,subtype, sido,sigungu,emd,road,road_norm,main_no,sub_no,bld,postal,haeng_dong,bd_mgt_sn, lon,lat)
+  places(id,kind,name,subtype, sido,sigungu,emd,ri,road,road_norm,main_no,sub_no,bld,postal,haeng_dong,bd_mgt_sn, lon,lat)
   places_fts(name, region, road, bld)   ← addr→region/road/bld, OSM→name
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
@@ -103,7 +103,7 @@ def search_text(name, is_station):
 SCHEMA = """
   PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1048576; PRAGMA temp_store=MEMORY;
   CREATE TABLE places(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, subtype TEXT,
-    sido TEXT,sigungu TEXT,emd TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
+    sido TEXT,sigungu TEXT,emd TEXT,ri TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
     bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT,bcode TEXT,hcode TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT,cat2 TEXT, source TEXT,is_primary INTEGER, lon REAL,lat REAL);
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
@@ -123,11 +123,12 @@ def _derive_jibun(namemap, mgt):
 
 
 def load_jibun(src, sido):
-    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict).
+    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict, 법정동코드(앞10)→리(里) dict).
     # c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값), c[5]=산, c[6]=본번, c[7]=부번, c[18]=건물관리번호.
     # 이름 dict 는 대표지번 없는 건물의 지번을 _derive_jibun 으로 채우는 데 쓴다(빠짐없이).
-    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}
-    if not p.exists(): return d, nm
+    # ri dict(rd)는 navi addr 의 ri 컬럼(X5) 산출용 — 법정동코드(mgt[:10]) 단위 리 1:1(면지역만 존재).
+    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}; rd = {}
+    if not p.exists(): return d, nm, rd
     for line in io.open(p, encoding="cp949", errors="replace"):
         c = line.rstrip("\n").split("|")
         if len(c) < 19: continue
@@ -135,10 +136,11 @@ def load_jibun(src, sido):
         ri = c[4].strip()                       # 리(里) — 면 단위 지번에 보존(없으면 동/법정동만)
         dong = f"{c[3]} {ri}" if ri else c[3]
         nm.setdefault(mgt[:10], dong)
+        if ri: rd.setdefault(mgt[:10], ri)      # 리 분리 컬럼(X5) — emd 문자열 합성과 별개로 보존
         if mgt in d: continue
         san = "산 " if c[5] == "1" else ""; bu = c[7]
         d[mgt] = f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
-    return d, nm
+    return d, nm, rd
 
 def add_juso(db, src, only, state):
     pid = state["pid"]; seen = state["seen"]
@@ -146,7 +148,7 @@ def add_juso(db, src, only, state):
         path = src / f"match_build_{s}.txt"
         if not path.exists():
             print(f"  (건너뜀) {path.name} 없음", file=sys.stderr); continue
-        jdict, jname = load_jibun(src, s)
+        jdict, jname, jridict = load_jibun(src, s)
         st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
         for line in io.open(path, encoding="cp949", errors="replace"):
             c=line.rstrip("\n").split("|")
@@ -161,7 +163,7 @@ def add_juso(db, src, only, state):
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
             jb=jdict.get(mgt) or _derive_jibun(jname, mgt)       # 대표지번 없으면 건물관리번호로 파생(빠짐없이)
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],jridict.get(mgt[:10]),road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]·ri=리(X5,mgt[:10]키)
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -179,7 +181,7 @@ def add_osm(db, osm_path, state):
         if lon is None or lat is None: continue
         pid+=1
         oc=CW_OSM.get(sub or ''); oc1,oc2=(oc[0],oc[1] or None) if oc else (None,None)   # canonical 카테고리
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,oc1,oc2,'osm',1,lon,lat))
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,oc1,oc2,'osm',1,lon,lat))  # +ri자리 None(X5)
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -234,7 +236,7 @@ def add_biz(db, csvdir, state):
                             pending.append((nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2,jibun_src))
                     continue
                 pid+=1
-                pb.append((pid,kind,nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))
+                pb.append((pid,kind,nm,biz,sido,sgg,emd,None,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))  # ri=None(B2서 분해)
                 fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -254,7 +256,7 @@ def geocode_facilities(db, pending, state):
     def emit(rec, lon, lat):
         nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2,_js = rec
         state["pid"]+=1; pid=state["pid"]
-        pb.append((pid,'facility',nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,None,None,jibun_txt,cat1,cat2,'facility',1,round(lon,6),round(lat,6)))
+        pb.append((pid,'facility',nm,biz,sido,sgg,emd,None,road,rn,mno,sno,biz,None,None,None,None,None,None,None,jibun_txt,cat1,cat2,'facility',1,round(lon,6),round(lat,6)))  # ri=None(B2서 분해)
         fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz)); rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     n_road=0; unmatched=[]
@@ -298,7 +300,7 @@ def build_gazetteer(db):
 
 def _flush(db,pb,fb,rb):
     if not pb: return
-    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
+    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
     db.executemany("INSERT INTO places_fts(rowid,name,region,road,bld) VALUES(?,?,?,?,?)",fb)
     db.executemany("INSERT INTO place_rtree VALUES(?,?,?,?,?)",rb)
 

@@ -5,7 +5,7 @@
 dedup(is_primary)이 이미 geocode.sqlite `places`(lon/lat=4326)에 다 들어있다. 원천을 재파싱하지 말고
 이 산출물을 그대로 PostGIS 로 옮긴다 → 기존 품질과 100% parity. (지오코더 질의 전환은 Phase 5.)
 
-  places(kind,name,subtype,sido,sigungu,emd,road,road_norm,main_no,sub_no,bld,postal,
+  places(kind,name,subtype,sido,sigungu,emd,ri,road,road_norm,main_no,sub_no,bld,postal,
          haeng_dong,bd_mgt_sn,bcode,hcode,phone,opened,jibun,cat1,cat2,source,is_primary,lon,lat)
     → address (전체)          : 검색/표시/역지오코딩 원천
     → poi     (kind in biz/facility, 좌표有) : martin POI 레이어(기존 poi.mbtiles 대체)
@@ -15,7 +15,7 @@ dedup(is_primary)이 이미 geocode.sqlite `places`(lon/lat=4326)에 다 들어�
 """
 import argparse, csv, os, re, subprocess, sys, tempfile, time
 
-COLS = ["kind","name","subtype","sido","sigungu","emd","road","road_norm","main_no","sub_no",
+COLS = ["kind","name","subtype","sido","sigungu","emd","ri","road","road_norm","main_no","sub_no",
         "bld","postal","haeng_dong","bd_mgt_sn","bcode","hcode","phone","opened","jibun",
         "cat1","cat2","source","is_primary","lon","lat"]
 
@@ -49,7 +49,7 @@ SET synchronous_commit = off;
 
 DROP TABLE IF EXISTS _stg_places;
 CREATE UNLOGGED TABLE _stg_places (
-  kind text, name text, subtype text, sido text, sigungu text, emd text,
+  kind text, name text, subtype text, sido text, sigungu text, emd text, ri text,
   road text, road_norm text, main_no text, sub_no text, bld text, postal text,
   haeng_dong text, bd_mgt_sn text, bcode text, hcode text, phone text, opened text,
   jibun text, cat1 text, cat2 text, source text, is_primary text, lon text, lat text
@@ -72,9 +72,9 @@ DROP INDEX IF EXISTS poi_geom_gix;
 DROP INDEX IF EXISTS poi_kind_idx;
 DROP INDEX IF EXISTS poi_primary_idx;
 
-INSERT INTO address(kind,name,subtype,sido,sigungu,emd,road,road_norm,main_no,sub_no,bld,postal,
+INSERT INTO address(kind,name,subtype,sido,sigungu,emd,ri,road,road_norm,main_no,sub_no,bld,postal,
                     haeng_dong,bd_mgt_sn,bcode,hcode,phone,opened,jibun,cat1,cat2,source,is_primary,geom)
-SELECT kind,name,subtype,sido,sigungu,emd,road,road_norm,
+SELECT kind,name,subtype,sido,sigungu,emd,ri,road,road_norm,
        nullif(main_no,'')::int, nullif(sub_no,'')::int, bld, postal,
        haeng_dong,bd_mgt_sn,bcode,hcode,phone,opened,jibun,cat1,cat2,source,
        nullif(is_primary,'')::smallint,
