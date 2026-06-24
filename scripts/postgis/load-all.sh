@@ -9,7 +9,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/_pg-env.sh"
 BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
-STEPS="${STEPS:-schema admin parcel building geocode facility}"
+STEPS="${STEPS:-schema admin parcel building geocode lawd facility}"
 has(){ case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
 run(){ echo; echo "━━ $* ━━"; "$@"; }
 fail=0   # 적재 단계 실패 누적 — 하나라도 실패하면 종료코드 1(빌드그래프가 단계 실패로 인지). set -e 미사용이라 직접 추적.
@@ -74,6 +74,28 @@ if has geocode; then
   fi
 fi
 
+# 4.5) 지역 사전 — lawd_dong(address.bcode 파생, 멱등 SQL) + lawd_sigungu(navi 권위 빌더).
+#       ⚠ 반드시 geocode(address 최종) 이후·facility 앞. lawd_dong 은 address 기반이므로 순서 의존
+#         (스펙 DAG: D2(address) → C2-lawd). facility 는 lawd 와 무관 → 상대순서 무방하나 plan §2.3 배치 준수.
+#       R2: A2(backfill)도 load-all.sh 를 수정(STEPS 가산)하므로 conductor 머지 조율 대상.
+if has lawd; then
+  # (a) lawd_dong: 소스=DB(address). psql -f 멱등 SQL(would_rows 가드 내장).
+  #     가드 위반/address 미적재 시 RAISE EXCEPTION → ON_ERROR_STOP=1 비-0 → fail=1(거짓 PASS 차단).
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/build_dong_dict.sql" \
+    || { echo "  ✗ build_dong_dict.sql 실패 — would_rows 가드 또는 address 미적재. 재실행: STEPS=geocode,lawd $0" >&2; fail=1; }
+
+  # (b) lawd_sigungu: navi staged/7z 소스 있을 때만(비치명 skip). build_sigungu_dict.sh 내부도 exit0 skip 이중방어.
+  #     R4: navi 권위표기 보존(address 파생표기 drift·sigungu_nm LIKE 회귀 회피) — build_sigungu_dict.sh 헤더 근거 참조.
+  NAVI_7Z="$BUILD_HOME/sources/juso_navi/202605_내비게이션용DB_전체분.7z"
+  NAVI_STAGED="$BUILD_HOME/staged/navi"
+  if [ -d "$NAVI_STAGED" ] || [ -f "$NAVI_7Z" ]; then
+    run env bash "$HERE/build_sigungu_dict.sh" \
+      || { echo "  ✗ build_sigungu_dict.sh 실패: navi 소스 적재 오류" >&2; fail=1; }
+  else
+    echo "  (건너뜀) navi 소스 없음 — lawd_sigungu 재생성 skip(기존 254 보존): $NAVI_STAGED / $NAVI_7Z"
+  fi
+fi
+
 # 5) 공공시설 — staged/facility_src/ 아래 (a)평면 CSV(<kind>.csv) 또는 (b)종류별 하위폴더(<kind>/).
 #    collect(datago_filedown)는 경찰=staged/facility_src/police/, 소방=fire_station/(zip추출본) 으로 떨군다.
 #    load_facility.py 는 디렉토리 인자를 받으면 하위 최신 CSV 를 자동 선택.
@@ -107,6 +129,8 @@ psql -P pager=off -c "
   UNION ALL SELECT 'address', count(*) FROM address
   UNION ALL SELECT 'poi', count(*) FROM poi
   UNION ALL SELECT 'public_facility', count(*) FROM public_facility
+  UNION ALL SELECT 'lawd_dong',    count(*) FROM lawd_dong
+  UNION ALL SELECT 'lawd_sigungu', count(*) FROM lawd_sigungu
   ORDER BY t;"
 if [ "$fail" = 0 ]; then
   echo "OK: load-all 완료"
