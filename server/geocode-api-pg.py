@@ -39,6 +39,32 @@ SIDO_NM = {
     "51": ("강원",), "52": ("전북", "전라북"),
 }
 
+# 표기 단일출처(X1/§3). 시도코드(emd_cd 앞2)→정식명, 정식명→약칭 양방향.
+# 17개 전수 + 특별자치 개편명(강원51/전북52 특별자치도, 세종36 특별자치시, 제주50 특별자치도).
+# admin_boundary PIP 의 name 표기형(정식/약칭) 불일치 대비, 약칭 self-매핑도 포함해 변환누락 차단(F5).
+SIDO_FULL = {
+    "11": "서울특별시", "26": "부산광역시", "27": "대구광역시", "28": "인천광역시",
+    "29": "광주광역시", "30": "대전광역시", "31": "울산광역시", "36": "세종특별자치시",
+    "41": "경기도", "43": "충청북도", "44": "충청남도", "46": "전라남도",
+    "47": "경상북도", "48": "경상남도", "50": "제주특별자치도",
+    "51": "강원특별자치도", "52": "전북특별자치도",
+}
+SIDO_ABBR = {
+    "서울특별시": "서울", "부산광역시": "부산", "대구광역시": "대구", "인천광역시": "인천",
+    "광주광역시": "광주", "대전광역시": "대전", "울산광역시": "울산", "세종특별자치시": "세종",
+    "경기도": "경기", "충청북도": "충북", "충청남도": "충남", "전라남도": "전남",
+    "경상북도": "경북", "경상남도": "경남", "제주특별자치도": "제주",
+    "강원특별자치도": "강원", "전북특별자치도": "전북",
+}
+# 약칭 self-매핑(약칭이 들어와도 그대로 통과) + 약칭→정식 역매핑(양방향 완비).
+SIDO_ABBR.update({v: v for v in list(SIDO_ABBR.values())})
+SIDO_FULL_BY_ABBR = {abbr: full for full, abbr in SIDO_ABBR.items() if full in SIDO_FULL.values()}
+
+CONTRACT_VERSION = "geocode/2"            # 응답 분해 계약 버전(봉투 신호)
+REQUIRED_TABLES = ["address", "parcel", "lawd_dong", "lawd_sigungu", "admin_boundary"]
+KIND_LABEL = {"station": "지하철역", "road": "도로", "place": "장소", "dong": "행정동", "poi": ""}
+KNOWN_NONADDR = {"poi", "biz", "facility", "place", "dong", "road", "station"}
+
 
 # ── 표시/응답 헬퍼 (geocode-api.py 와 동일 형태) ─────────────────────
 def _g(r, k): return r.get(k)
@@ -70,13 +96,22 @@ def parcel_str(r):
 
 
 def addr_obj(r):
+    # 기존 키(road/parcel/zipcode/bld/structure) 전부 보존. structure 에 분해계약 신규 필드 가산.
+    # 동결: main_no/sub_no(도로명 건물본/부번, address_road_addr_idx 계약) — 의미·값 불변. bld_* 는 alias.
+    jm, js, _san = parse_jibun_nums(_g(r, "jibun"))   # address.jibun best-effort(ji_main/ji_sub)
     return {
         "road": road_str(r), "parcel": parcel_str(r),
         "zipcode": _g(r, "postal") or "", "bld": _g(r, "bld") or "",
         "structure": {
             "sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
             "haeng_dong": _g(r, "haeng_dong"),
-            "road_name": _g(r, "road"), "main_no": _g(r, "main_no"), "sub_no": _g(r, "sub_no"),
+            "ri": None,                               # address 무컬럼(best-effort 보류) → null 고정
+            "san": None,                              # F4: address 에 san 컬럼 없음 → null
+            "road_name": _g(r, "road"),
+            "main_no": _g(r, "main_no"), "sub_no": _g(r, "sub_no"),   # 동결
+            "bld_main_no": _g(r, "main_no"), "bld_sub_no": _g(r, "sub_no"),  # alias
+            "ji_main": jm, "ji_sub": js,
+            "bld_name": _g(r, "bld"), "zipcode": _g(r, "postal"),
             "b_code": _g(r, "bcode"), "h_code": _g(r, "hcode"),
         },
     }
@@ -85,10 +120,161 @@ def addr_obj(r):
 def category_of(r):
     c1 = _g(r, "cat1"); c2 = _g(r, "cat2"); sub = _g(r, "subtype")
     if c1:
-        cat = {"primary": c1, "label": " > ".join(x for x in (c1, c2) if x)}
-        if c2: cat["sub"] = c2
+        label = " > ".join(x for x in (c1, c2) if x)
+        cat = {"primary": c1, "label": label,
+               "group": c1, "path": ">".join(x for x in (c1, c2) if x)}  # group/path 가산
+        if c2: cat["sub"] = c2                       # 보존(F15)
         return cat
     return {"label": sub} if sub else None
+
+
+# ── 표기 분해계약 헬퍼 (X1) ──────────────────────────────────────
+def pad_bcode(emd_cd):
+    """emd_cd(char(8)) → b_code 10자리. btrim 후 len==8·digit 가드, 비정상 시 None(경고 호출측)."""
+    if emd_cd is None: return None
+    s = str(emd_cd).strip()                          # char(8) 공백패딩 btrim
+    if len(s) != 8 or not s.isdigit(): return None   # 길이/숫자 가드 → 10자리 깨짐 차단
+    return s + "00"
+
+
+def parse_jibun_nums(jibun):
+    """지번문자열 → (ji_main, ji_sub, san) best-effort. int4 가드(범위초과 시 None)."""
+    if not jibun: return (None, None, False)
+    s = str(jibun)
+    san = bool(re.search(r"산\s*\d", s)) or "산" in re.split(r"[\s]+", s)
+    m = re.search(r"(?:산\s*)?(\d+)(?:-(\d+))?", s)
+    if not m: return (None, None, san)
+    a, b = int(m.group(1)), int(m.group(2) or 0)
+    if a > 99999 or b > 99999: return (None, None, san)   # 오버플로 예방(parse :104 가드 재사용)
+    return (a, b, san)
+
+
+def clean_jibun(jibun):
+    """지목문자('답','대','전'…) 제거한 '본번[-부번]'(산 접두 보존)."""
+    a, b, san = parse_jibun_nums(jibun)
+    if a is None: return (str(jibun) if jibun else "").strip()
+    pre = "산 " if san else ""
+    return f"{pre}{a}-{b}" if b else f"{pre}{a}"
+
+
+def _s(v):
+    """None / 'None' 문자열 / 공백 가드 — 표기 결합용. 유효하면 trim 문자열, 아니면 None."""
+    if v is None: return None
+    v = str(v).strip()
+    return None if v in ("", "None") else v
+
+
+def _sido_abbr(sido):
+    s = _s(sido)
+    return SIDO_ABBR.get(s, s) if s else None
+
+
+def _region(r, official=False, with_emd=False):
+    """시도(약칭/정식) [시군구] [emd] 합성. 'None'/결측 토큰 생략(graceful)."""
+    sido = _s(r.get("sido")); sigungu = _s(r.get("sigungu")); emd = _s(r.get("emd"))
+    sido_disp = (sido if official else _sido_abbr(sido)) if sido else None
+    parts = [p for p in (sido_disp, sigungu) if p]
+    if with_emd and emd: parts.append(emd)
+    return " ".join(parts) if parts else None
+
+
+def display_of(item, r=None):
+    """전 kind 일관 display{main,secondary,full}. 미정의 kind → main=name, secondary=null(§3.2).
+
+    addr 내부 road↔parcel 판별은 subtype 이 아니라 r['road']/r['road_name'] 존재 여부(F3-a):
+    address 테이블 도로명/두번째 지번경로는 subtype 미설정이므로 컬럼 존재로 판별해야 누락 없음.
+    """
+    r = r or {}
+    kind = item.get("kind")
+    name = _s(item.get("name")) or ""
+    road = _s(r.get("road")) or _s(r.get("road_name"))
+
+    if kind == "addr" and road:                      # 도로명 규칙
+        main = road
+        mno = r.get("main_no")
+        if mno is not None and _s(mno):
+            sub = r.get("sub_no")
+            main += f" {mno}" + (f"-{sub}" if sub else "")   # sub_no=0 → '-0' 미부착
+        bld = _s(r.get("bld"))
+        if bld: main += f" ({bld})"
+        secondary = _region(r, official=False, with_emd=True)
+        zc = _s(r.get("postal"))
+        if zc and secondary: secondary += f" ({zc})"
+        tail = road
+        if mno is not None and _s(mno):
+            sub = r.get("sub_no"); tail += f" {mno}" + (f"-{sub}" if sub else "")
+        if bld: tail += f" ({bld})"
+        full = " ".join(x for x in (_region(r, official=True, with_emd=True), tail) if x) or name
+        return {"main": main, "secondary": secondary, "full": full}
+
+    if kind == "addr":                               # 지번 규칙(road 부재)
+        emd = _s(r.get("emd"))
+        jm, js = r.get("ji_main"), r.get("ji_sub")
+        san = r.get("san")
+        if jm is not None:
+            jb = ("산 " if san else "") + f"{jm}" + (f"-{js}" if js else "")
+        else:
+            jb = clean_jibun(r.get("jibun")) or None
+        main = " ".join(x for x in (emd, jb) if x) or name
+        secondary = _region(r, official=False, with_emd=False)
+        full = " ".join(x for x in (_region(r, official=True, with_emd=False), emd, jb) if x) or name
+        return {"main": main, "secondary": secondary, "full": full}
+
+    if kind in KNOWN_NONADDR:                         # 비-addr(라벨/카테고리 + PIP 지역)
+        region = _region(r, official=False, with_emd=False)
+        # poi/biz/facility=카테고리 경로 우선(§3.2). place/dong/road/station=유형라벨(KIND_LABEL).
+        if kind in ("poi", "biz", "facility"):
+            cat = item.get("category") or {}
+            head = cat.get("path") or cat.get("label") or (KIND_LABEL.get(kind) or None)
+        else:
+            head = KIND_LABEL.get(kind) or None
+        sec_parts = [x for x in (head, region) if x]
+        secondary = " · ".join(sec_parts) if sec_parts else None
+        full = name + (f" — {region}" if region else "")
+        return {"main": name, "secondary": secondary, "full": full}
+
+    return {"main": name, "secondary": None, "full": name}   # 미정의 kind fallback
+
+
+def nonaddr_structure(r, pip=None):
+    """비-addr structure — 자체 컬럼 우선, 결측 시 PIP(area_pip 결과) 병합. 소싱불가 필드 null."""
+    pip = pip or {}
+    sido = _g(r, "sido") or pip.get("sido")
+    sigungu = _g(r, "sigungu") or pip.get("sigungu")
+    emd = _g(r, "emd") or pip.get("emd")
+    return {
+        "structure": {
+            "sido": sido, "sigungu": sigungu, "emd": emd,
+            "haeng_dong": None, "ri": None, "san": None,
+            "road_name": _g(r, "road"), "main_no": _g(r, "main_no"), "sub_no": _g(r, "sub_no"),
+            "bld_main_no": _g(r, "main_no"), "bld_sub_no": _g(r, "sub_no"),
+            "ji_main": None, "ji_sub": None,
+            "bld_name": _g(r, "bld"), "zipcode": _g(r, "postal"),
+            "b_code": _g(r, "bcode"), "h_code": _g(r, "hcode"),
+        },
+    }
+
+
+def area_pip(cur, lon, lat):
+    """좌표 → admin_boundary ST_Contains 로 sido/sigungu 취득(X6). GiST 가속·소수행.
+    admin_boundary 0행/미적재 시 빈 dict(graceful). reverse areas(:아래) 패턴 재사용."""
+    cur.execute(
+        "SELECT level, name FROM admin_boundary "
+        "WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s,%s),4326)) "
+        "AND level IN ('sido','sigungu')", (lon, lat))
+    out = {}
+    for a in cur.fetchall():
+        if a["level"] == "sido": out["sido"] = a["name"]
+        elif a["level"] == "sigungu": out["sigungu"] = a["name"]
+    return out
+
+
+def _check_tables(cur):
+    """REQUIRED_TABLES 중 부재 테이블 목록(to_regclass, public. 한정·파라미터 바인딩)."""
+    cur.execute(
+        "SELECT t FROM unnest(%s::text[]) t WHERE to_regclass('public.'||t) IS NULL",
+        (REQUIRED_TABLES,))
+    return [r["t"] for r in cur.fetchall()]
 
 
 def parse(q):
@@ -153,8 +339,10 @@ def geocode(cur, q, limit):
         if not cand:
             cand = [(110 + rb(r), r) for r in fetch("", ())]
         for s, r in cand:
-            results.append((s, {"name": addr_str(r), "kind": "addr",
-                                "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}))
+            it = {"name": addr_str(r), "kind": "addr",
+                  "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
+            it["display"] = display_of(it, r)
+            results.append((s, it))
 
     # ---- 지번 경로 (parcel 테이블 — 법정동명 + 번지 정확매칭) ----
     # 권위 지번 소스(연속지적도 39.6M). 동명을 lawd_dong 으로 emd_cd 정확등가(=) 해소 → parcel(emd_cd,ji_main,ji_sub)
@@ -189,22 +377,40 @@ def geocode(cur, q, limit):
             #    parcel_jibun_lookup 인덱스가 무력화돼 전 파티션 Seq Scan(전국 39.6M 시 치명적). 캐스팅하면 parcel_<sido> 1파티션 Index Scan.
             # 좌표: 매칭(보통 1행) 후 대표점. geom_pt(materialized) 있으면 사용, 없으면 즉석 ST_PointOnSurface
             # — 전국 39.6M geom_pt 일괄백필(수시간) 없이도 동작(매칭 소수행만 계산하므로 사실상 무비용).
-            sql = ("SELECT jibun, emd_cd, "
-                   "ST_X(COALESCE(geom_pt, ST_PointOnSurface(geom))) AS lon, "
-                   "ST_Y(COALESCE(geom_pt, ST_PointOnSurface(geom))) AS lat "
-                   "FROM parcel WHERE sido_cd = ANY(%s::char(2)[]) AND emd_cd = ANY(%s::char(8)[]) "
-                   "AND ji_main = %s AND ji_sub = %s")
+            # JOIN lawd_dong 으로 sido/sigungu/emd 권위 복원(입력토큰 p["dong"] 금지).
+            # 공유 컬럼 emd_cd 가 parcel·lawd_dong 양쪽 존재 → 비수식 참조는 "ambiguous" 쿼리실패.
+            # WHERE/ORDER BY 공유 컬럼을 모두 parcel. 로 수식(컬럼 수식 의무, F2).
+            # char(2)/char(8) 캐스팅·ji_main/ji_sub 정확매칭·좌표식 COALESCE(geom_pt, ST_PointOnSurface) 보존(F9).
+            sql = ("SELECT parcel.jibun AS jibun, parcel.emd_cd AS emd_cd, "
+                   "parcel.ji_main AS ji_main, parcel.ji_sub AS ji_sub, parcel.san AS san, "
+                   "ld.sido AS sido, ld.sigungu AS sigungu, ld.emd AS emd, "
+                   "ST_X(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lon, "
+                   "ST_Y(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lat "
+                   "FROM parcel JOIN lawd_dong ld ON ld.emd_cd = parcel.emd_cd "
+                   "WHERE parcel.sido_cd = ANY(%s::char(2)[]) AND parcel.emd_cd = ANY(%s::char(8)[]) "
+                   "AND parcel.ji_main = %s AND parcel.ji_sub = %s")
             args = [sido_cds, cds, h[0], h[1]]
             if p["san"]:
-                sql += " AND san = 1"
-            sql += f" ORDER BY emd_cd, ji_sub LIMIT {ADDR_CAP}"
+                sql += " AND parcel.san = 1"
+            sql += f" ORDER BY parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}"
             cur.execute(sql, args)
             for r in cur.fetchall():
-                disp = f'{p["dong"]} {r["jibun"]}'.strip()
-                results.append((200, {"name": disp, "kind": "addr",
-                                      "lon": r["lon"], "lat": r["lat"],
-                                      "address": {"parcel": disp,
-                                                  "structure": {"emd": p["dong"], "b_code": r["emd_cd"]}}}))
+                san_b = bool(r["san"])
+                st = {"sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
+                      "haeng_dong": None, "ri": None, "san": san_b,
+                      "road_name": None, "main_no": None, "sub_no": None,
+                      "bld_main_no": None, "bld_sub_no": None,
+                      "ji_main": r["ji_main"], "ji_sub": r["ji_sub"],
+                      "bld_name": None, "zipcode": None,
+                      "b_code": pad_bcode(r["emd_cd"]), "h_code": None}
+                it = {"name": None, "kind": "addr", "subtype": "parcel", "source": "parcel",
+                      "lon": r["lon"], "lat": r["lat"]}
+                disp = display_of(it, r)               # parcel 규칙(road 부재) — 지목제거·지역복원
+                it["name"] = disp["full"]              # name=display.full(정식, 하위호환 alias)
+                it["display"] = disp
+                it["address"] = {"road": None, "parcel": disp["full"], "zipcode": None,
+                                 "bld": None, "structure": st}
+                results.append((200, it))
 
     # ---- 지번 경로 (법정동/리 + 번지) ----
     # 도로명이 없고 동/리 토큰 + 번지가 있으면 지번주소. addr 행의 search_text 끝(= jibun '법정동 [산] 본번[-부번]')을
@@ -230,8 +436,10 @@ def geocode(cur, q, limit):
             (f"%{dong}%", *nums, *reg_args, exact))
         for r in cur.fetchall():
             bonus = 12 * sum(1 for t in region if t in (r["sigungu"] or "") or t in (r["sido"] or ""))
-            results.append((200 + bonus, {"name": addr_str(r), "kind": "addr",
-                                          "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}))
+            it = {"name": addr_str(r), "kind": "addr",
+                  "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
+            it["display"] = display_of(it, r)          # road/road_name 부재 → parcel 규칙(F3-a/b)
+            results.append((200 + bonus, it))
 
     # ---- 이름 경로 (역/지명/POI/건물명) ----
     if p["terms"] and not results:
@@ -262,7 +470,7 @@ def geocode(cur, q, limit):
             if cat: item["category"] = cat
             if _g(r, "phone"): item["phone"] = r["phone"]
             if _g(r, "source"): item["source"] = r["source"]
-            results.append((s, item))
+            results.append((s, item))   # display/structure 는 병합부에서(상위 limit개만, PIP 호출 절약)
 
     # ---- 병합·정렬·중복 제거 ----
     results.sort(key=lambda x: -x[0])
@@ -276,7 +484,16 @@ def geocode(cur, q, limit):
         if len(out) >= limit: break
     for it in out:
         if it["kind"] != "addr":
-            it["address"] = addr_at(cur, it["lon"], it["lat"])
+            # X6: 비-addr 자체 지역(OSM None) → admin_boundary PIP. 0행/미적재면 빈결과 → 지역 생략(graceful).
+            pip = area_pip(cur, it["lon"], it["lat"])
+            near = addr_at(cur, it["lon"], it["lat"]) or {}
+            # address: 인근 도로명주소(road/parcel/zipcode/bld, 부착 유지) + structure(자체 행정정보=PIP).
+            it["address"] = {
+                "road": near.get("road"), "parcel": near.get("parcel"),
+                "zipcode": near.get("zipcode", ""), "bld": near.get("bld", ""),
+                "structure": nonaddr_structure(it, pip)["structure"],
+            }
+            it["display"] = display_of(it, pip)
     return out
 
 
@@ -297,6 +514,14 @@ def reverse(cur, lon, lat, limit):
                 "lon": r["lon"], "lat": r["lat"], "dist_m": round(r["d"], 1)}
         cat = category_of(r)
         if cat: item["category"] = cat
+        # 분해계약 부착(geocode 와 동일 헬퍼). addr=자체컬럼, 비-addr=PIP(admin 0행이면 graceful).
+        if r["kind"] == "addr":
+            item["address"] = addr_obj(r)
+            item["display"] = display_of(item, r)
+        else:
+            pip = area_pip(cur, r["lon"], r["lat"])
+            item["address"] = nonaddr_structure(r, pip)   # {"structure": {...}} (자체/PIP)
+            item["display"] = display_of(item, pip)
         nearest.append(item)
     cur.execute(
         f"""SELECT name, level AS type, code FROM admin_boundary
@@ -309,6 +534,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def _send(self, obj, code=200):
+        if getattr(self, "_sent", False):     # 중복 send 가드("이미 송신됨"일 때만 무시)
+            return
+        self._sent = True
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -322,24 +550,40 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with POOL.connection() as con, con.cursor() as cur:
                 if u.path == "/health":
+                    # 필수테이블 점검 → 누락 시 degraded(503). 정상이면 기존 키(ok/places/areas) 보존.
+                    missing = _check_tables(cur)
+                    if missing:
+                        return self._send({"ok": False, "degraded": True,
+                                           "missing_tables": missing}, 503)
                     cur.execute("SELECT count(*) c FROM address"); pc = cur.fetchone()["c"]
                     cur.execute("SELECT count(*) c FROM admin_boundary"); ac = cur.fetchone()["c"]
                     return self._send({"ok": True, "places": pc, "areas": ac})
                 if u.path == "/geocode":
                     q = (qs.get("q") or [""])[0]
                     limit = _limit(qs, 8)
-                    return self._send({"query": q, "results": geocode(cur, q, limit)})
+                    return self._send({"query": q, "contract_version": CONTRACT_VERSION,
+                                       "results": geocode(cur, q, limit)})
                 if u.path == "/reverse":
                     try:
                         lon = float((qs.get("lon") or [""])[0]); lat = float((qs.get("lat") or [""])[0])
                     except ValueError:
                         return self._send({"error": "lon/lat 필요"}, 400)
                     limit = _limit(qs, 6)
-                    return self._send({"lon": lon, "lat": lat, **reverse(cur, lon, lat, limit)})
+                    return self._send({"lon": lon, "lat": lat, "contract_version": CONTRACT_VERSION,
+                                       **reverse(cur, lon, lat, limit)})
                 return self._send({"error": "not found",
                                    "endpoints": ["/geocode?q=", "/reverse?lon=&lat=", "/health"]}, 404)
+        # C4: 좁은→넓은 순서. OperationalError(503, 연결/가용성)는 ProgrammingError 의 형제이므로 먼저.
+        # ProgrammingError(UndefinedTable/Column 등)·기타 psycopg.Error·일반 Exception 은 500 JSON 으로
+        # 봉인(빈바디/소켓끊김 방지). 입력 echo 금지, 메시지 절단(str[:120]).
         except psycopg.OperationalError as e:
             return self._send({"error": f"PostGIS 연결 실패: {str(e)[:120]}"}, 503)
+        except psycopg.ProgrammingError as e:
+            return self._send({"error": f"질의 처리 오류: {str(e)[:120]}"}, 500)
+        except psycopg.Error as e:
+            return self._send({"error": f"DB 오류: {str(e)[:120]}"}, 500)
+        except Exception as e:
+            return self._send({"error": f"내부 오류: {str(e)[:120]}"}, 500)
 
 
 def _selftest():
@@ -351,9 +595,22 @@ def _selftest():
                 print(f"   [{r['kind']}] {r['name']} → {r['lon']},{r['lat']}")
 
 
+def _boot_check():
+    """부팅 1회 필수테이블 점검 — 누락 시 stderr 경고만(프로세스 계속, fatal 금지)."""
+    try:
+        with POOL.connection() as con, con.cursor() as cur:
+            missing = _check_tables(cur)
+        if missing:
+            print(f"geocode-api-pg: WARNING degraded — missing tables: {', '.join(missing)}",
+                  file=sys.stderr)
+    except Exception as e:                  # 점검 자체 실패도 비치명(경고만)
+        print(f"geocode-api-pg: WARNING table check failed: {str(e)[:120]}", file=sys.stderr)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":
         _selftest(); sys.exit(0)
     POOL.open()
+    _boot_check()
     print(f"geocode-api-pg: DSN set, PORT={PORT}", file=sys.stderr)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
