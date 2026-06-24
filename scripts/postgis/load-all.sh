@@ -48,6 +48,20 @@ if has parcel; then
   fi
 fi
 
+# 2.5) parcel 정규화 백필 (옵트인 전용 — 기본 STEPS 미포함, 자동 stale 편입 금지: Global Constraint L20)
+#      jibun(san/본번/부번) + geom_pt 대표점. parcel 적재 이후 의존. 둘 다 증분 가드(WHERE ... IS NULL).
+#      ⚠ 사전조건(N1): parcel 적재 완료 + 21-parcel-jibun.sql 의 san/ji_main/ji_sub/geom_pt 컬럼·
+#         parcel_jibun_lookup 인덱스가 schema 선행으로 이미 존재해야 함. STEPS=backfill 단독 호출 시
+#         컬럼/인덱스 부재면 즉시 실패(ON_ERROR_STOP=1) — schema 단계를 먼저 돌릴 것.
+#      ⚠ 39.9M 급 대량 UPDATE(파티션별 독립 커밋) — STEPS="backfill" 로 명시 호출할 때만. 정규 load-all 미배선.
+#      실행 순서: jibun(인덱스 단독 DROP/CREATE 래핑 동반) → geom_pt(파티션별). 둘 다 ON_ERROR_STOP=1, fail 누적.
+if has backfill; then
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_parcel_jibun.sql" \
+    || { echo "  ✗ backfill_parcel_jibun.sql 실패 — 인덱스 재생성/가드/사전조건(컬럼·인덱스 존재) 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_geom_pt.sql" \
+    || { echo "  ✗ backfill_geom_pt.sql 실패 — 파티션별 UPDATE 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
+fi
+
 # 3) 건물통합정보 (시도 파티션)
 if has building; then
   GIS="$BUILD_HOME/staged/gis"
