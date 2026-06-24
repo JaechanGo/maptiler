@@ -41,8 +41,20 @@ fi
 if has parcel; then
   PARCEL="$BUILD_HOME/staged/parcel"
   if [ -d "$PARCEL" ]; then
-    run "$HERE/load_parcel.sh" --shp "$PARCEL" --fresh \
-      || { echo "  ✗ 연속지적 적재 실패 — parcel 미완·GiST/pnu 인덱스 누락 가능. 재실행: STEPS=parcel $0" >&2; fail=1; }
+    # load-all 의 parcel 은 항상 --fresh(TRUNCATE 후 재적재) → ji_main/ji_sub/san/geom_pt 전부 NULL 로 리셋.
+    # 적재 성공 직후 ji_main 자동복구(backfill_parcel_jibun.sql)를 체인한다(--fresh 한정 트리거가 구조로 보장).
+    #   · opt-out: PARCEL_SKIP_BACKFILL=1 (백업 복원 직전 시간절약·schema 미선행 단독 parcel 적재 등).
+    #   · 전제: san/ji_main/ji_sub 컬럼·parcel_jibun_lookup 인덱스(schema 단계=21-parcel-jibun.sql 산출) 선존.
+    #     schema 미선행 단독 STEPS=parcel 은 PARCEL_SKIP_BACKFILL=1 또는 STEPS="schema parcel" 로 돌릴 것.
+    #   · geom_pt 는 자동 체인 제외(런타임 COALESCE 폴백·비차단) — 필요 시 STEPS=backfill 수동 경로.
+    if run "$HERE/load_parcel.sh" --shp "$PARCEL" --fresh; then
+      if [ -z "${PARCEL_SKIP_BACKFILL:-}" ]; then
+        run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_parcel_jibun.sql" \
+          || { echo "  ✗ backfill_parcel_jibun.sql 실패 — 사전조건(컬럼·인덱스 존재)/가드 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
+      fi
+    else
+      echo "  ✗ 연속지적 적재 실패 — parcel 미완·GiST/pnu 인덱스 누락 가능. 재실행: STEPS=parcel $0" >&2; fail=1
+    fi
   else
     echo "  (건너뜀) 연속지적 SHP 없음: $PARCEL"
   fi
@@ -50,10 +62,14 @@ fi
 
 # 2.5) parcel 정규화 백필 (옵트인 전용 — 기본 STEPS 미포함, 자동 stale 편입 금지: Global Constraint L20)
 #      jibun(san/본번/부번) + geom_pt 대표점. parcel 적재 이후 의존. 둘 다 증분 가드(WHERE ... IS NULL).
+#      ⚠ ji_main 은 parcel 단계에 자동 체인됨(PARCEL_SKIP_BACKFILL=1 로 opt-out). 이 backfill 토큰은
+#         geom_pt 포함 전체 수동 백필·부분실패 재시도 경로로 유지한다(정규 full-build 기본 STEPS 미포함).
+#         STEPS="parcel backfill" 동시지정은 backfill_parcel_jibun.sql 의 인덱스를 2회 통째 재빌드(수 분)하므로
+#         비권장 — ji_main 은 자동 체인이 채우니 geom_pt 만 필요하면 이 토큰을 단독으로 쓸 것.
 #      ⚠ 사전조건(N1): parcel 적재 완료 + 21-parcel-jibun.sql 의 san/ji_main/ji_sub/geom_pt 컬럼·
 #         parcel_jibun_lookup 인덱스가 schema 선행으로 이미 존재해야 함. STEPS=backfill 단독 호출 시
 #         컬럼/인덱스 부재면 즉시 실패(ON_ERROR_STOP=1) — schema 단계를 먼저 돌릴 것.
-#      ⚠ 39.9M 급 대량 UPDATE(파티션별 독립 커밋) — STEPS="backfill" 로 명시 호출할 때만. 정규 load-all 미배선.
+#      ⚠ 39.9M 급 대량 UPDATE(파티션별 독립 커밋) — STEPS="backfill" 로 명시 호출할 때만.
 #      실행 순서: jibun(인덱스 단독 DROP/CREATE 래핑 동반) → geom_pt(파티션별). 둘 다 ON_ERROR_STOP=1, fail 누적.
 if has backfill; then
   run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_parcel_jibun.sql" \

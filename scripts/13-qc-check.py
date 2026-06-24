@@ -492,10 +492,10 @@ def check_postgis():
 
     # 5) parcel 지번 본번 분해율 — ji_main NOT NULL ≥ 95%. (backfill_parcel_jibun.sql 산출)
     #    낮으면 jibun 파싱/백필 미완 → emd_cd+ji_main 정확매칭 경로 미동작(거짓 PASS 차단).
-    #    NOTE(운영): backfill 은 옵트인이다 — load-all.sh 기본 STEPS 에 backfill 이 없어(T004 의도적 분리),
-    #      신규/재빌드 직후에는 ji_main 이 미채움 상태라 이 게이트가 상시 FAIL 한다. "갑자기 빌드가 깨졌다"가
-    #      아니라 정상 동작이며, `STEPS=backfill` 선실행(backfill_parcel_jibun + backfill_geom_pt) 후 통과한다.
-    #      (대형 집계이므로 timeout 여유 — 39.6M FILTER count.)
+    #    NOTE(운영): load-all.sh 의 parcel 단계가 --fresh 적재 성공 직후 backfill_parcel_jibun 을 자동 체인하므로
+    #      full-build 직후 이 게이트는 PASS 가 기대값이다. FAIL 이면 PARCEL_SKIP_BACKFILL 설정(자동 체인 opt-out)
+    #      또는 backfill 단계 실패를 의심하라 — `STEPS=backfill` 재실행(backfill_parcel_jibun + backfill_geom_pt)으로
+    #      복구한다. (대형 집계이므로 timeout 여유 — 39.6M FILTER count.)
     try:
         r = q("SELECT count(*) FILTER (WHERE ji_main IS NOT NULL), count(*) FROM parcel", timeout=120)
         filled, tot = int(r[0][0] or 0), int(r[0][1] or 0)
