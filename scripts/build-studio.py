@@ -654,7 +654,13 @@ TFRESH = {
     "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility"],
                      "dep_art": ["geocode"],
                      "scripts": ["scripts/postgis/load-all.sh", "scripts/postgis/load_parcel.sh",
-                                 "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py"],
+                                 "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py",
+                                 # ── 지번 1급화(A3): 스키마·사전·백필 추적 → 개선 시 stale 인식(조용한 skip 방지) ──
+                                 "scripts/postgis/schema/21-parcel-jibun.sql",
+                                 "scripts/postgis/build_dong_dict.sql",
+                                 "scripts/postgis/build_sigungu_dict.sh",
+                                 "scripts/postgis/backfill_parcel_jibun.sql",
+                                 "scripts/postgis/backfill_geom_pt.sql"],
                      "out": []},   # PostGIS 적재(파일 산출물 없음) — src/scripts 시그니처로 재빌드 판정
     "qc": {"always": True},
     "package": {"always": True},
