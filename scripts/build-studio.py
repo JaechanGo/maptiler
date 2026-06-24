@@ -1058,6 +1058,81 @@ def store_path(sha):
     return STORE_DIR / sha[:2] / sha
 
 
+def _payload_integrity(path):
+    """페이로드 건전성 판정(매직바이트 ↔ 구조 정합) — 네트워크/HTTP 비의존 순수함수.
+    수집(다운로드) 시점에 절단/손상 페이로드를 검지하기 위한 단일 판정원(run_collect·_extract_into 공유, DRY).
+    반환: (verdict, detail)
+      healthy   : 정상 아카이브(zip/tar/7z/gzip) 또는 아카이브 매직이 아닌 평문(csv/txt/pbf/shp 등) — 통과
+      truncated : 아카이브 매직이 있으나 구조 불완전(EOCD/중앙디렉토리 결손, gzip 말미 절단 등) — 거부
+      corrupt   : 0바이트 / 매직-구조 모순 / 식별불가 손상 — 거부
+      unknown   : 판정 불가(7z 검증도구 없음 등) — 호출측 정책에 위임(보수적 통과)
+    경로만 받으므로 임시파일만으로 단위테스트 가능. is_zipfile/is_tarfile 은 말미 EOCD/헤더 수준만 읽어 GB급도 저비용."""
+    import tarfile
+    p = pathlib.Path(path)
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        return ("corrupt", f"stat 실패: {e}")
+    if size == 0:
+        return ("corrupt", "0바이트")
+    with open(p, "rb") as fh:
+        head = fh.read(8)
+    # ① ZIP: local header(PK\x03\x04) / 빈 zip EOCD(PK\x05\x06) / data descriptor(PK\x07\x08)
+    if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+        if zipfile.is_zipfile(p):
+            return ("healthy", "zip")
+        return ("truncated", "ZIP 매직이나 EOCD/중앙디렉토리 결손 — 절단 의심")
+    # ② 7z: 도구 있으면 무결성검증(t), 없으면 unknown(기존 추출분기에 위임)
+    if head[:6] == b"7z\xbc\xaf\x27\x1c":
+        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not tool:
+            return ("unknown", "7z 매직 — 무결성검증 도구 없음")
+        try:
+            r = subprocess.run([tool, "t", str(p)], capture_output=True, timeout=600)
+            return ("healthy", "7z") if r.returncode == 0 else ("corrupt", "7z 무결성검증 실패")
+        except Exception as e:
+            return ("unknown", f"7z 검증 예외: {str(e)[:80]}")
+    # ③ gzip: 말미까지 스트리밍 디코드 시도(상한까지). 성공 healthy / 실패 truncated / 상한초과 unknown
+    if head[:2] == b"\x1f\x8b":
+        import gzip as _gz
+        cap = 256 << 20   # 디코드 상한(대용량 회피) — 초과 시 말미 미확인 → unknown
+        try:
+            read = 0
+            with _gz.open(p, "rb") as g:
+                while True:
+                    chunk = g.read(1 << 20)
+                    if not chunk:
+                        return ("healthy", "gzip")
+                    read += len(chunk)
+                    if read >= cap:
+                        return ("unknown", "gzip — 디코드 상한 초과로 말미 미확인")
+        except Exception as e:
+            return ("truncated", f"gzip 디코드 실패 — 절단 의심: {str(e)[:80]}")
+    # ④ tar(비압축): magic 이 아닌 ustar 헤더 — is_tarfile 로 판정(gzip-tar 은 ③에서 처리)
+    try:
+        if tarfile.is_tarfile(p):
+            return ("healthy", "tar")
+    except Exception:
+        pass
+    # ⑤ 아카이브 매직 아님 → 평문(csv/txt/shp/pbf 등). 평문 본문 절단은 스코프 외(_http_download CL 대조가 보완)
+    return ("healthy", "non-archive")
+
+
+def _collect_integrity_gate(tmp, item_key, sz):
+    """수집(다운로드) 직후·store_put 전 무결성 게이트. truncated/corrupt 면 tmp(.part) 폐기 후 raise.
+    raise 가 run_collect 의 try 말미 staged_sig 갱신을 건너뛰게 해 다음 회차 자동 재수집(자기치유)을 유도하고,
+    store_put 미호출로 손상물의 store 영구보관을 차단한다. tmp 명시 제거로 .part 잔존도 방지.
+    참고(Note 3): extract 모드의 stale 한 손상 staged 는 정상 재수집 성공 시 run_collect 의
+    `(not allreused) or (not _nonempty_dir(dest))` 분기 rmtree+재추출로 자연 치유된다(추가 코드 불요)."""
+    verdict, detail = _payload_integrity(tmp)
+    if verdict in ("truncated", "corrupt"):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"수집 무결성 거부({verdict}): {item_key} — {detail} ({sz/1e6:.1f}MB)")
+
+
 def _http_download(url, dest, headers=None, retries=3, timeout=900):
     """파일 다운로드 — 302→/error·HTML 에러페이지 감지 + 백오프 재시도. 스트리밍 저장, size 반환."""
     hd = {**_DL_HEADERS, **(headers or {})}
@@ -1068,6 +1143,9 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
             with urllib.request.urlopen(req, timeout=timeout, context=ssl._create_unverified_context()) as r:
                 if "/error" in r.geturl():
                     raise RuntimeError(f"차단/에러 리다이렉트: {r.geturl()}")
+                # 헤더는 응답 컨텍스트가 닫히기 전 취득(절단 대조용). identity/헤더부재일 때만 엄격 대조.
+                cl_raw = r.headers.get("Content-Length")
+                ce = (r.headers.get("Content-Encoding") or "").strip().lower()
                 with open(dest, "wb") as o:
                     head = r.read(1 << 16)
                     low = head[:300].lstrip().lower()
@@ -1080,7 +1158,18 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
                         if not chunk:
                             break
                         o.write(chunk)
-            return os.path.getsize(dest)
+            # 크기 대조는 with open 블록이 닫힌 뒤(flush 후) 디스크 크기로 수행.
+            # transport gzip(CE=gzip 등) 또는 chunked(CL 부재) 는 압축/미선언이라 대조 생략(오탐 방지) →
+            # 절단은 _payload_integrity(매직↔구조 정합)가 보완. 재시도 루프 안이라 raise 시 백오프 재시도됨.
+            written = os.path.getsize(dest)
+            if cl_raw is not None and ce in ("", "identity"):
+                try:
+                    expected = int(cl_raw.strip())
+                except (ValueError, AttributeError):
+                    expected = None
+                if expected is not None and written != expected:
+                    raise RuntimeError(f"다운로드 절단: 수신 {written}B / 선언 {expected}B  [url={url}]")
+            return written
         except Exception as e:
             last = e
             if attempt < retries - 1:
@@ -1106,6 +1195,12 @@ def _extract_into(src, dest_dir, orig_name=None):
         tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
         if not tool: raise RuntimeError("7z 미설치 — scripts/setup-build-host.sh")
         subprocess.run([tool, "x", "-y", f"-o{dest_dir}", str(src)], check=True, capture_output=True, timeout=3600); return
+    # zip/tar/7z 어느 추출 분기에도 안 든 페이로드 — 아카이브 매직을 가진 손상물(절단ZIP 등)이
+    # 확장자 없는 <sha> 라는 이유로 .csv 로 둔갑·staged 잠입하는 구멍을 봉쇄(2차 방어).
+    v, d = _payload_integrity(src)
+    if v in ("truncated", "corrupt"):
+        raise RuntimeError(f"손상 아카이브 추출 거부({v}): {d}  [src={src}]")
+    # healthy 평문(아카이브 매직 없음)만 .csv 폴백 복사 유지(11/11b 가 *.csv glob — 계약 보존).
     nm = orig_name or src.name
     if "." not in nm: nm += ".csv"
     shutil.copy2(src, dest_dir / nm)
@@ -1353,6 +1448,7 @@ def run_collect(selected):
                     destp = pathlib.Path(dest); destp.parent.mkdir(parents=True, exist_ok=True)
                     tmp = tmpdir / (item_key.replace(":", "_") + ".part")
                     sz = _http_download(urls[0], tmp, headers=hdrs)
+                    _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트
                     sha, reused = store_put(tmp); shas.append(sha)
                     if not reused or not destp.exists():
                         shutil.copy2(store_path(sha), destp)
@@ -1362,6 +1458,7 @@ def run_collect(selected):
                     for i, u in enumerate(urls):
                         tmp = tmpdir / (item_key.replace(":", "_") + f"_{i}.part")
                         sz = _http_download(u, tmp, headers=hdrs)
+                        _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트(루프 내)
                         sha, reused = store_put(tmp); shas.append(sha); allreused = allreused and reused
                         MGR._emit("collect", f"  파일{i+1}/{len(urls)} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
                     if (not allreused) or (not _nonempty_dir(pathlib.Path(dest))):
