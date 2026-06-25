@@ -210,7 +210,7 @@ def sanitize_cache(c):
     out = {}
     for k in ("static_long", "static_short", "dyn"):
         v = c.get(k)
-        if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9,=\-\s]{1,120}", v):
+        if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9,= \-]{1,120}", v):
             out[k] = v.strip()
     return out or None
 
