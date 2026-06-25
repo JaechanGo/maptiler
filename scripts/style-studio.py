@@ -84,6 +84,12 @@ def apply_style_theme(theme, commit_pending=True):
     pl = style_objects.sanitize_placement(theme.get("placement"))   # 라벨 배치(offset·anchor·생략)
     if pl:
         clean["placement"] = {**(clean.get("placement") or {}), **pl}
+    # 건물 2D/3D pitch 전환 임계값(숫자 0~85 또는 None/삭제)
+    bpv = theme.get("building_pitch_3d")
+    if isinstance(bpv, (int, float)) and not isinstance(bpv, bool) and 0 <= bpv <= 85:
+        clean["building_pitch_3d"] = round(float(bpv), 1)
+    elif "building_pitch_3d" in theme and (bpv is None or bpv == ""):
+        clean.pop("building_pitch_3d", None)
     if isinstance(theme.get("poi_colors"), dict):   # 시설 그룹별 글자색 — 전체 맵 교체(빈 {}=전부 해제→평면 복원)
         clean["poi_colors"] = style_objects.sanitize_poi_colors(theme.get("poi_colors"))
     pt = style_objects.sanitize_poi_tiers(theme.get("poi_tiers"))   # POI 노출 티어(줌)
@@ -178,6 +184,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 cur = {}; fonts_cur = {}; zoom_cur = {}; opacity_cur = {}; icons_cur = {}; sources_cur = {}
                 vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}; place_cur = {}
+                building_pitch_3d_cur = None
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {},
                      "visible": bool(vis_cur.get(o["key"], True))}
@@ -198,6 +205,11 @@ class H(BaseHTTPRequestHandler):
                 _thm = json.loads((ROOT / "style/theme.json").read_text(encoding="utf-8"))
             except Exception:
                 _thm = {}
+            # 건물 pitch 임계값 — style.metadata 우선, theme.json fallback
+            _bpv = style.get("metadata", {}).get("cuvia:building_pitch_3d")
+            if _bpv is None:
+                _bpv = _thm.get("building_pitch_3d")
+            building_pitch_3d_cur = _bpv if isinstance(_bpv, (int, float)) and not isinstance(_bpv, bool) else None
             poi_tiers = style_objects.sanitize_poi_tiers(_thm.get("poi_tiers")) or style_objects.POI_TIERS_DEFAULT
             cat_tiers = style_objects.sanitize_cat_tiers(_thm.get("cat_tiers")) or style_objects.CAT_TIER_DEFAULT
             source_groups = [{"key": g["key"], "label": g["label"], "kind": g["kind"],
@@ -224,6 +236,7 @@ class H(BaseHTTPRequestHandler):
                                "poi_tiers": poi_tiers, "cat_tiers": cat_tiers,
                                "gradient_objects": [{"key": g["key"], "label": g["label"], **(grad_cur.get(g["key"]) or {})}
                                                     for g in style_objects.gradient_targets()],
+                               "building_pitch_3d": building_pitch_3d_cur,
                                "tile_port": TILE_PORT, "auth": bool(STUDIO_TOKEN)})
         if self.path == "/api/style/export":
             p = ROOT / "style/style.json"
@@ -410,6 +423,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <h2>투명도(불투명도) %</h2><div id=oprows></div>
    </div>
    <div class=pane data-p=adv hidden>
+     <h2>건물 2D/3D pitch 자동전환</h2>
+     <div class=row><label>전환 임계값 (도, 비우면 끄기)</label>
+       <input type=number class=zn id=bpitch min=0 max=85 step=1 placeholder="끄기"></div>
+     <p class=hint>지도가 이 각도(pitch) 이상이면 3D 건물만, 미만이면 2D 건물만 표시합니다.<br>비워두면 자동전환 꺼짐(기본) — 2D·3D 둘 다 표시, 수동 버튼 유지.</p>
      <h2>외곽선(halo)·도트 테두리·건물 외곽</h2><div id=extrarows></div>
      <h2>글꼴</h2><div id=fontrows></div>
      <h2>속성별 색 그라데이션</h2><div id=gradrows></div>
@@ -426,7 +443,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={};
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null;
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -458,6 +475,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    GRAD.forEach(g=>{INITG[g.key]={on:g.on,low:g.low,high:g.high,max:g.max}; wireGrad(g);});
    PT=d.poi_tiers||[]; CTT=d.cat_tiers||{cat1:{},cat2:{},cat:{}}; CTT.cat1=CTT.cat1||{}; CTT.cat2=CTT.cat2||{}; CTT.cat=CTT.cat||{};
    INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT); renderTiers();
+   INITBP=(d.building_pitch_3d!=null)?d.building_pitch_3d:null;
+   const bpe=$('#bpitch'); if(bpe)bpe.value=(INITBP!=null)?INITBP:'';
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
      // maplibre 워커는 document base 가 없어 스타일의 상대경로 /dyn/* (martin 동적타일=건물·필지·POI)로
@@ -536,6 +555,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    GRAD.forEach(g=>{const i=INITG[g.key]||{}; const c=$('#g_'+g.key); if(c)c.checked=!!i.on; const lo=$('#glo_'+g.key); if(lo)lo.value=i.low||'#3a4a6b'; const hi=$('#ghi_'+g.key); if(hi)hi.value=i.high||'#9db4e0'; const mx=$('#gmx_'+g.key); if(mx)mx.value=i.max||100;});
    POICOL.forEach(g=>{const cur=INITPC[g.key]; const k=$('#pck_'+g.key); if(k)k.checked=!!cur; const v=cur||pcFb(); const c=$('#pcc_'+g.key),h=$('#pch_'+g.key); if(c){c.value=v;h.value=v;}});
    PT=JSON.parse(INITPT); CTT=JSON.parse(INITCTT); renderTiers();
+   const bpr=$('#bpitch'); if(bpr)bpr.value=(INITBP!=null)?INITBP:'';
    map.setStyle(`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,{diff:false});
    $('#status').textContent='되돌림 — 서버 스타일 다시 로드'; };
  $('#exp').onclick=()=>location.href='/api/style/export';
@@ -752,6 +772,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const t=PT.find(x=>x.key===o.value); if(t)o.textContent=t.label+' (z'+t.minzoom+')'; }); }
  $('#save').onclick=()=>{
    const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
+   const bpv=$('#bpitch').value; theme.building_pitch_3d=(bpv==='')?null:+bpv;
    const z=zoomChanged(); if(Object.keys(z).length) theme.zoom=z;
    const op=opacityChanged(); if(Object.keys(op).length) theme.opacity=op;
    const sc=sourcesChanged(); if(sc) theme.sources=sc;
@@ -782,6 +803,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        INITPC=poiColMap();
        PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();}); renderTree();
        INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT);
+       const bpve=$('#bpitch'); INITBP=(bpve&&bpve.value!=='')?+bpve.value:null;
      }
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
    }).catch(e=>$('#status').textContent='✗ 실패: '+e);

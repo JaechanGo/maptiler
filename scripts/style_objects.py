@@ -915,6 +915,14 @@ def sanitize_extras(ex):
     return out
 
 
+def apply_building_pitch3d(style, v):
+    """건물 2D/3D pitch 전환 임계값을 style.metadata 에 기록(데모가 읽음). None/무효면 키 제거(기본=현재상태)."""
+    md = style.setdefault("metadata", {})
+    if isinstance(v, (int, float)) and 0 <= v <= 85:
+        md["cuvia:building_pitch_3d"] = round(float(v), 1); return 1
+    md.pop("cuvia:building_pitch_3d", None); return 0
+
+
 def apply_theme(style, theme):
     """theme({key:#hex}) 를 style 에 적용(평면 객체 + POI 그룹 match). 반환: 적용 수."""
     idx = _index(style); n = 0
@@ -929,6 +937,8 @@ def apply_theme(style, theme):
             if L is None:
                 continue
             L.setdefault("paint", {})[prop] = color; n += 1
+    # 건물 2D/3D pitch 전환 임계값 — style.metadata에 기록(기본: 키 없음=현재상태 유지)
+    n += apply_building_pitch3d(style, theme.get("building_pitch_3d"))
     # POI 카테고리 그룹별 글자색 — 평면색 직후(방금 깐 '시설 라벨' 평면색을 fallback으로 감쌈)
     n += apply_poi_cat_colors(style, sanitize_poi_colors(theme.get("poi_colors") or {}))
     # 글꼴(layout text-font)
