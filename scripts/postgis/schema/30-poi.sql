@@ -17,6 +17,10 @@ CREATE INDEX IF NOT EXISTS poi_geom_gix    ON poi USING gist (geom);
 CREATE INDEX IF NOT EXISTS poi_kind_idx    ON poi (kind);
 CREATE INDEX IF NOT EXISTS poi_primary_idx ON poi (is_primary);
 
+-- T8: 서버측 tier 디클러터 — tier_minzoom = 해당 POI가 타일에 처음 등장하는 줌 (theme 단일소스 백필).
+ALTER TABLE poi ADD COLUMN IF NOT EXISTS tier_minzoom smallint;
+CREATE INDEX IF NOT EXISTS poi_tier_idx ON poi (tier_minzoom);
+
 -- 공공시설 — kind 로 레이어 구분(병원/경찰/소방/AED/대피소). 출처별 갱신 = DELETE WHERE kind=... + insert.
 CREATE TABLE IF NOT EXISTS public_facility (
     id        bigserial PRIMARY KEY,

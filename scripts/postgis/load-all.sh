@@ -99,6 +99,8 @@ if has geocode; then
   if [ -f "$GDB" ]; then
     run python3 "$HERE/load_geocode.py" --db "$GDB" \
       || { echo "  ✗ geocode 적재 실패 — address/poi 미완 가능. 재실행: STEPS=geocode $0" >&2; fail=1; }
+    run python3 "$HERE/backfill_poi_tier.py" \
+      || { echo "  ✗ backfill_poi_tier 실패 — tier_minzoom 미갱신. 재실행: STEPS=geocode $0" >&2; fail=1; }
   else
     echo "  (건너뜀) geocode.sqlite 없음: $GDB (09-gen-geocode.py 먼저)"
   fi

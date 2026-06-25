@@ -660,7 +660,11 @@ TFRESH = {
                                  "scripts/postgis/build_dong_dict.sql",
                                  "scripts/postgis/build_sigungu_dict.sh",
                                  "scripts/postgis/backfill_parcel_jibun.sql",
-                                 "scripts/postgis/backfill_geom_pt.sql"],
+                                 "scripts/postgis/backfill_geom_pt.sql",
+                                 # ── T8: POI tier 디클러터(스키마·함수·백필) ──
+                                 "scripts/postgis/schema/30-poi.sql",
+                                 "scripts/postgis/schema/31-poi-mvt.sql",
+                                 "scripts/postgis/backfill_poi_tier.py"],
                      "out": []},   # PostGIS 적재(파일 산출물 없음) — src/scripts 시그니처로 재빌드 판정
     "qc": {"always": True},
     "package": {"always": True},
