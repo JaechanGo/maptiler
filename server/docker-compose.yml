@@ -127,6 +127,8 @@ services:
       - max_parallel_maintenance_workers=${PG_PARALLEL_MAINT:-4}   # 병렬 인덱스 빌드(btree)
       - -c
       - random_page_cost=1.1                             # SSD/NVMe (HDD면 4.0)
+      - -c
+      - jit=off                                          # MVT 짧은 반복쿼리 JIT 컴파일 오버헤드 제거
     environment:
       POSTGRES_USER: ${PGUSER:-cuvia}
       POSTGRES_PASSWORD: ${PGPASSWORD:-cuvia}
