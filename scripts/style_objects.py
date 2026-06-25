@@ -385,26 +385,17 @@ def _tier_value_expr(tiers, cat_tier, value_of):
 
 
 def apply_poi_tiers(style, tiers, cat_tier):
-    """poi-label의 text/icon을 '카테고리 티어 줌 이상에서만 표시'로 게이트 + 티어순 sort-key. 반환 적용 수."""
+    """poi-label의 text/icon 티어순 sort-key + 레이어/소스 minzoom 설정. 반환 적용 수.
+    # T10: 서버(poi_mvt)가 tier_minzoom<=z 로 줌필터 → 클라 줌게이트 불필요(받은 피처만 렌더). 정렬키·minzoom은 유지."""
     L = _index(style).get(POI_ICON_LAYER)   # poi-label
     if L is None or not tiers:
         return 0
-    mz = _tier_value_expr(tiers, cat_tier, lambda t, i: t.get("minzoom", 15))
     sk = _tier_value_expr(tiers, cat_tier, lambda t, i: i)   # 티어 index = 충돌 우선순위(낮을수록 먼저)
     lay = L.setdefault("layout", {})
     inner_icon = _gate_inner(lay.get("icon-image"))
-    # 카테고리별 줌 게이트 — style-spec은 ["zoom"]을 step/interpolate 최상위 입력으로만 허용한다.
-    # ["case",[">=",["zoom"],mz],V,""](불법: zoom을 case/비교 안에 중첩)를, 줌 step의 각 stop에서
-    # '데이터식 mz'를 그 stop 줌값과 비교하는 형태로 표현(동작 동일, mz<=현재stop줌이면 V, 아니면 "").
-    zlevels = sorted({int(t.get("minzoom", 15)) for t in tiers})
-    def _zoom_gate(value):
-        g = ["step", ["zoom"], ""]
-        for z in zlevels:
-            g += [z, ["case", ["<=", mz, z], value, ""]]
-        return g
-    lay["text-field"] = _zoom_gate(["get", "name"])
+    lay["text-field"] = ["get", "name"]
     if inner_icon is not None:
-        lay["icon-image"] = _zoom_gate(inner_icon)
+        lay["icon-image"] = inner_icon
     lay["symbol-sort-key"] = sk
     L["minzoom"] = min(t.get("minzoom", 15) for t in tiers)
     # 소스 minzoom도 표시 줌(tier 최소)에 맞춰 자동 정렬 — z(min)~ 미만 거대타일 페치 차단(데이터는 전수 보존).
