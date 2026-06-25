@@ -918,7 +918,7 @@ def sanitize_extras(ex):
 def apply_building_pitch3d(style, v):
     """건물 2D/3D pitch 전환 임계값을 style.metadata 에 기록(데모가 읽음). None/무효면 키 제거(기본=현재상태)."""
     md = style.setdefault("metadata", {})
-    if isinstance(v, (int, float)) and 0 <= v <= 85:
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 85:
         md["cuvia:building_pitch_3d"] = round(float(v), 1); return 1
     md.pop("cuvia:building_pitch_3d", None); return 0
 
