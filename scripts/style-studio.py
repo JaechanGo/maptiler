@@ -57,10 +57,10 @@ def apply_style_theme(theme, commit_pending=True):
     ic = style_objects.sanitize_icons(theme.get("icons"))   # 카테고리 아이콘(대분류 slug)
     if ic:
         clean["icons"] = {**(clean.get("icons") or {}), **ic}
-    iov = style_objects.sanitize_icon_overrides(theme.get("icon_overrides"))   # 중/소 아이콘 오버라이드
+    iov = style_objects.sanitize_icon_overrides(theme.get("icon_overrides"))   # 중분류 아이콘 오버라이드
     if iov:
         cov = clean.get("icon_overrides") or {}
-        for lvl in ("cat2", "cat"):
+        for lvl in ("cat2",):
             if iov.get(lvl):
                 cov[lvl] = {**(cov.get(lvl) or {}), **iov[lvl]}
         clean["icon_overrides"] = cov
@@ -98,7 +98,7 @@ def apply_style_theme(theme, commit_pending=True):
     ctt = style_objects.sanitize_cat_tiers(theme.get("cat_tiers"))   # 카테고리→티어
     if ctt:
         base = clean.get("cat_tiers") or {}
-        for lvl in ("cat1", "cat2", "cat"):
+        for lvl in ("cat1", "cat2"):
             if ctt.get(lvl):
                 base[lvl] = {**(base.get(lvl) or {}), **ctt[lvl]}
         clean["cat_tiers"] = base
@@ -211,6 +211,7 @@ class H(BaseHTTPRequestHandler):
             building_pitch_3d_cur = _bpv if isinstance(_bpv, (int, float)) and not isinstance(_bpv, bool) else None
             poi_tiers = style_objects.sanitize_poi_tiers(_thm.get("poi_tiers")) or style_objects.POI_TIERS_DEFAULT
             cat_tiers = style_objects.sanitize_cat_tiers(_thm.get("cat_tiers")) or style_objects.CAT_TIER_DEFAULT
+            cache_cur = style_objects.sanitize_cache(_thm.get("cache")) or style_objects.CACHE_DEFAULT
             source_groups = [{"key": g["key"], "label": g["label"], "kind": g["kind"],
                               "src": g.get("src"), "source": g.get("source"),
                               "on": bool(sources_cur.get(g["key"], True))} for g in style_objects.SOURCE_GROUPS]
@@ -233,6 +234,7 @@ class H(BaseHTTPRequestHandler):
                                                       "value": place_cur.get(t["key"])} for t in style_objects.placement_targets()],
                                "taxonomy": taxonomy, "icon_overrides": iov_cur,
                                "poi_tiers": poi_tiers, "cat_tiers": cat_tiers,
+                               "cache": cache_cur,
                                "gradient_objects": [{"key": g["key"], "label": g["label"], **(grad_cur.get(g["key"]) or {})}
                                                     for g in style_objects.gradient_targets()],
                                "building_pitch_3d": building_pitch_3d_cur,
@@ -255,7 +257,13 @@ class H(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
-            return self._json(apply_style_theme(body.get("theme", {})))
+            theme = body.get("theme", {})
+            c = style_objects.sanitize_cache(theme.get("cache"))
+            if c:
+                theme["cache"] = c
+            elif "cache" in theme:
+                del theme["cache"]
+            return self._json(apply_style_theme(theme))
         if self.path == "/api/style/import":
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_STYLE: return self._json({"error": "style.json 과대(4MB 초과)"}, 413)
@@ -287,7 +295,7 @@ class H(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             level = (q.get("level") or [""])[0]; name = (q.get("name") or [""])[0]
             key = (q.get("group") or [""])[0]
-            if level in ("cat2", "cat") and name:          # 중/소 오버라이드 — 이름→ASCII slug
+            if level == "cat2" and name:          # 중분류 오버라이드 — 이름→ASCII slug
                 import zlib
                 slug = "ov" + format(zlib.crc32(name.encode("utf-8")) & 0xffffffff, "x")
             else:
@@ -422,6 +430,14 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <h2>투명도(불투명도) %</h2><div id=oprows></div>
    </div>
    <div class=pane data-p=adv hidden>
+     <h2>캐시 제어 헤더 (Cache-Control)</h2>
+     <div class=row><label>정적 장기 (fonts·sprites)</label>
+       <input type=text id=csl style="width:200px" placeholder="public, max-age=604800" spellcheck=false></div>
+     <div class=row><label>정적 단기 (tiles·style)</label>
+       <input type=text id=css style="width:200px" placeholder="public, max-age=300, stale-while-revalidate=3600" spellcheck=false></div>
+     <div class=row><label>동적 (dyn·martin)</label>
+       <input type=text id=cdn style="width:200px" placeholder="public, max-age=3600, stale-while-revalidate=86400" spellcheck=false></div>
+     <p class=hint>비워두면 기본값 유지. 저장 후 build_style이 gateway-nginx.conf를 재생성합니다(라이브 적용엔 gateway reload 필요).</p>
      <h2>건물 2D/3D pitch 자동전환</h2>
      <div class=row><label>전환 임계값 (도, 비우면 끄기)</label>
        <input type=number class=zn id=bpitch min=0 max=85 step=1 placeholder="끄기"></div>
@@ -442,7 +458,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null;
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{}}, INITIOV={cat2:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null, CACHE_DEF={}, INITCACHE={};
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -454,7 +470,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    $('#oprows').innerHTML=(OPA=d.opacity_objects||[]).map(orow).join('');
    OPA.forEach(o=>{ INITO[o.key]=Math.round((o.value==null?1:o.value)*100); wireOpacity(o); });
    ICONG=d.icon_groups||[]; $('#iconrows').innerHTML=ICONG.map(irow).join(''); ICONG.forEach(wireIcon);
-   TAX=d.taxonomy||{}; IOV=d.icon_overrides||{cat2:{},cat:{}}; IOV.cat2=IOV.cat2||{}; IOV.cat=IOV.cat||{};
+   TAX=d.taxonomy||{}; IOV=d.icon_overrides||{cat2:{}}; IOV.cat2=IOV.cat2||{};
    INITIOV=JSON.parse(JSON.stringify(IOV)); renderTree();
    POICOL=ICONG; PCUR=d.poi_colors||{};   // 시설 그룹별 글자색 — 아이콘과 동일 그룹(cats 포함) 재사용
    $('#poicolrows').innerHTML=POICOL.map(pcrow).join('');
@@ -472,8 +488,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    renderFonts(d.fonts||{});
    GRAD=d.gradient_objects||[]; $('#gradrows').innerHTML=GRAD.map(gradrow).join('');
    GRAD.forEach(g=>{INITG[g.key]={on:g.on,low:g.low,high:g.high,max:g.max}; wireGrad(g);});
-   PT=d.poi_tiers||[]; CTT=d.cat_tiers||{cat1:{},cat2:{},cat:{}}; CTT.cat1=CTT.cat1||{}; CTT.cat2=CTT.cat2||{}; CTT.cat=CTT.cat||{};
+   PT=d.poi_tiers||[]; CTT=d.cat_tiers||{cat1:{},cat2:{}}; CTT.cat1=CTT.cat1||{}; CTT.cat2=CTT.cat2||{};
    INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT); renderTiers();
+   CACHE_DEF=d.cache||{}; INITCACHE=JSON.parse(JSON.stringify(CACHE_DEF));
+   $('#csl').value=CACHE_DEF.static_long||''; $('#css').value=CACHE_DEF.static_short||''; $('#cdn').value=CACHE_DEF.dyn||'';
    INITBP=(d.building_pitch_3d!=null)?d.building_pitch_3d:null;
    const bpe=$('#bpitch'); if(bpe)bpe.value=(INITBP!=null)?INITBP:'';
    map=new maplibregl.Map({container:'map',
@@ -555,6 +573,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    POICOL.forEach(g=>{const cur=INITPC[g.key]; const k=$('#pck_'+g.key); if(k)k.checked=!!cur; const v=cur||pcFb(); const c=$('#pcc_'+g.key),h=$('#pch_'+g.key); if(c){c.value=v;h.value=v;}});
    PT=JSON.parse(INITPT); CTT=JSON.parse(INITCTT); renderTiers();
    const bpr=$('#bpitch'); if(bpr)bpr.value=(INITBP!=null)?INITBP:'';
+   $('#csl').value=INITCACHE.static_long||''; $('#css').value=INITCACHE.static_short||''; $('#cdn').value=INITCACHE.dyn||'';
    map.setStyle(`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,{diff:false});
    $('#status').textContent='되돌림 — 서버 스타일 다시 로드'; };
  $('#exp').onclick=()=>location.href='/api/style/export';
@@ -592,9 +611,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  function txr(level,name,extra){return `<div class=txr><span class=nm>${name}</span>${txThumb(level,name)}<button class="tup" data-l="${level}" data-n="${encodeURIComponent(name)}">아이콘</button>${extra||''}</div>`;}
  function renderTree(){const order=TAX.cat1_order||[],tree=TAX.tree||{}; let h='';
    order.forEach(c1=>{const mids=tree[c1]||{}; h+=`<details class=tx1><summary>${c1}</summary>`;
-     Object.keys(mids).forEach(c2=>{const subs=mids[c2]||[];
-       h+=txr('cat2',c2, subs.length?`<button class=exp>소 ${subs.length}</button>`:'');
-       if(subs.length) h+=`<div class=subwrap hidden>`+subs.map(s=>txr('cat',s,'')).join('')+`</div>`;});
+     Object.keys(mids).forEach(c2=>{
+       h+=txr('cat2',c2,'');});
      h+=`</details>`;});
    const el=$('#icontree'); if(!el)return; el.innerHTML=h;
    el.querySelectorAll('.exp').forEach(b=>b.onclick=()=>{const w=b.closest('.txr').nextElementSibling; if(w&&w.classList.contains('subwrap'))w.hidden=!w.hidden;});
@@ -743,19 +761,17 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const order=TAX.cat1_order||[],tree=TAX.tree||{}; let h='';
    order.forEach(c1=>{const mids=tree[c1]||{};
      h+=`<details class=tx1><summary>${c1} ${tierSel('cat1',c1)}</summary>`;
-     Object.keys(mids).forEach(c2=>{const subs=mids[c2]||[];
-       h+=`<div class=txr><span class=nm>${c2}</span>${tierSel('cat2',c2)}${subs.length?'<button class=exp>소 '+subs.length+'</button>':''}</div>`;
-       if(subs.length) h+=`<div class=subwrap hidden>`+subs.map(sb=>`<div class=txr><span class=nm>${sb}</span>${tierSel('cat',sb)}</div>`).join('')+`</div>`;});
+     Object.keys(mids).forEach(c2=>{
+       h+=`<div class=txr><span class=nm>${c2}</span>${tierSel('cat2',c2)}</div>`;});
      h+=`</details>`;});
    const el=$('#cattree'); if(!el)return; el.innerHTML=h;
-   el.querySelectorAll('.exp').forEach(b=>b.onclick=()=>{const w=b.closest('.txr').nextElementSibling; if(w&&w.classList.contains('subwrap'))w.hidden=!w.hidden;});
    el.querySelectorAll('.tiersel').forEach(s=>s.onchange=()=>{const lv=s.dataset.l,nm=decodeURIComponent(s.dataset.n);
      CTT[lv]=CTT[lv]||{}; if(s.value)CTT[lv][nm]=s.value; else delete CTT[lv][nm]; applyTiers();});}
  function catMatch(field,pairs,inner){return pairs.length?['match',['get',field]].concat(pairs,[inner]):inner;}
  function buildTierMz(){ const tmz={}; PT.forEach(t=>tmz[t.key]=t.minzoom);
    const fb=tmz['t3']!=null?tmz['t3']:(PT.length?PT[PT.length-1].minzoom:17);
    const conv=(m)=>{const o=[]; Object.keys(m||{}).forEach(nm=>{const v=tmz[m[nm]]; if(v!=null)o.push(nm,v);}); return o;};
-   let e=catMatch('cat1',conv(CTT.cat1),fb); e=catMatch('cat2',conv(CTT.cat2),e); e=catMatch('cat',conv(CTT.cat),e); return e;}
+   let e=catMatch('cat1',conv(CTT.cat1),fb); e=catMatch('cat2',conv(CTT.cat2),e); return e;}
  function applyTiers(){ if(!map||!map.isStyleLoaded()||!map.getLayer('poi-label'))return;
    const mz=buildTierMz(); let ii; try{ii=map.getLayoutProperty('poi-label','icon-image');}catch(e){ii=null;}
    if(Array.isArray(ii)&&ii[0]==='case')ii=ii[2];
@@ -785,6 +801,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const grc=gradChanged(); if(grc) theme.gradient=grc;
    const pcc=poiColChanged(); if(pcc) theme.poi_colors=pcc;
    const tc=tiersChanged(); if(tc){ if(tc.poi_tiers)theme.poi_tiers=tc.poi_tiers; if(tc.cat_tiers)theme.cat_tiers=tc.cat_tiers; }
+   const csl=$('#csl').value.trim(), css=$('#css').value.trim(), cdn=$('#cdn').value.trim();
+   if(csl||css||cdn){ theme.cache={}; if(csl)theme.cache.static_long=csl; if(css)theme.cache.static_short=css; if(cdn)theme.cache.dyn=cdn; }
    $('#status').textContent='적용 중…';
    post('/api/style',JSON.stringify({theme})).then(r=>r.json()).then(d=>{
      if(d.ok){  // 적용 성공 → 현재값을 새 기준선으로(되돌리기 일관성)
@@ -803,6 +821,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();}); renderTree();
        INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT);
        const bpve=$('#bpitch'); INITBP=(bpve&&bpve.value!=='')?+bpve.value:null;
+       INITCACHE={static_long:$('#csl').value,static_short:$('#css').value,dyn:$('#cdn').value};
      }
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
    }).catch(e=>$('#status').textContent='✗ 실패: '+e);
