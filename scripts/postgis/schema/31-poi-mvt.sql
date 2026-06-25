@@ -12,7 +12,7 @@ RETURNS bytea AS $$
     WHERE p.geom && b.env4326
       AND (p.tier_minzoom IS NULL OR p.tier_minzoom <= z)   -- NULL=미분류는 항상 표시(누락 방지)
   ) t WHERE t.geom IS NOT NULL;
-$$ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE;
+$$ LANGUAGE sql STABLE STRICT PARALLEL SAFE;
 
 DO $do$ BEGIN
   EXECUTE 'COMMENT ON FUNCTION public.poi_mvt(integer,integer,integer) IS ' || quote_literal('{"minzoom":15,"maxzoom":22}');

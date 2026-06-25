@@ -162,8 +162,8 @@ def _index(style):
 
 
 def build_poi_icon_match(icons, overrides=None):
-    """대분류(cat1) 기본 + 중분류(cat2)·소분류(cat) 오버라이드 → 중첩 match 식.
-    평가 우선순위: 소분류 > 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
+    """대분류(cat1) 기본 + 중분류(cat2) 오버라이드 → 중첩 match 식.
+    평가 우선순위: 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
     overrides = overrides or {}
     expr = ["match", ["get", "cat1"]]                     # 대분류 기본(가장 안쪽 default)
     for g in ICON_GROUPS:
