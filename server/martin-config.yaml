@@ -99,6 +99,7 @@ postgres:
         name: text
         grade: text
 
-# T8: POI tier 디클러터 함수소스 (최상위 레벨 — postgres.functions는 6+tables 시 v0.18.0 amd64 파싱 오류)
-functions:
-  poi_mvt: {}
+  functions:                 # T8: POI tier 디클러터 함수소스 (postgres 하위 = tables 형제). poi_mvt(z,x,y)=tier_minzoom<=z 필터.
+    poi_mvt:                  # ★빈 {} 는 v0.18에서 OptOneMany 파싱오류 → schema/function 명시 필수
+      schema: public
+      function: poi_mvt
