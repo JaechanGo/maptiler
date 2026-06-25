@@ -57,8 +57,6 @@ CAT_TIER_DEFAULT = {       # 카테고리→티어 기본(대분류 + 랜드마�
     "cat1": {"음식": "t3", "소매": "t3", "수리·개인": "t3", "과학·기술": "t3", "교육": "t2",
              "예술·스포츠": "t3", "시설관리·임대": "t2", "부동산": "t3", "숙박": "t2", "보건의료": "t2"},
     "cat2": {"병원": "t1", "대학": "t1"},
-    "cat": {"종합병원": "t1", "일반병원": "t1", "요양병원": "t1", "치과병원": "t1", "한방병원": "t1",
-            "대학교": "t1", "호텔/리조트": "t1", "백화점": "t1", "대형마트": "t1", "관공서": "t1"},
 }
 
 # 데이터 출처 토글 — "이 지도에 어떤 데이터를 쓸지" 체크.
@@ -178,12 +176,6 @@ def build_poi_icon_match(icons, overrides=None):
         for name, slug in mid.items():
             m += [name, slug]
         m.append(expr); expr = m
-    sub = overrides.get("cat") or {}
-    if sub:
-        s = ["match", ["get", "cat"]]
-        for name, slug in sub.items():
-            s += [name, slug]
-        s.append(expr); expr = s
     return expr
 
 
@@ -240,11 +232,11 @@ def sanitize_icons(icons):
 
 
 def sanitize_icon_overrides(ov):
-    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}, cat:{소분류명:slug}}, slug ASCII."""
+    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}}, slug ASCII."""
     if not isinstance(ov, dict):
         return {}
     out = {}
-    for lvl in ("cat2", "cat"):
+    for lvl in ("cat2",):
         m = ov.get(lvl)
         if not isinstance(m, dict):
             continue
@@ -258,15 +250,15 @@ def sanitize_icon_overrides(ov):
 
 
 def current_icon_overrides(style):
-    """poi-icon 중첩 match 에서 중/소 오버라이드 추출 → {cat2:{...}, cat:{...}}."""
+    """poi-icon 중첩 match 에서 중분류 오버라이드 추출 → {cat2:{...}}."""
     e = _gate_inner(_index(style).get(POI_ICON_LAYER, {}).get("layout", {}).get("icon-image"))
-    out = {"cat2": {}, "cat": {}}
+    out = {"cat2": {}}
     while isinstance(e, list) and len(e) >= 4 and e[0] == "match" and isinstance(e[1], list) and len(e[1]) == 2 and e[1][0] == "get":
         field = e[1][1]
         if field == "cat1":
             break
         for name, slug in zip(e[2:-1:2], e[3:-1:2]):
-            if field in ("cat2", "cat") and isinstance(name, str):
+            if field == "cat2" and isinstance(name, str):
                 out[field][name] = slug
         e = e[-1]
     return out
@@ -281,7 +273,7 @@ def apply_icons(style, icons, overrides=None):
     cur.update(icons or {})
     idx[POI_ICON_LAYER].setdefault("layout", {})["icon-image"] = build_poi_icon_match(cur, overrides)
     ov = overrides or {}
-    return (len(icons or {})) + len(ov.get("cat2") or {}) + len(ov.get("cat") or {})
+    return (len(icons or {})) + len(ov.get("cat2") or {})
 
 
 # ── POI 카테고리 그룹별 글자색 (cat1 → 그룹색, 미지정 그룹은 '시설 라벨' 단일색 fallback) ──
@@ -389,7 +381,6 @@ def _tier_value_expr(tiers, cat_tier, value_of):
     conv = lambda m: {name: tval[tk] for name, tk in (m or {}).items() if tk in tval}
     expr = _cat_match("cat1", conv((cat_tier or {}).get("cat1")), default)
     expr = _cat_match("cat2", conv((cat_tier or {}).get("cat2")), expr)
-    expr = _cat_match("cat", conv((cat_tier or {}).get("cat")), expr)
     return expr
 
 
@@ -440,7 +431,7 @@ def sanitize_cat_tiers(ct):
     if not isinstance(ct, dict):
         return None
     out = {}
-    for lvl in ("cat1", "cat2", "cat"):
+    for lvl in ("cat1", "cat2"):
         m = ct.get(lvl)
         if isinstance(m, dict):
             clean = {name: tk for name, tk in m.items()
