@@ -102,6 +102,9 @@ def apply_style_theme(theme, commit_pending=True):
             if ctt.get(lvl):
                 base[lvl] = {**(base.get(lvl) or {}), **ctt[lvl]}
         clean["cat_tiers"] = base
+    cc = style_objects.sanitize_cache(theme.get("cache"))   # gateway-nginx 캐시 헤더
+    if cc:
+        clean["cache"] = cc
     pend = ROOT / "style" / "icons" / ".pending"   # 스테이징된 아이콘 업로드를 이제 커밋(저장 시점)
     if commit_pending and pend.is_dir():           # import 경로는 아이콘 스테이징과 무관 → 커밋 안 함
         for f in pend.glob("*.png"):
@@ -258,11 +261,6 @@ class H(BaseHTTPRequestHandler):
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
             theme = body.get("theme", {})
-            c = style_objects.sanitize_cache(theme.get("cache"))
-            if c:
-                theme["cache"] = c
-            elif "cache" in theme:
-                del theme["cache"]
             return self._json(apply_style_theme(theme))
         if self.path == "/api/style/import":
             n = int(self.headers.get("Content-Length", "0"))
@@ -378,8 +376,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  details.tx1{border-bottom:1px solid #1a2233} details.tx1>summary{padding:7px 2px;cursor:pointer;font-size:13px;font-weight:600;color:#cfe0ff}
  .txr{display:flex;align-items:center;gap:8px;padding:5px 0 5px 14px;font-size:12px}
  .txr .nm{flex:1;color:#bcc8de} .txr img.ic{width:22px;height:22px;border-radius:5px;border:1px solid #26304a;background:#0a0e16;object-fit:contain}
- .txr .noic{color:#5f6b80;width:22px;text-align:center} .txr .exp,.txr .tup{background:#1a2233;border:1px solid #26304a;color:#8d9bb5;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer}
- .txr .tup{color:#cfe0ff} .subwrap{padding-left:14px}
+ .txr .noic{color:#5f6b80;width:22px;text-align:center} .txr .tup{background:#1a2233;border:1px solid #26304a;color:#cfe0ff;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer}
 </style>
 <div class=top>
  <div class=brand><span class=dot></span>CUVIA Style Studio</div>
@@ -615,7 +612,6 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        h+=txr('cat2',c2,'');});
      h+=`</details>`;});
    const el=$('#icontree'); if(!el)return; el.innerHTML=h;
-   el.querySelectorAll('.exp').forEach(b=>b.onclick=()=>{const w=b.closest('.txr').nextElementSibling; if(w&&w.classList.contains('subwrap'))w.hidden=!w.hidden;});
    el.querySelectorAll('.tup').forEach(b=>b.onclick=()=>txUpload(b.dataset.l, decodeURIComponent(b.dataset.n)));}
  function txUpload(level,name){const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
    inp.onchange=e=>{const f=e.target.files[0]; if(!f)return; $('#status').textContent='오버라이드 업로드 중…';
