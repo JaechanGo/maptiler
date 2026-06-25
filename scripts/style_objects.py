@@ -386,6 +386,11 @@ def apply_poi_tiers(style, tiers, cat_tier):
         lay["icon-image"] = _zoom_gate(inner_icon)
     lay["symbol-sort-key"] = sk
     L["minzoom"] = min(t.get("minzoom", 15) for t in tiers)
+    # 소스 minzoom도 표시 줌(tier 최소)에 맞춰 자동 정렬 — z(min)~ 미만 거대타일 페치 차단(데이터는 전수 보존).
+    src_name = L.get("source")
+    src = (style.get("sources") or {}).get(src_name) if src_name else None
+    if isinstance(src, dict):
+        src["minzoom"] = min(int(t.get("minzoom", 15)) for t in tiers)
     return 1
 
 

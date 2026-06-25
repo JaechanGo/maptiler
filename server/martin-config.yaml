@@ -64,7 +64,7 @@ postgres:
       srid: 4326
       geometry_column: geom
       geometry_type: POINT
-      minzoom: 11
+      minzoom: 15
       maxzoom: 22
       properties:
         kind: text
