@@ -46,6 +46,12 @@ POI_TIERS_DEFAULT = [
     {"key": "t2", "label": "중간", "minzoom": 16},
     {"key": "t3", "label": "낮음", "minzoom": 17},
 ]
+
+CACHE_DEFAULT = {
+    "static_long": "public, max-age=604800",
+    "static_short": "public, max-age=300, stale-while-revalidate=3600",
+    "dyn": "public, max-age=3600, stale-while-revalidate=86400",
+}
 POI_TIER_FALLBACK = "t3"   # 미지정 카테고리 기본 티어
 CAT_TIER_DEFAULT = {       # 카테고리→티어 기본(대분류 + 랜드마크성 중/소분류). 고급설정에서 변경.
     "cat1": {"음식": "t3", "소매": "t3", "수리·개인": "t3", "과학·기술": "t3", "교육": "t2",
@@ -195,6 +201,30 @@ def current_icons(style):
                     out[g["key"]] = slug
                     break
     return out
+
+
+def sanitize_cache(c):
+    """theme['cache'] 정제(주입 방지) — 화이트리스트 키 + 안전문자(영숫자/쉼표/등호/하이픈/공백)만."""
+    if not isinstance(c, dict):
+        return None
+    out = {}
+    for k in ("static_long", "static_short", "dyn"):
+        v = c.get(k)
+        if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9,=\-\s]{1,120}", v):
+            out[k] = v.strip()
+    return out or None
+
+
+def render_nginx_cache_block(cache):
+    """theme cache → gateway-nginx 마커 사이 map 블록 텍스트(끝에 개행 포함)."""
+    c = {**CACHE_DEFAULT, **(cache or {})}
+    return (
+        'map $uri $static_cc {\n'
+        '    default              "%s";\n'
+        '    ~^/(fonts|sprites)/  "%s";\n'
+        '}\n'
+        'map $request_uri $dyn_cc { default "%s"; }\n'
+    ) % (c["static_short"], c["static_long"], c["dyn"])
 
 
 def sanitize_icons(icons):

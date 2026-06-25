@@ -60,6 +60,24 @@ else:
     out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"OK: {out} (layers={len(style['layers'])})")
 
+# gateway-nginx.conf 캐시 블록을 theme.json 의 cache 에서 생성(마커 사이 멱등 치환).
+import re as _re
+import style_objects as _so
+_gw = pathlib.Path(__file__).resolve().parents[1] / "server" / "gateway-nginx.conf"
+_theme_p = root / "theme.json"
+if _gw.exists():
+    _theme = load_json(_theme_p) if _theme_p.exists() else {}
+    _block = _so.render_nginx_cache_block(_so.sanitize_cache(_theme.get("cache")) or _so.CACHE_DEFAULT)
+    _txt = _gw.read_text(encoding="utf-8")
+    _pat = _re.compile(r"(# >>> GENERATED cache.*?>>>\n).*?(# <<< GENERATED <<<\n)", _re.S)
+    if _pat.search(_txt):
+        _new = _pat.sub(lambda m: m.group(1) + _block + m.group(2), _txt)
+        if _new != _txt:
+            _gw.write_text(_new, encoding="utf-8")
+            print(f"캐시 블록 갱신: {_gw.name}")
+    else:
+        print("경고: gateway-nginx.conf 캐시 마커 없음 — 블록 미생성")
+
 # 카테고리 아이콘 스프라이트 재생성(style/icons/*.png → sprite{,@2x}.{png,json}).
 # Pillow 필요 — 없으면 경고만 남기고 계속(스타일 자체는 이미 기록됨).
 import subprocess

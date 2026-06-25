@@ -17,5 +17,10 @@
       "min": 1,
       "max": null
     }
+  },
+  "cache": {
+    "static_long": "public, max-age=604800",
+    "static_short": "public, max-age=300, stale-while-revalidate=3600",
+    "dyn": "public, max-age=3600, stale-while-revalidate=86400"
   }
 }
