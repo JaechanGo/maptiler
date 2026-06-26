@@ -176,6 +176,93 @@ class TestJibunParse(unittest.TestCase):
         self.assertEqual(M.clean_jibun("31 전"), "31")
 
 
+class TestParse(unittest.TestCase):
+    """질의 분해 — 아파트 동번호(bld_dong) 와 법정동(dong) 분리(건물명 검색축)."""
+
+    def test_bld_dong_separated_from_legal_dong(self):
+        # 'NNN동'(숫자+동)은 아파트 동번호 → bld_dong. 법정동(dong) 아님. terms 에서도 제외.
+        p = M.parse("다정한마을 2105동")
+        self.assertEqual(p["bld_dong"], "2105동")
+        self.assertIsNone(p["dong"])
+        self.assertEqual(p["terms"], ["다정한마을"])
+        self.assertIsNone(p["house"])
+
+    def test_bld_dong_short_number(self):
+        # '101동' 같은 짧은 동번호도 분리
+        p = M.parse("래미안 101동")
+        self.assertEqual(p["bld_dong"], "101동")
+        self.assertEqual(p["terms"], ["래미안"])
+        self.assertIsNone(p["dong"])
+
+    def test_legal_dong_with_jibun_regression(self):
+        # 회귀: 한글 법정동 + 지번은 기존대로 (dong/house)
+        p = M.parse("상동 514-8")
+        self.assertEqual(p["dong"], "상동")
+        self.assertEqual(p["house"], (514, 8))
+        self.assertIsNone(p["bld_dong"])
+
+    def test_legal_dong_hangul_unchanged(self):
+        p = M.parse("역삼동 720")
+        self.assertEqual(p["dong"], "역삼동")
+        self.assertEqual(p["house"], (720, 0))
+        self.assertIsNone(p["bld_dong"])
+
+    def test_complex_name_only(self):
+        # 단지명 단독 — bld_dong/dong 없음, terms 에 단지명
+        p = M.parse("다정한마을")
+        self.assertEqual(p["terms"], ["다정한마을"])
+        self.assertIsNone(p["bld_dong"])
+        self.assertIsNone(p["dong"])
+
+    def test_road_path_regression(self):
+        # 회귀: 도로명 경로 (로/길) 불변
+        p = M.parse("테헤란로 152")
+        self.assertEqual(p["road"], "테헤란로")
+        self.assertEqual(p["house"], (152, 0))
+        self.assertIsNone(p["bld_dong"])
+
+    def test_compound_road_spaced(self):
+        # 복합 도로명(상위 대로/로 + 하위 N길)을 띄어쓰면 한 도로로 병합돼야 함
+        p = M.parse("과천대로 7나길")
+        self.assertEqual(p["road"], "과천대로7나길")
+        self.assertIsNone(p["house"])
+
+    def test_compound_road_spaced_with_house(self):
+        p = M.parse("과천대로 7나길 9")
+        self.assertEqual(p["road"], "과천대로7나길")
+        self.assertEqual(p["house"], (9, 0))
+
+    def test_compound_road_already_joined(self):
+        # 붙여쓴 복합 도로명은 그대로(회귀 없음)
+        p = M.parse("과천대로7나길 9")
+        self.assertEqual(p["road"], "과천대로7나길")
+        self.assertEqual(p["house"], (9, 0))
+
+    def test_road_house_attached_lower(self):
+        # 하위도로+번지가 공백없이 붙음 '7나길9' → 도로/번지 분리
+        p = M.parse("과천대로 7나길9")
+        self.assertEqual(p["road"], "과천대로7나길")
+        self.assertEqual(p["house"], (9, 0))
+
+    def test_road_house_fully_attached(self):
+        # 전부 붙음 '과천대로7나길9'
+        p = M.parse("과천대로7나길9")
+        self.assertEqual(p["road"], "과천대로7나길")
+        self.assertEqual(p["house"], (9, 0))
+
+    def test_simple_road_house_attached(self):
+        # 단일 도로+번지 붙음 '테헤란로152'
+        p = M.parse("테헤란로152")
+        self.assertEqual(p["road"], "테헤란로")
+        self.assertEqual(p["house"], (152, 0))
+
+    def test_road_house_attached_with_sub(self):
+        # 부번 포함 붙음 '백범로35-1'
+        p = M.parse("백범로35-1")
+        self.assertEqual(p["road"], "백범로")
+        self.assertEqual(p["house"], (35, 1))
+
+
 # ════════════════════════════════════════════════════════════════
 # 단계2 — display_of / addr_obj / category_of / nonaddr_structure
 # ════════════════════════════════════════════════════════════════

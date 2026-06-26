@@ -279,7 +279,7 @@ def _check_tables(cur):
 
 def parse(q):
     q = re.sub(r"(?<=\d)\.(?=\d)", "", norm(q))
-    house = road = dong = None; san = False; terms = []
+    house = road = dong = bld_dong = None; san = False; terms = []
     for t in re.split(r"[\s,]+", q):
         if not t: continue
         if t == "산": san = True; continue                  # 단독 '산'(임야) 표기
@@ -290,15 +290,31 @@ def parse(q):
             if house is None and a <= 99999 and b <= 99999:  # 첫 유효 번지만 채택 + int4 범위 가드(오버플로 500 예방)
                 house = (a, b)
             continue
-        if re.search(r"(로|길)$", t): road = rnorm(t); continue
+        # 도로명+번지가 공백없이 붙은 토큰('7나길9'·'테헤란로152'·'과천대로7나길9') → 도로(로/길끝) + 끝번지 분리.
+        # fullmatch+greedy 라 '로/길로 끝나는 부분 + 순수 끝번지'가 토큰 전체를 덮을 때만 매칭(단지명 오인 차단).
+        mr = re.fullmatch(r"(.+(?:로|길))(\d+)(?:-(\d+))?", t)
+        if mr:
+            road = (road or "") + rnorm(mr.group(1))
+            a, b = int(mr.group(2)), int(mr.group(3) or 0)
+            if house is None and a <= 99999 and b <= 99999:
+                house = (a, b)
+            continue
+        # 복합 도로명(상위 '○○대로/로' + 하위 'N길/N나길/N번길')을 띄어 입력하면 두 토큰으로 쪼개진다.
+        # 덮어쓰면 마지막 '7나길'만 남아 0건 → 누적 연결로 '과천대로7나길'(정식 road_norm) 복원.
+        if re.search(r"(로|길)$", t): road = (road or "") + rnorm(t); continue
         ct = re.sub(r"[^\w가-힣]", "", t)
         if not ct: continue
+        # 아파트 동번호('2105동'·'101동' = 숫자+동)는 법정동이 아니라 건물 동(棟) → bld 검색축(address.bld) 단서.
+        # terms/dong 에서 분리: terms 에 남으면 이름경로 다중토큰 AND 가 POI 0건을 유발(POI엔 동번호 없음)하기 때문.
+        if bld_dong is None and re.fullmatch(r"\d+동", ct):
+            bld_dong = ct
+            continue
         # 법정동/리/읍/면/'N가'(종로1가 등) 토큰 → 지번경로 분기 단서(terms 에도 남겨 지역가산·이름검색에 활용)
-        # ※ 읍/면 누락 시 농촌(읍·면) 지번질의 전면 0건이 되므로 반드시 포함.
+        # ※ 읍/면 누락 시 농촌(읍·면) 지번질의 전면 0건이 되므로 반드시 포함. 숫자+동(아파트)은 위에서 이미 분리됨.
         if dong is None and len(ct) >= 2 and (re.search(r"(동|리|읍|면)$", ct) or re.search(r"\d가$", ct)):
             dong = ct
         terms.append(ct)
-    return {"road": road, "house": house, "terms": terms, "dong": dong, "san": san}
+    return {"road": road, "house": house, "terms": terms, "dong": dong, "san": san, "bld_dong": bld_dong}
 
 
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
@@ -441,8 +457,43 @@ def geocode(cur, q, limit):
             it["display"] = display_of(it, r)          # road/road_name 부재 → parcel 규칙(F3-a/b)
             results.append((200 + bonus, it))
 
+    # 도로/지번 경로가 결과를 못 내면 이름+건물명 경로 진입(둘은 병합). 미리 캡처해 bld 경로가
+    # results 를 채워도 이름 경로(POI/역)가 함께 돌도록(네이버/카카오식 '주소+장소' 병합).
+    name_path = not results
+
+    # ---- 건물명 경로 (address.bld — 아파트 단지명+동(棟) 주소) ----
+    # bld 컬럼엔 '다정한마을 2105동(경남아너스빌)' 류 단지명+동(棟)이 30만건. 이 텍스트는 search_text(name+road+jibun)
+    # 에 미포함이고 이름 경로는 kind<>'addr' 라 닿지 않으므로 전용 경로 필요. 모든 bld ILIKE 는 address_bld_trgm
+    # GIN(연속 ≥3자 trigram) 가속. 동번호(bld_dong) 있으면 정확 AND(점수↑), 없으면 단지명만(일반확장).
+    if name_path and p["terms"]:
+        bd = p["bld_dong"]
+        # 법정동(dong) 토큰은 bld(단지명+동(棟))에 없음(행정구역은 emd/sigungu 별도 컬럼) → bld 매칭에서 빼고
+        # 지역 좁힘(emd 정확매칭)에만 사용. 안 그러면 '도곡동 타워팰리스 101동' 처럼 동을 앞에 붙일 때 AND 0건.
+        bld_terms = [t for t in p["terms"] if t != p["dong"]]
+        # ≥3자(trgm 가능) 토큰이 1개 이상일 때만 진입 — 2자 단독('%XX%')은 trigram 0개라 1570만행 Seq Scan.
+        anchors = [t for t in bld_terms if len(t) >= 3]
+        if bld_terms and (anchors or (bd and len(bd) >= 3)):
+            def bld_fetch(use_dong):
+                conds = ["bld ILIKE %s"] * len(bld_terms); a = [f"%{t}%" for t in bld_terms]
+                if use_dong and bd:
+                    conds.append("bld ILIKE %s"); a.append(f"%{bd}%")
+                if p["dong"]:                          # 법정동 동반 시 emd 정확매칭(동명 단지 혼입 방지·지역 좁힘)
+                    conds.append("emd = %s"); a.append(p["dong"])
+                cur.execute("SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
+                            "WHERE kind='addr' AND geom IS NOT NULL AND " + " AND ".join(conds) +
+                            f" ORDER BY bld LIMIT {ADDR_CAP}", a)
+                return cur.fetchall()
+            rows = bld_fetch(use_dong=bool(bd)); score = 195 if bd else 150
+            if not rows and bd:                        # ③ fallback: 정확 동 0건 → 동 빼고 단지명만(단지라도 반환)
+                rows = bld_fetch(use_dong=False); score = 150
+            for r in rows:
+                it = {"name": addr_str(r), "kind": "addr",
+                      "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
+                it["display"] = display_of(it, r)      # road 있으면 도로명 규칙(건물명 노출), 없으면 지번 규칙
+                results.append((score, it))
+
     # ---- 이름 경로 (역/지명/POI/건물명) ----
-    if p["terms"] and not results:
+    if p["terms"] and name_path:
         base = {"station": 175, "place": 165, "dong": 160, "poi": 140, "biz": 135, "road": 120, "addr": 130}
         nq = norm(q); multi = len(p["terms"]) >= 2
         # 각 토큰: name 부분일치(단일=prefix, 다중=지역도 허용)
