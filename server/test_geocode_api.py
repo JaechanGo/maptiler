@@ -262,6 +262,26 @@ class TestParse(unittest.TestCase):
         self.assertEqual(p["road"], "백범로")
         self.assertEqual(p["house"], (35, 1))
 
+    def test_zipcode_5digit_standalone(self):
+        # 5자리 단독 = 신우편번호
+        p = M.parse("06236")
+        self.assertEqual(p["zipcode"], "06236")
+        self.assertIsNone(p["house"])
+        self.assertEqual(p["terms"], [])
+
+    def test_zipcode_with_road_promoted_to_house(self):
+        # 도로 동반 5자리는 우편번호가 아니라 번지로 승격
+        p = M.parse("강남대로 10524")
+        self.assertEqual(p["road"], "강남대로")
+        self.assertEqual(p["house"], (10524, 0))
+        self.assertIsNone(p["zipcode"])
+
+    def test_no_zipcode_on_normal_query(self):
+        p = M.parse("테헤란로 152")
+        self.assertIsNone(p["zipcode"])
+        p2 = M.parse("상동 514-8")
+        self.assertIsNone(p2["zipcode"])
+
 
 # ════════════════════════════════════════════════════════════════
 # 단계2 — display_of / addr_obj / category_of / nonaddr_structure

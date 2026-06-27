@@ -26,7 +26,10 @@ DSN = os.environ.get("DATABASE_URL") or (
     f"user={os.environ.get('PGUSER','cuvia')} dbname={os.environ.get('PGDATABASE','cuvia')} "
     f"password={os.environ.get('PGPASSWORD','cuvia')}")
 ADDR_CAP = 400
-POOL = ConnectionPool(DSN, min_size=1, max_size=8, kwargs={"row_factory": dict_row}, open=False)
+# statement_timeout=3s — 폭주 쿼리 안전망(연결 단위 options, postgresql.conf 전역설정 회피).
+# 정상 검색은 지역 trgm 인덱스(11-address-search.sql)로 전부 <1s 이므로 3s 는 비정상만 차단.
+POOL = ConnectionPool(DSN, min_size=1, max_size=8,
+                      kwargs={"row_factory": dict_row, "options": "-c statement_timeout=3000"}, open=False)
 
 TOKEN_RE = re.compile(r"[^\w가-힣]+", re.UNICODE)
 
@@ -279,10 +282,12 @@ def _check_tables(cur):
 
 def parse(q):
     q = re.sub(r"(?<=\d)\.(?=\d)", "", norm(q))
-    house = road = dong = bld_dong = None; san = False; terms = []
+    house = road = dong = bld_dong = zipcode = None; san = False; terms = []
     for t in re.split(r"[\s,]+", q):
         if not t: continue
         if t == "산": san = True; continue                  # 단독 '산'(임야) 표기
+        if zipcode is None and re.fullmatch(r"\d{5}", t):    # 5자리 = 신우편번호 후보(번지보다 우선; 도로/동 동반 시 아래서 번지로 승격)
+            zipcode = t; continue
         m = re.fullmatch(r"(산)?(\d+)(?:-(\d+))?", t)        # 번지: '산12-3'·'산12'·'12-3'·'5'(산 접두 허용)
         if m:
             if m.group(1): san = True
@@ -314,7 +319,11 @@ def parse(q):
         if dong is None and len(ct) >= 2 and (re.search(r"(동|리|읍|면)$", ct) or re.search(r"\d가$", ct)):
             dong = ct
         terms.append(ct)
-    return {"road": road, "house": house, "terms": terms, "dong": dong, "san": san, "bld_dong": bld_dong}
+    # 5자리 숫자가 도로/법정동과 함께면 우편번호가 아니라 번지(예 '○○로 10524') → house 로 승격.
+    if zipcode is not None and house is None and (road or dong):
+        house = (int(zipcode), 0); zipcode = None
+    return {"road": road, "house": house, "terms": terms, "dong": dong, "san": san,
+            "bld_dong": bld_dong, "zipcode": zipcode}
 
 
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
@@ -331,6 +340,17 @@ def addr_at(cur, lon, lat):
 
 def geocode(cur, q, limit):
     p = parse(q); results = []
+
+    # ---- 우편번호 경로 (5자리 신우편번호 → postal 정확매칭, address_postal_idx) ----
+    if p["zipcode"]:
+        cur.execute("SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
+                    f"WHERE kind='addr' AND postal=%s ORDER BY sigungu, emd, id LIMIT {ADDR_CAP}",
+                    (p["zipcode"],))
+        for r in cur.fetchall():
+            it = {"name": addr_str(r), "kind": "addr",
+                  "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
+            it["display"] = display_of(it, r)
+            results.append((180, it))
 
     # ---- 주소 경로 ----
     if p["road"]:
