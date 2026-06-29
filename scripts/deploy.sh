@@ -23,6 +23,14 @@ else
   echo "⚠ images.tar 경로를 인자로 주세요 (이미 load 했다면 무시)" >&2
 fi
 
+# 번들 파일 권한 정규화 — 빌드호스트(맥 등)에서 tar 로 묶일 때 보존된 700(소유자 전용)·빌드호스트 uid 가
+# 그대로 반입되면, tileserver/geocode 컨테이너 내부 사용자(uid≠빌드호스트)가 bind 마운트
+# (demo/style/glyphs/tiles/geocode)를 못 읽어 EACCES 로 기동 실패한다(/styles.json=[] 증상).
+# 모든 사용자에 읽기 + 디렉토리 진입(a+rX)만 부여(쓰기 미부여 → 안전·멱등). SELinux 는 호스트 정책으로 별도.
+for _d in demo style vendor tiles geocode; do
+  [ -e "$ROOT/$_d" ] && chmod -R a+rX "$ROOT/$_d" 2>/dev/null || true
+done
+
 # tileserver-config.json 이 베이스 mbtiles 3종(korea/terrain/dong)을 참조하므로, 하나라도 없으면
 # TileServer-GL 이 기동 자체에 실패한다(벡터 단독 degrade 없음) — 사전 검증.
 # (buildings/poi/parcel 동적 레이어는 PostGIS→martin — postgis/cuvia.dump 로 별도 복원)
