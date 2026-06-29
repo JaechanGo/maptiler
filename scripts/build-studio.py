@@ -5,8 +5,8 @@
 실시간 표시하며, 체크박스로 빌드 대상을 정제하고, 완료물을 폐쇄망 번들로 패키징한다.
 이미 검증된 CLI 파이프라인(09/10/11/12/13/package)을 그대로 빌드 엔진으로 구동한다.
 
-기동:  python3 scripts/build-studio.py            # http://localhost:8090
-       BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
+기동:  python3 scripts/build-studio.py            # http://localhost:18081
+       BUILD_HOME=~/geocode-build PORT=18081 python3 scripts/build-studio.py
 """
 import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
 import pty   # 자식 프로세스를 TTY 에 붙여 외부 도구의 블록버퍼링을 막고 로그를 실시간 스트리밍
@@ -14,9 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
-PORT = int(os.environ.get("PORT", "8090"))
+PORT = int(os.environ.get("PORT", "18081"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))   # 미리보기가 스타일을 읽어올 tileserver 포트
-STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "8091")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
+STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "18082")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 # 기본 외부(LAN) 노출(0.0.0.0). 인증이 없으므로 같은 LAN의 누구나 빌드 실행/업로드가 가능함을
 # 운영자가 인지해야 함 — 신뢰망에서만 사용하고, 로컬 전용이 필요하면 HOST=127.0.0.1 로 명시.

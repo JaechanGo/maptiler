@@ -5,8 +5,8 @@
 배포된 지도의 색·POI·글꼴 테마를 현장에서 지정한다(저장 → build_style → tileserver reload).
 원천데이터/tippecanoe 불필요. style_objects + build_style.py + style/ 조각 + glyphs 만 있으면 동작.
 
-기동:  python3 scripts/style-studio.py                      # http://localhost:8091
-       HOST=0.0.0.0 STUDIO_TOKEN=secret PORT=8091 \
+기동:  python3 scripts/style-studio.py                      # http://localhost:18082
+       HOST=0.0.0.0 STUDIO_TOKEN=secret PORT=18082 \
        COMPOSE_FILE=/path/docker-compose.yml python3 scripts/style-studio.py
 - HOST 기본 127.0.0.1(로컬 전용). LAN 노출 시 HOST=0.0.0.0 + STUDIO_TOKEN 설정 권장.
 - STUDIO_TOKEN 설정 시 변경 API(POST)는 X-Studio-Token 헤더 필요. 페이지는 ?token=… 로 받음.
@@ -18,7 +18,7 @@ import style_objects
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
 HOST = os.environ.get("HOST", "0.0.0.0")   # 기본 외부(LAN) 노출. 로컬 전용은 HOST=127.0.0.1 (LAN 노출 시 STUDIO_TOKEN 권장)
-PORT = int(os.environ.get("PORT", "8091"))
+PORT = int(os.environ.get("PORT", "18082"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))            # 미리보기·재시작 대상 tileserver 포트
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 STUDIO_TOKEN = os.environ.get("STUDIO_TOKEN", "")               # 설정 시 POST에 X-Studio-Token 요구

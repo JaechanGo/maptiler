@@ -179,5 +179,5 @@ echo "  (tileserver:8080·geocode:8082 직결은 loopback 전용 — 외부엔 :
 echo
 echo "스타일 디자인(Style Studio)은 관리툴 — LAN 비노출, SSH 터널 권장:"
 echo "  서버: STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh"
-echo "  PC:   ssh -L 8091:localhost:8091 -L 8080:localhost:8080 <user>@<이서버IP>  # → http://localhost:8091/?token=…"
+echo "  PC:   ssh -L 18082:localhost:18082 -L 8080:localhost:8080 <user>@<이서버IP>  # → http://localhost:18082/?token=…"
 echo "  (프리뷰가 브라우저에서 tileserver:8080 을 직접 호출하므로 8080 도 함께 터널)"
