@@ -423,6 +423,64 @@ class TestAddrObj(unittest.TestCase):
         self.assertEqual(st["bld_name"], "서울시청")
 
 
+class TestLegacyAddrStrings(unittest.TestCase):
+    """addr_str/road_str/parcel_str — 지역토큰 결측 시 'None' 누출 금지.
+
+    address 적재(load_geocode.py)가 CSV 경유라 빈 시군구가 NULL 로 들어간다(세종 전역
+    55,846건). f-string 직결이던 세 함수는 그 NULL 을 'None' 문자열로 박았다
+    ('세종특별자치시 None 한누리대로 2130'). display_of 와 동일하게 _s 가드로 토큰을 생략한다.
+    """
+    def sejong(self):
+        return {"sido": "세종특별자치시", "sigungu": None, "emd": "조치원읍",
+                "road": "충현1길", "main_no": 60, "sub_no": 0, "bld": None,
+                "postal": "30034", "jibun": "조치원읍 죽림리 245-5"}
+
+    def normal(self):
+        return {"sido": "충청북도", "sigungu": "청주시 상당구", "emd": "미원면",
+                "road": "가양길", "main_no": 2, "sub_no": 0, "bld": None,
+                "postal": "28198", "jibun": "미원면 가양리 332"}
+
+    def test_sejong_no_none_token(self):
+        r = self.sejong()
+        for fn in (M.addr_str, M.road_str, M.parcel_str):
+            self.assertNotIn("None", fn(r), f"{fn.__name__} 에 'None' 누출")
+
+    def test_sejong_single_space(self):
+        r = self.sejong()                                  # 시군구 자리는 생략(공백 2개도 금지)
+        self.assertEqual(M.addr_str(r), "세종특별자치시 조치원읍 충현1길 60")
+        self.assertEqual(M.road_str(r), "세종특별자치시 충현1길 60")
+        self.assertEqual(M.parcel_str(r), "세종특별자치시 조치원읍 죽림리 245-5")
+
+    def test_region_present_unchanged(self):
+        r = self.normal()                                  # 회귀 방지 — 시군구 있는 표기 불변
+        self.assertEqual(M.addr_str(r), "충청북도 청주시 상당구 미원면 가양길 2")
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 2")
+        self.assertEqual(M.parcel_str(r), "충청북도 청주시 상당구 미원면 가양리 332")
+
+    def test_sub_no_and_bld_rules_kept(self):
+        r = self.normal(); r["sub_no"] = 3; r["bld"] = "청주빌딩"
+        self.assertEqual(M.addr_str(r), "충청북도 청주시 상당구 미원면 가양길 2-3 (청주빌딩)")
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 2-3 (청주빌딩)")
+
+    def test_main_no_zero_is_kept(self):
+        r = self.normal(); r["main_no"] = 0                # 0 은 유효값 — 생략되면 안 됨
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 0")
+
+    def test_parcel_falls_back_to_emd(self):
+        r = self.sejong(); r["jibun"] = None               # jibun 부재 → emd 폴백(기존 계약)
+        self.assertEqual(M.parcel_str(r), "세종특별자치시 조치원읍")
+
+    def test_none_string_literal_guarded(self):
+        r = self.sejong(); r["sigungu"] = "None"           # 'None' 문자열 값도 차단(_s 계약)
+        self.assertNotIn("None", M.road_str(r))
+
+    def test_all_region_tokens_missing(self):
+        r = {"sido": None, "sigungu": None, "emd": None, "road": None,
+             "main_no": None, "sub_no": None, "bld": None, "jibun": None}
+        for fn in (M.addr_str, M.road_str, M.parcel_str):
+            self.assertEqual(fn(r), "", f"{fn.__name__} 전결측 시 빈 문자열이어야 함")
+
+
 class TestCategoryOf(unittest.TestCase):
     def test_group_path_added_keys_preserved(self):
         cat = M.category_of({"cat1": "보건의료", "cat2": "병원"})

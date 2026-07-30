@@ -79,23 +79,28 @@ def _limit(qs, dflt, cap=50):
     except (ValueError, TypeError): return dflt
 
 
+# 지역토큰은 _s 가드 후 결합 — 결측 토큰 생략(display_of/_region 과 동일 계약).
+# f-string 직결이면 시군구 없는 세종(적재가 빈칸을 NULL 로 넣음)에서 'None' 이 문자열로 박힌다.
+# main_no=0 은 유효값이라 _s('0') 로 살아남고, sub_no/bld 결합 규칙은 종전대로.
 def addr_str(r):
-    s = f'{r["sido"]} {r["sigungu"]} {r["emd"]} {r["road"]} {r["main_no"]}'
+    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), _s(r["emd"]),
+                             _s(r["road"]), _s(r["main_no"])) if x)
     if r.get("sub_no"): s += f'-{r["sub_no"]}'
     if r.get("bld"): s += f' ({r["bld"]})'
     return s
 
 
 def road_str(r):
-    s = f'{r["sido"]} {r["sigungu"]} {r["road"]} {r["main_no"]}'
+    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]),
+                             _s(r["road"]), _s(r["main_no"])) if x)
     if r.get("sub_no"): s += f'-{r["sub_no"]}'
     if r.get("bld"): s += f' ({r["bld"]})'
     return s
 
 
 def parcel_str(r):
-    jb = _g(r, "jibun")
-    return (f'{r["sido"]} {r["sigungu"]} {jb}' if jb else f'{r["sido"]} {r["sigungu"]} {r["emd"]}').strip()
+    jb = _s(_g(r, "jibun"))
+    return " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), jb or _s(r["emd"])) if x)
 
 
 def addr_obj(r):
