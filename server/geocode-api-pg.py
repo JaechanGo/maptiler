@@ -100,7 +100,13 @@ def addr_str(r):
 
 
 def road_str(r):
-    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]),
+    # 도로명주소 표기 규정 — 동(洞) 지역은 읍면동을 표기하지 않지만 읍·면 지역은 읍·면을 표기한다.
+    # address.emd 는 읍/면/동을 한 칸에 담으므로 접미사로 분기한다: 무조건 빼면 읍·면에서 누락되고
+    # (VWorld 대조 149건 중 도로명 불일치 44건의 37건이 이 원인), 무조건 넣으면 동에서 과잉이 된다.
+    # 표시용 addr_str 이 emd 를 항상 넣는 것과는 계약이 다르므로 두 함수를 합치지 않는다.
+    emd = _s(_g(r, "emd"))
+    if emd and not emd.endswith(("읍", "면")): emd = None
+    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), emd,
                              _s(r["road"]), _s(r["main_no"])) if x)
     if r.get("sub_no"): s += f'-{r["sub_no"]}'
     if r.get("bld"): s += f' ({r["bld"]})'
