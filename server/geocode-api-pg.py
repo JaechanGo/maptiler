@@ -28,8 +28,13 @@ DSN = os.environ.get("DATABASE_URL") or (
 ADDR_CAP = 400
 # statement_timeout=3s — 폭주 쿼리 안전망(연결 단위 options, postgresql.conf 전역설정 회피).
 # 정상 검색은 지역 trgm 인덱스(11-address-search.sql)로 전부 <1s 이므로 3s 는 비정상만 차단.
+# plan_cache_mode=force_custom_plan — psycopg3 는 반복 실행 쿼리를 서버사이드 prepare 로 승격시키는데,
+# generic plan 은 좌표값을 몰라 bbox(ST_Expand) 선택도를 1,627행으로 과소추정해 KNN Index Scan 대신
+# Parallel Bitmap Heap Scan+Sort 를 고르고 3s 를 넘긴다. 값 기반 플랜 고정으로 KNN 을 보장한다.
 POOL = ConnectionPool(DSN, min_size=1, max_size=8,
-                      kwargs={"row_factory": dict_row, "options": "-c statement_timeout=3000"}, open=False)
+                      kwargs={"row_factory": dict_row,
+                              "options": "-c statement_timeout=3000 -c plan_cache_mode=force_custom_plan"},
+                      open=False)
 
 TOKEN_RE = re.compile(r"[^\w가-힣]+", re.UNICODE)
 
@@ -362,12 +367,16 @@ def parse(q):
 
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
 def addr_at(cur, lon, lat):
+    # geom && ST_Expand 는 Index Cond 로 내려가 KNN 주행범위를 묶는다(geography 캐스트한
+    # ST_DWithin 은 Filter 로만 걸려 반경 내 0건이면 인덱스 전체를 훑고 statement_timeout).
+    # 0.035°는 2.5km 의 경도 상한(위도 38.7°에서 0.0288°) 초과분 — 정확도는 ST_DWithin 이 보장.
     cur.execute(
         """SELECT * FROM address
            WHERE kind='addr' AND geom IS NOT NULL
+             AND geom && ST_Expand(ST_SetSRID(ST_MakePoint(%s,%s),4326), 0.035)
              AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, 2500)
            ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326) LIMIT 1""",
-        (lon, lat, lon, lat))
+        (lon, lat, lon, lat, lon, lat))
     r = cur.fetchone()
     return addr_obj(r) if r else None
 
@@ -632,13 +641,15 @@ def geocode(cur, q, limit):
 def reverse(cur, lon, lat, limit):
     address = addr_at(cur, lon, lat)
     pt = "ST_SetSRID(ST_MakePoint(%s,%s),4326)"
+    # addr_at 과 동일한 이유로 bbox 선행(0.25° > 20km 의 경도 상한 0.2299°).
     cur.execute(
         f"""SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat,
                    ST_Distance(geom::geography, {pt}::geography) AS d FROM address
             WHERE geom IS NOT NULL
+              AND geom && ST_Expand({pt}, 0.25)
               AND ST_DWithin(geom::geography, {pt}::geography, 20000)
             ORDER BY geom <-> {pt} LIMIT %s""",
-        (lon, lat, lon, lat, lon, lat, limit))
+        (lon, lat, lon, lat, lon, lat, lon, lat, limit))
     nearest = []
     for r in cur.fetchall():
         nm = addr_str(r) if r["kind"] == "addr" else r["name"]
