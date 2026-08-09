@@ -9,7 +9,7 @@
 import csv, glob, os, re, subprocess, sys, unicodedata
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/Downloads/인허가정보")
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/geocode-build/localdata/localdata_clean.csv")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "localdata/localdata_clean.csv")
 N = lambda s: unicodedata.normalize("NFC", s or "")
 
 # 비물리(지도 장소 아님) 업종 — 카테고리/업종명에 이 키워드 포함 시 제외

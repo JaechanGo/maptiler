@@ -51,8 +51,8 @@ def _stratify(pairs, per_group, total_max):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
-    ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/golden.csv"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--out", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "golden.csv"))
     ap.add_argument("--min-pr", type=float, default=0.5, help="이 Pr 이상 후보만(경계+자동병합)")
     ap.add_argument("--per-group", type=int, default=40, help="(decision×유사도×전화×건물) 그룹당 최대")
     ap.add_argument("--max", type=int, default=800, help="전체 샘플 상한")

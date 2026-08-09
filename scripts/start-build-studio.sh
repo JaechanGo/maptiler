@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# build-studio(빌드 콘솔, :8090)를 백그라운드 데몬으로 (재)기동 — 터미널 종료에도 생존.
+# build-studio(빌드 콘솔, :18081)를 백그라운드 데몬으로 (재)기동 — 터미널 종료에도 생존.
 # 재실행하면 기존 인스턴스를 끄고 새로 띄운다(코드/HTML 변경 반영 시 그냥 다시 실행).
-#   ./scripts/start-build-studio.sh                 # http://localhost:8090
-#   PORT=8090 BUILD_HOME=~/geocode-build ./scripts/start-build-studio.sh
-# 중지:  lsof -ti tcp:8090 | xargs kill     (또는 PORT 지정)
+#   ./scripts/start-build-studio.sh                 # http://localhost:18081
+#   PORT=18081 BUILD_HOME=~/geocode-build ./scripts/start-build-studio.sh
+# 중지:  lsof -ti tcp:18081 | xargs kill     (또는 PORT 지정)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
-export PORT="${PORT:-8090}"
+export PORT="${PORT:-18081}"
 export TILE_PORT="${TILE_PORT:-8080}"               # 미리보기 tileserver 포트
-export STYLE_STUDIO_PORT="${STYLE_STUDIO_PORT:-8091}"  # '스타일 디자인' 링크 대상
+export STYLE_STUDIO_PORT="${STYLE_STUDIO_PORT:-18082}"  # '스타일 디자인' 링크 대상
 export HOST="${HOST:-0.0.0.0}"                      # 기본 외부(LAN) 노출 — 무인증 콘솔이므로 신뢰망에서만. 로컬 전용은 HOST=127.0.0.1
 export COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/server/docker-compose.yml}"
 mkdir -p "$BUILD_HOME"

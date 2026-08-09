@@ -58,23 +58,6 @@ postgres:
         render_height: float4
         levels: int4
 
-    poi:                       # 상가·인허가·생활편의(Phase 4)
-      schema: public
-      table: poi
-      srid: 4326
-      geometry_column: geom
-      geometry_type: POINT
-      minzoom: 11
-      maxzoom: 22
-      properties:
-        kind: text
-        name: text
-        subtype: text
-        cat1: text
-        cat2: text
-        source: text
-        is_primary: int2
-
     public_facility:           # 병원/경찰/소방/AED/대피소
       schema: public
       table: public_facility
@@ -115,3 +98,8 @@ postgres:
         kind: text
         name: text
         grade: text
+
+  functions:                 # T8: POI tier 디클러터 함수소스 (postgres 하위 = tables 형제). poi_mvt(z,x,y)=tier_minzoom<=z 필터.
+    poi_mvt:                  # ★빈 {} 는 v0.18에서 OptOneMany 파싱오류 → schema/function 명시 필수
+      schema: public
+      function: poi_mvt

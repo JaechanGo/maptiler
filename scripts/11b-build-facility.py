@@ -10,8 +10,8 @@
 import csv, glob, json, os, re, subprocess, sys, unicodedata
 
 N = lambda s: unicodedata.normalize("NFC", s or "")
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/geocode-build/staged/facility")
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/geocode-build/poi-all/facility_clean.csv")
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/facility")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "poi-all/facility_clean.csv")
 
 # 항목key → 시설명(한글) 라벨
 LABELS = {}

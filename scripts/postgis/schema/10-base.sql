@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS address (
     kind      text,                     -- addr|station|place|dong|road|poi|biz|facility
     name      text,
     subtype   text,
-    sido      text, sigungu text, emd text,
+    sido      text, sigungu text, emd text, ri text,
     road      text, road_norm text,
     main_no   int,  sub_no int,
     bld       text, postal text,
@@ -61,3 +61,7 @@ CREATE TABLE IF NOT EXISTS address (
 CREATE INDEX IF NOT EXISTS address_geom_gix   ON address USING gist (geom);
 CREATE INDEX IF NOT EXISTS address_kind_idx   ON address (kind);
 CREATE INDEX IF NOT EXISTS address_source_idx ON address (source);
+
+-- ── 후속 컬럼 마이그레이션(기존 DB in-place; CREATE IF NOT EXISTS 는 기존 테이블에 컬럼 추가 못함) ──
+-- 신규 빌드는 위 CREATE 가, 기존 배포 DB 는 아래 ALTER 가 채운다(병행 멱등; 재실행 무해).
+ALTER TABLE address ADD COLUMN IF NOT EXISTS ri text;   -- 리(里) 분리 컬럼(X5). 표시/structure용. bld_main_no/bld_sub_no 는 런타임 alias(미추가)

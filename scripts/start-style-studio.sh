@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/server/docker-compose.yml}"   # tileserver 재시작 대상
 export HOST="${HOST:-0.0.0.0}"          # 운영 서버에서 접속하려면 0.0.0.0. 로컬 전용은 127.0.0.1
-export PORT="${PORT:-8091}"
+export PORT="${PORT:-18082}"
 export TILE_PORT="${TILE_PORT:-8080}"
 
 if [ ! -f "$COMPOSE_FILE" ]; then

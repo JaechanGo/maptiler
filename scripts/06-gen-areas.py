@@ -53,7 +53,7 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--shp", help="SHP 파일 또는 폴더(폴더면 내부 *.shp 모두 합침)")
     g.add_argument("--geojson")
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     ap.add_argument("--type", required=True, help="legal-dong | admin-dong | sigungu ...")
     ap.add_argument("--name-field", required=True)
     ap.add_argument("--code-field", default=None)

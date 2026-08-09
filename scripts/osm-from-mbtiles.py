@@ -7,7 +7,7 @@ import gzip, math, os, sqlite3, sys, re, unicodedata
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo 루트(이식성 — Mac 절대경로 하드코딩 제거)
 MB = os.environ.get("KOREA_MBTILES") or os.path.join(_ROOT, "tiles/korea.mbtiles")
-OUT = os.path.expanduser("~/geocode-build/osm.sqlite")
+OUT = os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "osm.sqlite")
 EXTENT = 4096; Z = 14
 
 def rv(b, p):
@@ -95,6 +95,7 @@ def extract():
                 yield (station_display(nm, is_station), typ, cls, lon, lat)
 
 def main():
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)   # ~/geocode-build/ 없으면 생성 (unable to open database file 예방)
     tmp = OUT + ".tmp"
     if os.path.exists(tmp): os.remove(tmp)
     db = sqlite3.connect(tmp)

@@ -3,6 +3,17 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/versions.sh"   # MAPLIBRE_VERSION 등 자산 버전 핀(01-download-data.sh 공용 단일출처)
+
+# Docker 표준 bin 경로 PATH 보강 — build-studio 가 축소된 PATH(node 경로 위주)로 이 스크립트를
+# 호출하면 `docker pull`/`buildx` 의 자격증명 헬퍼(docker-credential-desktop, credsStore=desktop)
+# 를 못 찾아 "executable file not found in $PATH" 로 [3/4] Docker 이미지 단계가 종료코드 1로 실패한다.
+# → Docker Desktop·Homebrew·/usr/local 의 bin 을 중복 없이 보강해 pull/buildx/creds 헬퍼를 모두 해석.
+for _dbin in /Applications/Docker.app/Contents/Resources/bin /usr/local/bin /opt/homebrew/bin; do
+  if [ -d "$_dbin" ]; then
+    case ":$PATH:" in *":$_dbin:"*) ;; *) PATH="$PATH:$_dbin" ;; esac
+  fi
+done
+export PATH
 # 산출물(images.tar + 멀티GB tgz)도 iCloud 밖에 둔다(기본 BUILD_HOME/dist). DIST 로 재정의 가능.
 DIST="${DIST:-${BUILD_HOME:-$HOME/geocode-build}/dist}"
 mkdir -p "$DIST"

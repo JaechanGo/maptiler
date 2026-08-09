@@ -14,6 +14,7 @@ import os
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 root = pathlib.Path(__file__).resolve().parents[1] / "style"
 
 
@@ -25,12 +26,29 @@ def load_json(path: pathlib.Path) -> dict:
 
 
 out = root / "style.json"
+_build_id = os.environ.get("BUILD_ID", "").strip()
+
+
+def _version_dyn(style):
+    """BUILD_ID 설정 시 sources[*].tiles[]의 '/dyn/' → '/dyn/v<id>/' (캐시 네임스페이스). 미설정이면 무변경."""
+    if not _build_id:
+        return
+    import re as _re
+    if not _re.fullmatch(r"[0-9A-Za-z._-]+", _build_id):
+        return  # 게이트웨이 정규식 문자집합과 동일 — 안전하지 않으면 무시
+    for src in (style.get("sources") or {}).values():
+        tiles = src.get("tiles")
+        if isinstance(tiles, list):
+            src["tiles"] = [t.replace("/dyn/", f"/dyn/v{_build_id}/", 1) if isinstance(t, str) and "/dyn/" in t else t for t in tiles]
+
+
 imported = os.environ.get("STYLE_IMPORT")
 if imported and pathlib.Path(imported).is_file():
     # 가져온 스타일(완성형 style.json) 그대로 사용 — 조립/테마 적용 생략.
     style = load_json(pathlib.Path(imported))
     if not isinstance(style.get("layers"), list) or not style["layers"]:
         sys.exit(f"가져온 스타일 형식 오류 ({imported}): layers 배열이 없습니다")
+    _version_dyn(style)
     out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"OK: {out} (가져온 스타일 사용 ← {imported} · layers={len(style['layers'])})")
 else:
@@ -57,8 +75,27 @@ else:
         n = style_objects.apply_theme(style, load_json(theme_path))
         print(f"테마 적용: {theme_path.name} → {n}개 paint 속성")
 
+    _version_dyn(style)
     out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"OK: {out} (layers={len(style['layers'])})")
+
+# gateway-nginx.conf 캐시 블록을 theme.json 의 cache 에서 생성(마커 사이 멱등 치환).
+import re as _re
+import style_objects as _so
+_gw = pathlib.Path(__file__).resolve().parents[1] / "server" / "gateway-nginx.conf"
+_theme_p = root / "theme.json"
+if _gw.exists():
+    _theme = load_json(_theme_p) if _theme_p.exists() else {}
+    _block = _so.render_nginx_cache_block(_so.sanitize_cache(_theme.get("cache")) or _so.CACHE_DEFAULT)
+    _txt = _gw.read_text(encoding="utf-8")
+    _pat = _re.compile(r"(# >>> GENERATED cache.*?>>>\n).*?(# <<< GENERATED <<<\n)", _re.S)
+    if _pat.search(_txt):
+        _new = _pat.sub(lambda m: m.group(1) + _block + m.group(2), _txt)
+        if _new != _txt:
+            _gw.write_text(_new, encoding="utf-8")
+            print(f"캐시 블록 갱신: {_gw.name}")
+    else:
+        print("경고: gateway-nginx.conf 캐시 마커 없음 — 블록 미생성")
 
 # 카테고리 아이콘 스프라이트 재생성(style/icons/*.png → sprite{,@2x}.{png,json}).
 # Pillow 필요 — 없으면 경고만 남기고 계속(스타일 자체는 이미 기록됨).

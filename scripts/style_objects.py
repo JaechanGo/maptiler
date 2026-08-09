@@ -46,13 +46,17 @@ POI_TIERS_DEFAULT = [
     {"key": "t2", "label": "중간", "minzoom": 16},
     {"key": "t3", "label": "낮음", "minzoom": 17},
 ]
+
+CACHE_DEFAULT = {
+    "static_long": "public, max-age=604800",
+    "static_short": "public, max-age=300, stale-while-revalidate=3600",
+    "dyn": "public, max-age=3600, stale-while-revalidate=86400",
+}
 POI_TIER_FALLBACK = "t3"   # 미지정 카테고리 기본 티어
 CAT_TIER_DEFAULT = {       # 카테고리→티어 기본(대분류 + 랜드마크성 중/소분류). 고급설정에서 변경.
     "cat1": {"음식": "t3", "소매": "t3", "수리·개인": "t3", "과학·기술": "t3", "교육": "t2",
              "예술·스포츠": "t3", "시설관리·임대": "t2", "부동산": "t3", "숙박": "t2", "보건의료": "t2"},
     "cat2": {"병원": "t1", "대학": "t1"},
-    "cat": {"종합병원": "t1", "일반병원": "t1", "요양병원": "t1", "치과병원": "t1", "한방병원": "t1",
-            "대학교": "t1", "호텔/리조트": "t1", "백화점": "t1", "대형마트": "t1", "관공서": "t1"},
 }
 
 # 데이터 출처 토글 — "이 지도에 어떤 데이터를 쓸지" 체크.
@@ -158,8 +162,8 @@ def _index(style):
 
 
 def build_poi_icon_match(icons, overrides=None):
-    """대분류(cat1) 기본 + 중분류(cat2)·소분류(cat) 오버라이드 → 중첩 match 식.
-    평가 우선순위: 소분류 > 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
+    """대분류(cat1) 기본 + 중분류(cat2) 오버라이드 → 중첩 match 식.
+    평가 우선순위: 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
     overrides = overrides or {}
     expr = ["match", ["get", "cat1"]]                     # 대분류 기본(가장 안쪽 default)
     for g in ICON_GROUPS:
@@ -172,12 +176,6 @@ def build_poi_icon_match(icons, overrides=None):
         for name, slug in mid.items():
             m += [name, slug]
         m.append(expr); expr = m
-    sub = overrides.get("cat") or {}
-    if sub:
-        s = ["match", ["get", "cat"]]
-        for name, slug in sub.items():
-            s += [name, slug]
-        s.append(expr); expr = s
     return expr
 
 
@@ -197,6 +195,30 @@ def current_icons(style):
     return out
 
 
+def sanitize_cache(c):
+    """theme['cache'] 정제(주입 방지) — 화이트리스트 키 + 안전문자(영숫자/쉼표/등호/하이픈/공백)만."""
+    if not isinstance(c, dict):
+        return None
+    out = {}
+    for k in ("static_long", "static_short", "dyn"):
+        v = c.get(k)
+        if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9,= \-]{1,120}", v):
+            out[k] = v.strip()
+    return out or None
+
+
+def render_nginx_cache_block(cache):
+    """theme cache → gateway-nginx 마커 사이 map 블록 텍스트(끝에 개행 포함)."""
+    c = {**CACHE_DEFAULT, **(cache or {})}
+    return (
+        'map $uri $static_cc {\n'
+        '    default              "%s";\n'
+        '    ~^/(fonts|sprites)/  "%s";\n'
+        '}\n'
+        'map $request_uri $dyn_cc { default "%s"; }\n'
+    ) % (c["static_short"], c["static_long"], c["dyn"])
+
+
 def sanitize_icons(icons):
     """theme['icons'] 정제(주입 방지) — 유효 그룹키 + ASCII slug([a-z0-9_-])만."""
     if not isinstance(icons, dict):
@@ -210,11 +232,11 @@ def sanitize_icons(icons):
 
 
 def sanitize_icon_overrides(ov):
-    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}, cat:{소분류명:slug}}, slug ASCII."""
+    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}}, slug ASCII."""
     if not isinstance(ov, dict):
         return {}
     out = {}
-    for lvl in ("cat2", "cat"):
+    for lvl in ("cat2",):
         m = ov.get(lvl)
         if not isinstance(m, dict):
             continue
@@ -228,15 +250,15 @@ def sanitize_icon_overrides(ov):
 
 
 def current_icon_overrides(style):
-    """poi-icon 중첩 match 에서 중/소 오버라이드 추출 → {cat2:{...}, cat:{...}}."""
+    """poi-icon 중첩 match 에서 중분류 오버라이드 추출 → {cat2:{...}}."""
     e = _gate_inner(_index(style).get(POI_ICON_LAYER, {}).get("layout", {}).get("icon-image"))
-    out = {"cat2": {}, "cat": {}}
+    out = {"cat2": {}}
     while isinstance(e, list) and len(e) >= 4 and e[0] == "match" and isinstance(e[1], list) and len(e[1]) == 2 and e[1][0] == "get":
         field = e[1][1]
         if field == "cat1":
             break
         for name, slug in zip(e[2:-1:2], e[3:-1:2]):
-            if field in ("cat2", "cat") and isinstance(name, str):
+            if field == "cat2" and isinstance(name, str):
                 out[field][name] = slug
         e = e[-1]
     return out
@@ -251,7 +273,7 @@ def apply_icons(style, icons, overrides=None):
     cur.update(icons or {})
     idx[POI_ICON_LAYER].setdefault("layout", {})["icon-image"] = build_poi_icon_match(cur, overrides)
     ov = overrides or {}
-    return (len(icons or {})) + len(ov.get("cat2") or {}) + len(ov.get("cat") or {})
+    return (len(icons or {})) + len(ov.get("cat2") or {})
 
 
 # ── POI 카테고리 그룹별 글자색 (cat1 → 그룹색, 미지정 그룹은 '시설 라벨' 단일색 fallback) ──
@@ -359,33 +381,28 @@ def _tier_value_expr(tiers, cat_tier, value_of):
     conv = lambda m: {name: tval[tk] for name, tk in (m or {}).items() if tk in tval}
     expr = _cat_match("cat1", conv((cat_tier or {}).get("cat1")), default)
     expr = _cat_match("cat2", conv((cat_tier or {}).get("cat2")), expr)
-    expr = _cat_match("cat", conv((cat_tier or {}).get("cat")), expr)
     return expr
 
 
 def apply_poi_tiers(style, tiers, cat_tier):
-    """poi-label의 text/icon을 '카테고리 티어 줌 이상에서만 표시'로 게이트 + 티어순 sort-key. 반환 적용 수."""
+    """poi-label의 text/icon 티어순 sort-key + 레이어/소스 minzoom 설정. 반환 적용 수.
+    # T10: 서버(poi_mvt)가 tier_minzoom<=z 로 줌필터 → 클라 줌게이트 불필요(받은 피처만 렌더). 정렬키·minzoom은 유지."""
     L = _index(style).get(POI_ICON_LAYER)   # poi-label
     if L is None or not tiers:
         return 0
-    mz = _tier_value_expr(tiers, cat_tier, lambda t, i: t.get("minzoom", 15))
     sk = _tier_value_expr(tiers, cat_tier, lambda t, i: i)   # 티어 index = 충돌 우선순위(낮을수록 먼저)
     lay = L.setdefault("layout", {})
     inner_icon = _gate_inner(lay.get("icon-image"))
-    # 카테고리별 줌 게이트 — style-spec은 ["zoom"]을 step/interpolate 최상위 입력으로만 허용한다.
-    # ["case",[">=",["zoom"],mz],V,""](불법: zoom을 case/비교 안에 중첩)를, 줌 step의 각 stop에서
-    # '데이터식 mz'를 그 stop 줌값과 비교하는 형태로 표현(동작 동일, mz<=현재stop줌이면 V, 아니면 "").
-    zlevels = sorted({int(t.get("minzoom", 15)) for t in tiers})
-    def _zoom_gate(value):
-        g = ["step", ["zoom"], ""]
-        for z in zlevels:
-            g += [z, ["case", ["<=", mz, z], value, ""]]
-        return g
-    lay["text-field"] = _zoom_gate(["get", "name"])
+    lay["text-field"] = ["get", "name"]
     if inner_icon is not None:
-        lay["icon-image"] = _zoom_gate(inner_icon)
+        lay["icon-image"] = inner_icon
     lay["symbol-sort-key"] = sk
     L["minzoom"] = min(t.get("minzoom", 15) for t in tiers)
+    # 소스 minzoom도 표시 줌(tier 최소)에 맞춰 자동 정렬 — z(min)~ 미만 거대타일 페치 차단(데이터는 전수 보존).
+    src_name = L.get("source")
+    src = (style.get("sources") or {}).get(src_name) if src_name else None
+    if isinstance(src, dict):
+        src["minzoom"] = min(int(t.get("minzoom", 15)) for t in tiers)
     return 1
 
 
@@ -405,7 +422,7 @@ def sanitize_cat_tiers(ct):
     if not isinstance(ct, dict):
         return None
     out = {}
-    for lvl in ("cat1", "cat2", "cat"):
+    for lvl in ("cat1", "cat2"):
         m = ct.get(lvl)
         if isinstance(m, dict):
             clean = {name: tk for name, tk in m.items()
@@ -707,6 +724,84 @@ def extra_targets():
     return EXTRA_TARGETS
 
 
+# 배치(PLACEMENT) — 라벨/아이콘 위치 layout 속성: 세로 offset / 기준점(anchor) / 충돌 시 생략(bool).
+LABEL_ANCHORS = ["center", "left", "right", "top", "bottom",
+                 "top-left", "top-right", "bottom-left", "bottom-right"]
+# default = 해당 prop 의 MapLibre 스펙 기본값. UI 는 값 미설정 시 빈칸 대신 이 기본값을 표시한다.
+PLACEMENT_TARGETS = [
+    {"key": "off_poi",    "label": "시설 라벨 세로 위치", "layer": "poi-label",       "prop": "text-offset",   "type": "offset", "default": 0},
+    {"key": "ta_poi",     "label": "시설 라벨 기준점",    "layer": "poi-label",       "prop": "text-anchor",   "type": "anchor", "default": "center"},
+    {"key": "ia_poi",     "label": "시설 아이콘 기준점",  "layer": "poi-label",       "prop": "icon-anchor",   "type": "anchor", "default": "center"},
+    {"key": "topt_poi",   "label": "시설 라벨 충돌 시 생략",  "layer": "poi-label",       "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_dong",  "label": "동 라벨 충돌 시 생략",    "layer": "dong-label",      "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_civic", "label": "공공시설 라벨 충돌 시 생략", "layer": "poi-civic-label", "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_peak",  "label": "봉우리 라벨 충돌 시 생략",  "layer": "peak-label",      "prop": "text-optional", "type": "bool", "default": False},
+]
+
+
+def placement_targets():
+    return PLACEMENT_TARGETS
+
+
+def apply_placement(style, cfg):
+    """cfg({key:value}) → 대상 layout 속성 설정. offset=text-offset[1](세로, x는 보존/0),
+    anchor=enum 문자열, bool=text-optional. 반환: 적용 수."""
+    if not cfg:
+        return 0
+    idx = _index(style); tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; n = 0
+    for k, v in cfg.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        L = idx.get(t["layer"])
+        if L is None:
+            continue
+        lay = L.setdefault("layout", {})
+        if t["type"] == "offset":
+            cur = lay.get(t["prop"])
+            x = cur[0] if isinstance(cur, list) and cur and isinstance(cur[0], (int, float)) else 0
+            lay[t["prop"]] = [x, round(float(v), 2)]
+        elif t["type"] == "anchor":
+            lay[t["prop"]] = v
+        else:  # bool
+            lay[t["prop"]] = bool(v)
+        n += 1
+    return n
+
+
+def current_placement(style):
+    idx = _index(style); out = {}
+    for t in PLACEMENT_TARGETS:
+        v = idx.get(t["layer"], {}).get("layout", {}).get(t["prop"])
+        if t["type"] == "offset":
+            out[t["key"]] = v[1] if isinstance(v, list) and len(v) >= 2 and isinstance(v[1], (int, float)) else None
+        elif t["type"] == "anchor":
+            out[t["key"]] = v if (isinstance(v, str) and v in LABEL_ANCHORS) else None
+        else:  # bool
+            out[t["key"]] = v if isinstance(v, bool) else None
+    return out
+
+
+def sanitize_placement(pl):
+    if not isinstance(pl, dict):
+        return {}
+    tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; out = {}
+    for k, v in pl.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        if t["type"] == "offset":
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and -10 <= v <= 10:
+                out[k] = round(float(v), 2)
+        elif t["type"] == "anchor":
+            if isinstance(v, str) and v in LABEL_ANCHORS:
+                out[k] = v
+        elif t["type"] == "bool":
+            if isinstance(v, bool):
+                out[k] = v
+    return out
+
+
 # 속성별 색 그라데이션 — 건물 높이(render_height)에 따른 색 보간.
 GRADIENT_TARGETS = [
     {"key": "bld_height", "label": "건물 높이별 색", "attr": "render_height", "amax": 100,
@@ -811,6 +906,14 @@ def sanitize_extras(ex):
     return out
 
 
+def apply_building_pitch3d(style, v):
+    """건물 2D/3D pitch 전환 임계값을 style.metadata 에 기록(데모가 읽음). None/무효면 키 제거(기본=현재상태)."""
+    md = style.setdefault("metadata", {})
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 85:
+        md["cuvia:building_pitch_3d"] = round(float(v), 1); return 1
+    md.pop("cuvia:building_pitch_3d", None); return 0
+
+
 def apply_theme(style, theme):
     """theme({key:#hex}) 를 style 에 적용(평면 객체 + POI 그룹 match). 반환: 적용 수."""
     idx = _index(style); n = 0
@@ -825,6 +928,8 @@ def apply_theme(style, theme):
             if L is None:
                 continue
             L.setdefault("paint", {})[prop] = color; n += 1
+    # 건물 2D/3D pitch 전환 임계값 — style.metadata에 기록(기본: 키 없음=현재상태 유지)
+    n += apply_building_pitch3d(style, theme.get("building_pitch_3d"))
     # POI 카테고리 그룹별 글자색 — 평면색 직후(방금 깐 '시설 라벨' 평면색을 fallback으로 감쌈)
     n += apply_poi_cat_colors(style, sanitize_poi_colors(theme.get("poi_colors") or {}))
     # 글꼴(layout text-font)
@@ -852,6 +957,8 @@ def apply_theme(style, theme):
     n += apply_extras(style, sanitize_extras(theme.get("extras") or {}))
     # 속성별 색 그라데이션(건물 높이)
     n += apply_gradient(style, sanitize_gradient(theme.get("gradient") or {}))
+    # 라벨/아이콘 배치(text-offset·anchor·text-optional)
+    n += apply_placement(style, sanitize_placement(theme.get("placement") or {}))
     return n
 
 

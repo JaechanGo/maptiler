@@ -415,6 +415,18 @@ def _pg_runner():
     return None
 
 
+def _lit(v):
+    """psql -c 인라인용 SQL 리터럴. 정수는 그대로, 그 외는 작은따옴표 이스케이프.
+    _pg_runner().q 는 파라미터 바인딩 인자가 없으므로(psql -c "<sql>" 만) 값은 리터럴로 안전 삽입.
+    값 출처가 DB 자기 샘플 1행이라 인젝션 위험은 없으나, 동명에 들어갈 따옴표 대비 이스케이프 유지."""
+    if isinstance(v, int):
+        return str(v)
+    s = str(v)
+    if s.lstrip("-").isdigit():   # 탭분리 문자열로 온 정수
+        return s
+    return "'" + s.replace("'", "''") + "'"
+
+
 def check_postgis():
     q = _pg_runner()
     if q is None:
@@ -429,6 +441,7 @@ def check_postgis():
     p_min = int(os.environ.get("PARCEL_MIN", 30_000_000))    # package.sh 게이트와 동일 임계(우회 가능)
     b_min = int(os.environ.get("BUILDING_MIN", 5_000_000))
     a_min = int(os.environ.get("ADDRESS_MIN", 5_000_000))
+    jm_min = float(os.environ.get("JIMAIN_MIN", "0.95"))     # parcel 지번 본번 분해율 하한(우회 JIMAIN_MIN=0)
 
     # 1) 적재 행수 밴드 — 부분적재/dedup 붕괴를 전국 합계로 포착(임계 미만=FAIL).
     for tbl, lo, env_key in (("parcel", p_min, "PARCEL_MIN"), ("building", b_min, "BUILDING_MIN"),
@@ -466,11 +479,86 @@ def check_postgis():
     except Exception as e:
         rec("FAIL", "PostGIS 핵심 인덱스", f"조회 실패 {str(e)[:80]}")
 
+    # ── 지번(A3) 산출물 검증 5종 — lawd 사전·ji_main 분해·parcel_jibun_lookup·실조회 라운드트립 ──
+    # 4) 지번 사전 적재 — 동명→emd_cd(lawd_dong)·시도토큰→시군구(lawd_sigungu) 해소 사전.
+    #    0건이면 지번 동명 해소 불가 → 지번검색 전면 실패. (build_dong_dict.sql / build_sigungu_dict.sh 산출)
+    for tbl, label in (("lawd_dong", "법정동 사전"), ("lawd_sigungu", "시군구 사전")):
+        n = scalar(f"SELECT count(*) FROM {tbl}")
+        if n is None:
+            rec("FAIL", f"{label}({tbl})", "조회 실패(테이블 없음·미적재?) — 지번 동명 해소 불가")
+        else:
+            rec("FAIL" if n == 0 else "PASS", f"{label}({tbl})",
+                f"{n:,}건" + ("" if n else " — 0건(사전 미적재, 지번검색 동명해소 실패)"))
+
+    # 5) parcel 지번 본번 분해율 — ji_main NOT NULL ≥ 95%. (backfill_parcel_jibun.sql 산출)
+    #    낮으면 jibun 파싱/백필 미완 → emd_cd+ji_main 정확매칭 경로 미동작(거짓 PASS 차단).
+    #    NOTE(운영): load-all.sh 의 parcel 단계가 --fresh 적재 성공 직후 backfill_parcel_jibun 을 자동 체인하므로
+    #      full-build 직후 이 게이트는 PASS 가 기대값이다. FAIL 이면 PARCEL_SKIP_BACKFILL 설정(자동 체인 opt-out)
+    #      또는 backfill 단계 실패를 의심하라 — `STEPS=backfill` 재실행(backfill_parcel_jibun + backfill_geom_pt)으로
+    #      복구한다. (대형 집계이므로 timeout 여유 — 39.6M FILTER count.)
+    try:
+        r = q("SELECT count(*) FILTER (WHERE ji_main IS NOT NULL), count(*) FROM parcel", timeout=120)
+        filled, tot = int(r[0][0] or 0), int(r[0][1] or 0)
+        if tot == 0:
+            rec("FAIL", "지번 본번 분해율(ji_main)", "parcel 0건 — 적재 미완")
+        else:
+            ratio = filled / tot
+            rec("PASS" if ratio >= jm_min else "FAIL", "지번 본번 분해율(ji_main)",
+                f"{ratio*100:.2f}% ({filled:,}/{tot:,}; 임계 {jm_min*100:.0f}%, 우회 JIMAIN_MIN=0)"
+                + ("" if ratio >= jm_min else " — backfill_parcel_jibun 미완 의심(STEPS=backfill 선실행 필요)"))
+    except Exception as e:
+        rec("FAIL", "지번 본번 분해율(ji_main)", f"조회 실패 {str(e)[:80]} — ji_main 컬럼 없음?(21-parcel-jibun 미적용)")
+
+    # 6) parcel_jibun_lookup 인덱스 유효성 — 파티션 부모 + 전 자식 파티션 indisvalid=true.
+    #    무효 시 해당 시도 Seq Scan(타임아웃). 비-CONCURRENT CREATE INDEX 는 중단 시 전체 롤백(인덱스 부재)이라
+    #    존재가드(pg_class count==0)가 FAIL 로 포착하고, 일부 자식만 indisvalid=false 인 상황은
+    #    ON ONLY 후 자식 개별생성 / CONCURRENTLY 실패 / 파티션 사후 ATTACH 등에서 발생한다(둘 다 FAIL).
+    #    pg_inherits 로 파티션 인덱스 부모(parcel_jibun_lookup)의 자식 인덱스를 함께 검사.
+    try:
+        if scalar("SELECT count(*) FROM pg_class WHERE relname='parcel_jibun_lookup'") in (0, None):
+            rec("FAIL", "지번 lookup 인덱스", "parcel_jibun_lookup 없음 — 21-parcel-jibun/backfill 미적용")
+        else:
+            rows = q("SELECT c.relname, i.indisvalid "
+                     "FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid "
+                     "WHERE c.oid='parcel_jibun_lookup'::regclass "
+                     "   OR c.oid IN (SELECT inhrelid FROM pg_inherits "
+                     "                WHERE inhparent='parcel_jibun_lookup'::regclass)")
+            invalid = [r[0].strip() for r in rows if len(r) >= 2 and r[1].strip() not in ("t", "true")]
+            nchk = len(rows)
+            if invalid:
+                rec("FAIL", "지번 lookup 인덱스",
+                    f"무효 {len(invalid)}/{nchk}: {','.join(invalid[:6])} — 인덱스 재생성 중단 정황")
+            else:
+                rec("PASS", "지번 lookup 인덱스", f"{nchk}개(부모+파티션) 모두 유효")
+    except Exception as e:
+        rec("FAIL", "지번 lookup 인덱스", f"조회 실패 {str(e)[:80]}")
+
+    # 7) 골든셋 라이브 1건 — 실제 지번 조회 경로(동명→lawd_dong→emd_cd→parcel ji_main/ji_sub)가 ≥1행 반환.
+    #    데이터 비의존: 라이브 데이터에서 (emd, ji_main, ji_sub) 1건을 샘플 → 같은 경로로 되조회해 round-trip 성공 확인.
+    #    geocode-api-pg.py 의 지번 SQL 을 미러링. 0행이면 지번 조회 경로 단절 → FAIL.
+    #    sido_cd 파티션 프루닝이 없는 전수 조인이므로 timeout 여유.
+    try:
+        g = q("SELECT d.emd, p.ji_main, p.ji_sub "
+              "FROM parcel p JOIN lawd_dong d ON d.emd_cd = p.emd_cd "
+              "WHERE p.ji_main IS NOT NULL LIMIT 1", timeout=120)
+        if not g or not g[0] or g[0][0] == "":
+            rec("FAIL", "지번 골든 라이브", "샘플 가능한 (동명·본번) 0건 — lawd_dong↔parcel 조인/분해 단절")
+        else:
+            emd, jm, js = g[0][0], g[0][1], g[0][2]
+            hit = q("SELECT count(*) FROM parcel p JOIN lawd_dong d ON d.emd_cd = p.emd_cd "
+                    "WHERE d.emd = %s AND p.ji_main = %s AND p.ji_sub = %s"
+                    % (_lit(emd), _lit(jm), _lit(js)), timeout=120)
+            n = int(hit[0][0]) if hit and hit[0] else 0
+            rec("PASS" if n > 0 else "FAIL", "지번 골든 라이브",
+                f"'{emd} {jm}-{js}' → {n}건 조회" + ("" if n else " — 지번 lookup 경로 단절"))
+    except Exception as e:
+        rec("FAIL", "지번 골든 라이브", f"조회 실패 {str(e)[:80]}")
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
-    ap.add_argument("--tiles", default=os.path.expanduser("~/geocode-build/tiles"))
+    ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--tiles", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "tiles"))
     ap.add_argument("--style"); ap.add_argument("--config")
     ap.add_argument("--taxonomy", default=str(pathlib.Path(__file__).resolve().parents[1] / "style" / "poi-taxonomy.json"))
     ap.add_argument("--api", default="http://localhost:8082")

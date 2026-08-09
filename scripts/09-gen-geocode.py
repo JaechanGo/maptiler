@@ -5,7 +5,7 @@
 - 주소(kind='addr')   : 내비게이션용DB match_build_*.txt, 좌표 EPSG:5179→4326(순수파이썬)
 - OSM(kind=type)      : 기존 geocode.sqlite(07 산출물)에서 복사 — station/place/dong/road/poi/biz + areas
 통합 스키마:
-  places(id,kind,name,subtype, sido,sigungu,emd,road,road_norm,main_no,sub_no,bld,postal,haeng_dong,bd_mgt_sn, lon,lat)
+  places(id,kind,name,subtype, sido,sigungu,emd,ri,road,road_norm,main_no,sub_no,bld,postal,haeng_dong,bd_mgt_sn, lon,lat)
   places_fts(name, region, road, bld)   ← addr→region/road/bld, OSM→name
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
@@ -38,10 +38,19 @@ def norm(s): return re.sub(r"\s+"," ",unicodedata.normalize("NFC",s or "")).stri
 def rnorm(s): return re.sub(r"[.\s]","",unicodedata.normalize("NFC",s or ""))
 _DORO_RE = re.compile(r"(\S*(?:대로|로|길))\s+(\d+)(?:-(\d+))?")
 _GIL_SP = re.compile(r"([로가])\s+(\d+(?:번|가)?길)")   # '퇴계로 34길' 처럼 번호길 앞 띄어쓰기 → 붙임(안 그러면 '퇴계로'+34번지로 오독)
+def _mainno(s):                 # 결정5: 본번 int4 안전정수화(length<=7). 비정상 자릿수·비숫자→None(매칭 불성립). int4 가드 제거 금지(Global Constraint).
+    if not s or not s.isdigit() or len(s) > 7: return None
+    return int(s)
+def _subno(s):                  # 결정5: 부번 안전정수화. 비정상·결측→0(기존 int(... or 0) 동작 보존 + main_no 와 동일 자릿수 가드).
+    if not s or not s.isdigit() or len(s) > 7: return 0
+    return int(s)
 def parse_doro(s):
     # 도로명주소 → (도로명, 도로명정규화=rnorm, 건물본번, 건물부번). 상세주소(층/호)·미파싱은 무시. navi 조인키(rnorm·본/부번)와 동형.
     m = _DORO_RE.search(_GIL_SP.sub(r"\1\2", norm(s).split(",")[0]))
-    return (m.group(1), rnorm(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else (None,None,None,None)
+    if not m: return (None,None,None,None)
+    mno = _mainno(m.group(2))                              # 본번 int4 가드 — 비정상이면 미파싱 취급
+    if mno is None: return (None,None,None,None)
+    return (m.group(1), rnorm(m.group(1)), mno, _subno(m.group(3)))
 
 
 # ── 도로명 사전(gazetteer) 매칭 — navi 의 '실재 도로명'에 최장일치. 정규식이 더러운 입력(붙여쓰기·지하·시군구붙음·
@@ -70,7 +79,9 @@ def parse_doro_gaz(s):
                     if rd and rd in rn:
                         m = re.match(r"(\d+)(?:-(\d+))?", rn[rn.find(rd) + len(rd):])
                         if m:
-                            return (rd, rd, int(m.group(1)), int(m.group(2) or 0), sido, sgg)
+                            mno = _mainno(m.group(1))        # 본번 int4 가드 — 비정상이면 폴백(regex parse_doro)
+                            if mno is None: break
+                            return (rd, rd, mno, _subno(m.group(2)), sido, sgg)
                         break
     r, rnm, mno, sno = parse_doro(s)                       # 폴백
     return (r, rnm, mno, sno, None, None)
@@ -81,7 +92,10 @@ _JIBUN_RE = re.compile(r"(\S*[동리가])\s+(산)?\s*(\d+)(?:-(\d+))?")
 def _navi_jibun_key(sido, sgg, jibun_text):
     # navi addr 의 jibun 텍스트('혜화동 1-21'·'신영동 산 2-13') → (시도,시군구,법정동norm,산,본번,부번)
     m = _JIBUN_RE.search(norm(jibun_text or ""))
-    return (sido, sgg, rnorm(m.group(1)), 1 if m.group(2) else 0, int(m.group(3)), int(m.group(4) or 0)) if m else None
+    if not m: return None
+    mno = _mainno(m.group(3))                              # 지번 본번 int4 가드 — 비정상이면 키 불성립
+    if mno is None: return None
+    return (sido, sgg, rnorm(m.group(1)), 1 if m.group(2) else 0, mno, _subno(m.group(4)))
 def _facility_jibun_key(jibun_src):
     # 시설 지번주소(또는 도로명칸에 기입된 지번) → 조인키. 시군구는 사전 화이트리스트로 보정(navi 포맷 '수원시 영통구').
     a = norm(jibun_src or ""); t = a.split()
@@ -91,6 +105,28 @@ def _facility_jibun_key(jibun_src):
         if t[1] == cand or " ".join(t[1:3]) == cand or t[1].startswith(cand):
             sgg = cand; break
     return _navi_jibun_key(sido, sgg, a)
+
+def _norm_sgg(sido, sgg):       # 결정4(M1): 시군구 navi 표기 정규화. 완전일치만 치환, 빈값(세종)·미매칭은 원본 유지(승급형 접두매칭 금지).
+    if not sgg: return sgg                        # 빈값(세종 등) 그대로 — 임의 '구' 오승급 차단
+    for cand in GAZ.get("sgg", {}).get(sido, []):
+        if sgg == cand: return cand               # 완전일치만 치환(접두/최장일치 승급 금지)
+    return sgg                                    # 미매칭 → 원본 유지(하위호환)
+
+def _split_emd_ri(jibun_txt, sido, sgg):   # 결정2: 지번 텍스트 → (법정동 bjd, 리 ri). 동지역 ri=None. 좌표 PIP 아님(순수 파싱).
+    t = norm(jibun_txt or "").split()
+    if len(t) < 2: return (None, None)
+    i = 1 if t[0] == sido else 0               # 시도 consume
+    rest = t[i:]
+    if sgg:                                    # 시군구 consume (1~2토큰; GAZ 화이트리스트와 동일 규칙)
+        sgg_tok = sgg.split()
+        if rest[:len(sgg_tok)] == sgg_tok: rest = rest[len(sgg_tok):]
+    bjd = ri = None
+    for j, tok in enumerate(rest):
+        if bjd is None and tok.endswith(("동", "읍", "면", "가")):   # (m1) 법정동 = endswith 종결 토큰
+            bjd = tok
+            if j+1 < len(rest) and rest[j+1].endswith("리"): ri = rest[j+1]   # 다음 토큰이 리(면/읍 하위)면 채움
+            break
+    return (bjd, ri)
 _BIZ_PUNCT=re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
 def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()  # 12-build-poi.sh _nrm와 동일 — biz 중복(대표) 판정 키
 def search_text(name, is_station):
@@ -103,7 +139,7 @@ def search_text(name, is_station):
 SCHEMA = """
   PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1048576; PRAGMA temp_store=MEMORY;
   CREATE TABLE places(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, subtype TEXT,
-    sido TEXT,sigungu TEXT,emd TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
+    sido TEXT,sigungu TEXT,emd TEXT,ri TEXT,road TEXT,road_norm TEXT,main_no INTEGER,sub_no INTEGER,
     bld TEXT,postal TEXT,haeng_dong TEXT,bd_mgt_sn TEXT,bcode TEXT,hcode TEXT, phone TEXT,opened TEXT, jibun TEXT,cat1 TEXT,cat2 TEXT, source TEXT,is_primary INTEGER, lon REAL,lat REAL);
   CREATE VIRTUAL TABLE places_fts USING fts5(name, region, road, bld,
     content='places', content_rowid='id', tokenize='unicode61', prefix='2 3');
@@ -123,11 +159,12 @@ def _derive_jibun(namemap, mgt):
 
 
 def load_jibun(src, sido):
-    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict).
+    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict, 법정동코드(앞10)→리(里) dict).
     # c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값), c[5]=산, c[6]=본번, c[7]=부번, c[18]=건물관리번호.
     # 이름 dict 는 대표지번 없는 건물의 지번을 _derive_jibun 으로 채우는 데 쓴다(빠짐없이).
-    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}
-    if not p.exists(): return d, nm
+    # ri dict(rd)는 navi addr 의 ri 컬럼(X5) 산출용 — 법정동코드(mgt[:10]) 단위 리 1:1(면지역만 존재).
+    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}; rd = {}
+    if not p.exists(): return d, nm, rd
     for line in io.open(p, encoding="cp949", errors="replace"):
         c = line.rstrip("\n").split("|")
         if len(c) < 19: continue
@@ -135,10 +172,11 @@ def load_jibun(src, sido):
         ri = c[4].strip()                       # 리(里) — 면 단위 지번에 보존(없으면 동/법정동만)
         dong = f"{c[3]} {ri}" if ri else c[3]
         nm.setdefault(mgt[:10], dong)
+        if ri: rd.setdefault(mgt[:10], ri)      # 리 분리 컬럼(X5) — emd 문자열 합성과 별개로 보존
         if mgt in d: continue
         san = "산 " if c[5] == "1" else ""; bu = c[7]
         d[mgt] = f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
-    return d, nm
+    return d, nm, rd
 
 def add_juso(db, src, only, state):
     pid = state["pid"]; seen = state["seen"]
@@ -146,7 +184,7 @@ def add_juso(db, src, only, state):
         path = src / f"match_build_{s}.txt"
         if not path.exists():
             print(f"  (건너뜀) {path.name} 없음", file=sys.stderr); continue
-        jdict, jname = load_jibun(src, s)
+        jdict, jname, jridict = load_jibun(src, s)
         st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
         for line in io.open(path, encoding="cp949", errors="replace"):
             c=line.rstrip("\n").split("|")
@@ -161,7 +199,7 @@ def add_juso(db, src, only, state):
             pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
             bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
             jb=jdict.get(mgt) or _derive_jibun(jname, mgt)       # 대표지번 없으면 건물관리번호로 파생(빠짐없이)
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]
+            pb.append((pid,'addr',None,None,c[1],c[2],c[3],jridict.get(mgt[:10]),road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]·ri=리(X5,mgt[:10]키)
             fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
             rb.append((pid,lon,lon,lat,lat))
             if len(pb)>=50000:
@@ -179,7 +217,7 @@ def add_osm(db, osm_path, state):
         if lon is None or lat is None: continue
         pid+=1
         oc=CW_OSM.get(sub or ''); oc1,oc2=(oc[0],oc[1] or None) if oc else (None,None)   # canonical 카테고리
-        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,oc1,oc2,'osm',1,lon,lat))
+        pb.append((pid,typ,name,sub,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,oc1,oc2,'osm',1,lon,lat))  # +ri자리 None(X5)
         fb.append((pid,search_text(name, typ=='station'),'','',''))
         rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
@@ -211,7 +249,8 @@ def add_biz(db, csvdir, state):
                 nm=(row.get("상호명") or "").strip()
                 if not nm or nm in ("업소명없음", "상호명없음", "-", "."): continue   # 원본 플레이스홀더 제외
                 biz=(row.get("상권업종소분류명") or "").strip()
-                sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip(); emd=(row.get("행정동명") or "").strip()
+                sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip()
+                haeng=(row.get("행정동명") or "").strip() or None   # CSV 행정동명 → haeng_dong 자리/폴백 전용(emd 아님; M2)
                 phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None
                 cat1=(row.get("상권업종대분류명") or "").strip() or None
                 cat2=(row.get("상권업종중분류명") or "").strip() or None
@@ -222,6 +261,8 @@ def add_biz(db, csvdir, state):
                 else:                    # 상가/인허가=이미 좌표보유(주소 깨끗) → 기존 regex(건물키 조인용)
                     road,rn,mno,sno = parse_doro(row.get("도로명주소") or "")
                 jibun_txt=(row.get("지번주소") or "").strip() or None
+                sgg = _norm_sgg(sido, sgg)                          # 결정4(M1): 시군구 navi 표기 정규화(완전일치만; g_sgg 보정 후 입력)
+                bjd, ri = _split_emd_ri(jibun_txt, sido, sgg)       # 결정1·2: 지번 텍스트 → 법정동(bjd)/리(ri). 첫 원소=법정동
                 if src=='localdata':                                   # localdata 카테고리를 canonical 로 표준화
                     cc=CW_LD.get(f"{cat1}|{biz}")
                     if cc: cat1,cat2=cc[0],(cc[1] or None)
@@ -231,11 +272,11 @@ def add_biz(db, csvdir, state):
                     if kind=='facility':                               # 좌표없는 시설 → 도로명 또는 지번으로 지오코딩 대기
                         jibun_src = jibun_txt or ((row.get("도로명주소") or "").strip() or None)   # 지번칸 없으면 도로명칸(지번 기입분)
                         if (rn and mno is not None) or jibun_src:
-                            pending.append((nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2,jibun_src))
+                            pending.append((nm,biz,sido,sgg,haeng,road,rn,mno,sno,jibun_txt,cat1,cat2,jibun_src))  # rec[4]=haeng(행정동명) — emit 폴백 전용(M2)
                     continue
                 pid+=1
-                pb.append((pid,kind,nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))
-                fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz))   # FTS: name=상호명, region=시군구·동, bld=업종
+                pb.append((pid,kind,nm,biz,sido,sgg,bjd,ri,road,rn,mno,sno,biz,None,haeng,None,None,None,phone,opened,jibun_txt,cat1,cat2,src,0,round(lon,6),round(lat,6)))  # emd=bjd(법정동)·ri=ri·haeng_dong=haeng(B2)
+                fb.append((pid,nm," ".join(x for x in (sido,sgg,bjd,ri,haeng) if x),'',biz))   # FTS region: 시도·시군구·법정동·리·행정동(navi region 과 일관)
                 rb.append((pid,lon,lon,lat,lat))
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     _flush(db,pb,fb,rb)
@@ -246,24 +287,25 @@ def add_biz(db, csvdir, state):
 def geocode_facilities(db, pending, state):
     # 좌표 없는 facility 행 → navi 좌표. 1) 도로명 사전키 조인  2) 실패 시 지번(법정동+본/부번) 폴백.
     # navi 미존재 주소는 좌표없는 POI 라 버린다(insert 안 함). FTS·rtree 까지 정상행만 적재.
-    # rec = (nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2,jibun_src)
+    # rec = (nm,biz,sido,sgg,haeng,road,rn,mno,sno,jibun_txt,cat1,cat2,jibun_src)  ← rec[4]=CSV 행정동명(haeng), emd 폴백 전용(M2)
     if not pending: return
     st=time.time()
     db.execute("CREATE INDEX IF NOT EXISTS idx_addr_key ON places(sido,sigungu,road_norm,main_no,sub_no) WHERE kind='addr'")
     cur=db.cursor(); pb=[]; fb=[]; rb=[]
-    def emit(rec, lon, lat):
-        nm,biz,sido,sgg,emd,road,rn,mno,sno,jibun_txt,cat1,cat2,_js = rec
+    def emit(rec, lon, lat, n_bjd, n_ri, n_haeng):     # navi addr 매칭행의 법정동(n_bjd)/리(n_ri)/행정동(n_haeng) 캐리(결정3)
+        nm,biz,sido,sgg,haeng_csv,road,rn,mno,sno,jibun_txt,cat1,cat2,_js = rec   # rec[4]=haeng_csv(CSV 행정동명)
+        haeng = n_haeng or haeng_csv                  # navi c[14] 우선, null이면 CSV 행정동명 폴백(결정3/M2)
         state["pid"]+=1; pid=state["pid"]
-        pb.append((pid,'facility',nm,biz,sido,sgg,emd,road,rn,mno,sno,biz,None,None,None,None,None,None,None,jibun_txt,cat1,cat2,'facility',1,round(lon,6),round(lat,6)))
-        fb.append((pid,nm,f"{sido} {sgg} {emd}",'',biz)); rb.append((pid,lon,lon,lat,lat))
+        pb.append((pid,'facility',nm,biz,sido,sgg,n_bjd,n_ri,road,rn,mno,sno,biz,None,haeng,None,None,None,None,None,jibun_txt,cat1,cat2,'facility',1,round(lon,6),round(lat,6)))  # emd=n_bjd·ri=n_ri·haeng_dong=haeng(B2)
+        fb.append((pid,nm," ".join(x for x in (sido,sgg,n_bjd,n_ri,haeng) if x),'',biz)); rb.append((pid,lon,lon,lat,lat))
         if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     n_road=0; unmatched=[]
     for rec in pending:                                  # 1) 도로명 조인
         sido,sgg,rn,mno,sno = rec[2],rec[3],rec[6],rec[7],rec[8]
-        r=cur.execute("""SELECT lon,lat FROM places WHERE kind='addr'
+        r=cur.execute("""SELECT lon,lat,emd,ri,haeng_dong FROM places WHERE kind='addr'
             AND sido=? AND sigungu=? AND road_norm=? AND main_no=? AND sub_no=? ORDER BY id LIMIT 1""",
             (sido,sgg,rn,mno,sno)).fetchone() if (rn and mno is not None) else None
-        if r: emit(rec, r[0], r[1]); n_road+=1
+        if r: emit(rec, r[0], r[1], r[2], r[3], r[4]); n_road+=1   # r[2]=법정동→n_bjd, r[3]=ri, r[4]=haeng_dong
         elif rec[12]:                                    # 도로 실패 → 지번키 후보
             k=_facility_jibun_key(rec[12])
             if k: unmatched.append((rec,k))
@@ -272,14 +314,14 @@ def geocode_facilities(db, pending, state):
     if unmatched:                                        # 2) 지번 폴백 — 필요한 시군구의 addr 만 스캔해 지번키→좌표
         need={k for _,k in unmatched}; need_sgg={(k[0],k[1]) for k in need}
         sggs=sorted({g for _,g in need_sgg}); ph=",".join("?"*len(sggs)); jc={}
-        for s,g,jb,lo,la in db.execute(
-                f"SELECT sido,sigungu,jibun,lon,lat FROM places WHERE kind='addr' AND jibun IS NOT NULL AND sigungu IN ({ph})", sggs):
+        for s,g,jb,lo,la,e,ri_,hd in db.execute(
+                f"SELECT sido,sigungu,jibun,lon,lat,emd,ri,haeng_dong FROM places WHERE kind='addr' AND jibun IS NOT NULL AND sigungu IN ({ph})", sggs):
             if (s,g) not in need_sgg: continue            # sigungu 동명이(시도 다름) 걸러냄
             kk=_navi_jibun_key(s,g,jb)
-            if kk in need and kk not in jc: jc[kk]=(lo,la)
+            if kk in need and kk not in jc: jc[kk]=(lo,la,e,ri_,hd)   # e=법정동(emd)→n_bjd, ri_=리, hd=haeng_dong 캐리
         for rec,k in unmatched:
             co=jc.get(k)
-            if co: emit(rec, co[0], co[1]); n_jibun+=1
+            if co: emit(rec, co[0], co[1], co[2], co[3], co[4]); n_jibun+=1   # co[2]=법정동→n_bjd
         _flush(db,pb,fb,rb)
     db.execute("DROP INDEX IF EXISTS idx_addr_key")
     print(f"  [geocode] facility 도로 {n_road:,} + 지번폴백 {n_jibun:,} = {n_road+n_jibun:,}/{len(pending):,} ({time.time()-st:.1f}s)", file=sys.stderr)
@@ -298,7 +340,7 @@ def build_gazetteer(db):
 
 def _flush(db,pb,fb,rb):
     if not pb: return
-    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
+    db.executemany("INSERT INTO places VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",pb)
     db.executemany("INSERT INTO places_fts(rowid,name,region,road,bld) VALUES(?,?,?,?,?)",fb)
     db.executemany("INSERT INTO place_rtree VALUES(?,?,?,?,?)",rb)
 
@@ -323,8 +365,8 @@ def write_taxonomy(db, out_path):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--src", default="/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
-    ap.add_argument("--osm", default=os.path.expanduser("~/geocode-build/osm.sqlite"))
-    ap.add_argument("--out", default=os.path.expanduser("~/geocode-build/geocode.sqlite"))
+    ap.add_argument("--osm", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "osm.sqlite"))
+    ap.add_argument("--out", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     ap.add_argument("--only")
     ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
     ap.add_argument("--dedup", choices=["legacy","er"], default="legacy",

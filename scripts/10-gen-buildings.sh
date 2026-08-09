@@ -4,8 +4,9 @@
 # 컬럼(값 샘플 확정): A16=높이(m, 결측多), A26=지상층수. render_height=A16>0?A16:A26*3.3 (둘다0→6m).
 set -euo pipefail
 SRC="${1:-$HOME/Downloads/gis}"
-OUTDIR="$HOME/geocode-build/tiles"; PARTS="$OUTDIR/_parts"; mkdir -p "$PARTS"
-TMPJL="$HOME/geocode-build/_one.geojsonl"
+BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
+OUTDIR="$BUILD_HOME/tiles"; PARTS="$OUTDIR/_parts"; mkdir -p "$PARTS"
+TMPJL="$BUILD_HOME/_one.geojsonl"
 MBT="$OUTDIR/buildings.mbtiles"
 rm -f "$PARTS"/*.mbtiles 2>/dev/null || true
 
