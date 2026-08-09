@@ -10,12 +10,21 @@
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
 """
-import argparse, io, json, math, os, pathlib, re, sqlite3, sys, time, unicodedata
+import argparse, collections, io, json, math, os, pathlib, re, sqlite3, sys, time, unicodedata
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SIDO = ["seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","sejong","gyunggi",
         "gangwon","chungbuk","chungnam","jeonbuk","jeonnam","gyeongbuk","gyeongnam","jeju"]
 CW_LD, CW_OSM = {}, {}   # cat-crosswalk.json (canonical 카테고리 매핑) — main()에서 로드, add_biz/add_osm 이 사용
+
+# ---- 리(里) 키 충돌 관측 (T018 A-4) ----------------------------------------
+# load_jibun 의 rd(법정동코드10 → 리) 는 한 키에 서로 다른 리가 몰리는 것을 **조용히** 삼켜 왔다.
+# (구현은 load_jibun 참조 — 값 선택 규칙은 불변, 여기서는 세기만 한다.)
+# 이 수치가 0 이 아니면 다음 적재본의 address.ri 는 그만큼 부정확하다는 뜻이고,
+# 그 오염이 lawd_ri 사전 → 지오코딩 리 표기로 전파된다.
+RI_KEY_COLLISIONS = collections.defaultdict(set)   # 붕괴 키 → 무시된 리 이름 집합
+RI_COLLISION_ROWS = {}          # 시도 → 충돌 행수
+RI_COLLISION_SAMPLE = 5         # 시도당 stderr 로 뽑아 보여줄 표본 개수(로그 폭주 방지)
 
 # ---- EPSG:5179(UTM-K) → WGS84 (Snyder inverse TM, 무의존) ----
 _a=6378137.0; _f=1/298.257222101; _e2=2*_f-_f*_f; _ep2=_e2/(1-_e2)
@@ -162,9 +171,29 @@ def load_jibun(src, sido):
     # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict, 법정동코드(앞10)→리(里) dict).
     # c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값), c[5]=산, c[6]=본번, c[7]=부번, c[18]=건물관리번호.
     # 이름 dict 는 대표지번 없는 건물의 지번을 _derive_jibun 으로 채우는 데 쓴다(빠짐없이).
-    # ri dict(rd)는 navi addr 의 ri 컬럼(X5) 산출용 — 법정동코드(mgt[:10]) 단위 리 1:1(면지역만 존재).
+    # ri dict(rd)는 navi addr 의 ri 컬럼(X5) 산출용.
+    # ★ 정정(T018, 2026-08-10) — 구 주석의 "법정동코드(mgt[:10]) 단위 리 1:1(면지역만 존재)"은 **거짓**이다.
+    #   mgt 는 건물관리번호이고 앞 10자리는 **건물 등록 시점의 법정동코드로 동결**돼 이후 개편을
+    #   반영하지 않으며, 끝 2자리(리 자리)도 이 파일에서는 사실상 구분자 역할을 못 한다.
+    #   [측정 T018 §A-2] mgt[:10] 키 19,058개 중 **2,699개**가 서로 다른 리를 2개 이상 포함 →
+    #   setdefault 가 첫 값만 남기고 **2,698개 키가 붕괴**했다. 이것이 lawd_ri 오염의 근본 원인이다.
+    # ★ 정합률 수치 주의 (T018 검증 반영, 2026-08-10) — **아래 두 값을 직접 비교하지 말 것.**
+    #   · 구 기준선 97.08% (6,884,543건 중 201,298건 불일치)
+    #     → **[재현 실패 — 산출 정의 불명]**. 이 수치는 저장소 전역에 **산문으로만** 존재하고
+    #       정의 SQL 이 어디에도 없다. 정의를 6가지(V1~V6)로 바꿔 전수 재시도했으나 어느 것도
+    #       재현하지 못했다. 이력으로만 남긴다.
+    #   · 실측 재구성치 **96.9384%** (대상 6,892,473 / 불일치 211,017)
+    #     → 정의 V1 을 명시한 값: kind='addr' AND ri 비어있지 않음 AND jibun 존재 →
+    #       jibun 첫 토큰 == ri. 불일치 분해 = 지번에 리 토큰 자체가 없음 145,317
+    #       + 리 토큰이 있으나 ri 와 다름 65,700.
+    #   두 값은 **정의가 다르므로 비교가 성립하지 않는다.** "97.08% → 96.94% = 회귀"로 읽으면 오독이다.
+    #   근거: 검증 보고서 `verification-report.md` §4-1·§4-2 (기준선 재현 실패 절).
+    # ※ 이번 수정의 범위는 **관측뿐**이다 — 값 선택 규칙(첫 값 유지)은 그대로 두어 산출물이 바뀌지
+    #   않게 한다. 키를 무엇으로 바꿀지(예: mgt[:10]+리명, 지번 기반)는 원천 재적재를 수반하므로
+    #   후속 태스크에서 결정한다. 지금은 "조용히 뭉개던 것"을 "세어서 알리는 것"으로만 바꾼다.
     p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}; rd = {}
     if not p.exists(): return d, nm, rd
+    coll = 0                                    # 이 시도에서 발생한 리 충돌(다른 값 덮어쓰기 시도) 건수
     for line in io.open(p, encoding="cp949", errors="replace"):
         c = line.rstrip("\n").split("|")
         if len(c) < 19: continue
@@ -172,10 +201,23 @@ def load_jibun(src, sido):
         ri = c[4].strip()                       # 리(里) — 면 단위 지번에 보존(없으면 동/법정동만)
         dong = f"{c[3]} {ri}" if ri else c[3]
         nm.setdefault(mgt[:10], dong)
-        if ri: rd.setdefault(mgt[:10], ri)      # 리 분리 컬럼(X5) — emd 문자열 합성과 별개로 보존
+        if ri:                                  # 리 분리 컬럼(X5) — emd 문자열 합성과 별개로 보존
+            k = mgt[:10]; prev = rd.get(k)
+            if prev is None:
+                rd[k] = ri                      # 첫 값 채택 — setdefault 와 동일(동작 불변)
+            elif prev != ri:                    # 같은 키에 **다른** 리 → 구 코드가 조용히 삼키던 충돌
+                coll += 1
+                RI_KEY_COLLISIONS[k].add(ri)
+                if coll <= RI_COLLISION_SAMPLE:
+                    print(f"    [리 충돌] {sido} bcode10={k} 채택='{prev}' 무시='{ri}' "
+                          f"(지번='{c[3]} {ri}')", file=sys.stderr)
         if mgt in d: continue
         san = "산 " if c[5] == "1" else ""; bu = c[7]
         d[mgt] = f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
+    if coll:
+        RI_COLLISION_ROWS[sido] = coll
+        print(f"    [리 충돌] {sido}: 행 {coll:,}건 / 붕괴 키 "
+              f"{sum(1 for v in RI_KEY_COLLISIONS.values() if v):,}건(누적)", file=sys.stderr)
     return d, nm, rd
 
 def add_juso(db, src, only, state):
@@ -444,6 +486,17 @@ def main():
     db.commit(); db.close(); tmp.replace(out)
     sz=out.stat().st_size/1048576
     print("="*56); print(f"OK: {out}  총 {state['pid']:,}건 · {sz:.0f}MB · {time.time()-t0:.0f}s")
+    # ---- 리(里) 키 충돌 총계 (T018 A-4) — 산출물 품질 경고. 빌드는 실패시키지 않는다.
+    _nk = len(RI_KEY_COLLISIONS); _nr = sum(RI_COLLISION_ROWS.values())
+    if _nk:
+        _top = sorted(RI_KEY_COLLISIONS.items(), key=lambda kv: -len(kv[1]))[:5]
+        print(f"  [경고] 리 키 충돌: 붕괴 키 {_nk:,}개 / 충돌 행 {_nr:,}건 "
+              f"— 이만큼의 places.ri 가 부정확할 수 있음(첫 값 채택).", file=sys.stderr)
+        print("         상위: " + ", ".join(f"{k}({len(v)+1}종)" for k, v in _top), file=sys.stderr)
+        print("         원인·후속: load_jibun 주석 및 T018 §A-2 참조(키 설계 변경은 원천 재적재 동반).",
+              file=sys.stderr)
+    else:
+        print("  리 키 충돌: 0건", file=sys.stderr)
     # 카테고리 분류 트리(스튜디오 티어/아이콘 목록용) — 빌드마다 최신 카테고리로 재생성
     try:
         rdb = sqlite3.connect(f"file:{out}?mode=ro", uri=True)

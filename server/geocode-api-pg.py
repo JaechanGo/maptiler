@@ -39,9 +39,15 @@ POOL = ConnectionPool(DSN, min_size=1, max_size=8,
 TOKEN_RE = re.compile(r"[^\w가-힣]+", re.UNICODE)
 
 # 시도 코드(emd_cd 앞2)→명칭 변형. 동명중복(전국 교동×18 등) 시 지역토큰으로 시도 좁힘에 사용.
+# "12"(전남광주통합특별시)는 **DB 에 존재하지 않는 코드**다 — 안 A 는 응답 경계에서만 치환하므로
+# emd_cd/bcode 는 46/29 로 남는다. 여기 등록하는 이유는 사용자가 신 시도명으로 검색했을 때
+# 토큰을 인식하기 위함이고, 실제 좁힘 직전에 SIDO_ALIAS_CODES 로 46·29 로 되돌린다(§B-3).
 SIDO_NM = {
-    "11": ("서울",), "26": ("부산",), "27": ("대구",), "28": ("인천",), "29": ("광주",),
-    "30": ("대전",), "31": ("울산",), "36": ("세종",), "41": ("경기",),
+    # "12"(전남광주) 항목은 여기 적지 않는다 — 약칭 문자열 단일정의점(SIDO_ABBR)이 아직 정의되기
+    # 전이라, 여기 리터럴을 또 쓰면 약칭이 두 곳에 존재하게 된다. 아래 SIDO_MERGED_ABBR 확정 직후
+    # SIDO_NM[SIDO_MERGED_CODE] 로 파생 주입한다(§B-3).
+    "11": ("서울",), "26": ("부산",), "27": ("대구",), "28": ("인천",),
+    "29": ("광주",), "30": ("대전",), "31": ("울산",), "36": ("세종",), "41": ("경기",),
     "43": ("충북", "충청북"), "44": ("충남", "충청남"), "46": ("전남", "전라남"),
     "47": ("경북", "경상북"), "48": ("경남", "경상남"), "50": ("제주",),
     "51": ("강원",), "52": ("전북", "전라북"),
@@ -56,6 +62,8 @@ SIDO_FULL = {
     "41": "경기도", "43": "충청북도", "44": "충청남도", "46": "전라남도",
     "47": "경상북도", "48": "경상남도", "50": "제주특별자치도",
     "51": "강원특별자치도", "52": "전북특별자치도",
+    # 12: 전남광주통합특별시(46+29 통합). 안 A 응답 치환용 — DB 에는 이 코드가 없다.
+    "12": "전남광주통합특별시",
 }
 SIDO_ABBR = {
     "서울특별시": "서울", "부산광역시": "부산", "대구광역시": "대구", "인천광역시": "인천",
@@ -63,6 +71,9 @@ SIDO_ABBR = {
     "경기도": "경기", "충청북도": "충북", "충청남도": "충남", "전라남도": "전남",
     "경상북도": "경북", "경상남도": "경남", "제주특별자치도": "제주",
     "강원특별자치도": "강원", "전북특별자치도": "전북",
+    # 통합 시도 약칭 단일정의점(§B-3). 이 한 줄이 SIDO_ABBR(정식→약칭)·아래 SIDO_FULL_BY_ABBR
+    # (약칭→정식) 양방향을 동시에 성립시킨다 — 약칭을 다른 곳에 또 적지 말 것.
+    "전남광주통합특별시": "전남광주",
 }
 # 약칭 self-매핑(약칭이 들어와도 그대로 통과) + 약칭→정식 역매핑(양방향 완비).
 SIDO_ABBR.update({v: v for v in list(SIDO_ABBR.values())})
@@ -77,6 +88,38 @@ _HAS_LAWD_RI = False
 KIND_LABEL = {"station": "지하철역", "road": "도로", "place": "장소", "dong": "행정동", "poi": ""}
 KNOWN_NONADDR = {"poi", "biz", "facility", "place", "dong", "road", "station"}
 
+# ── T018 안 A: 전남광주통합특별시(12) 응답 경계 치환 ─────────────────────────────
+# ★★★ 영구 불일치 경고 — 다음 사람이 반드시 읽을 것 ★★★
+#   안 A 는 **DB 를 바꾸지 않는다**. address.bcode / parcel.emd_cd / parcel.pnu / lawd_dong.emd_cd /
+#   admin_boundary.code 는 앞으로도 계속 **46(전라남도) · 29(광주광역시)** 다.
+#   12(전남광주통합특별시) 로 보이는 것은 **오직 이 파일이 응답을 만들 때 치환한 결과**뿐이다.
+#   → "DB 가 이미 12 체계"라고 오해하고 SQL 을 짜면 전부 0건이 된다. WHERE 절에는 46/29 를 써야 한다.
+#   → 이 불일치는 안 A 가 존재하는 한 영구적이다. 근본 해소는 안 B(파티션 포함 전면 remap)뿐이며,
+#     안 B 태스크는 Master 가 별도로 생성한다. 관련 문서: docs/ri-dict-runbook.md,
+#     scripts/postgis/build_sido_remap.sql, lawd_ri.exist 의 COMMENT ON COLUMN.
+#   → 안 A 적용 후에도 areas[] 는 **두 코드체계가 섞인 배열**이다: type='emd' 는 치환돼 12 로 나가지만
+#     type='adm_dong' 은 통계청 행정동코드라 치환 대상이 아니며 그 체계의 29 는 **세종**이다.
+SIDO_MERGED_CODE = "12"
+SIDO_MERGED_NEW = SIDO_FULL[SIDO_MERGED_CODE]              # '전남광주통합특별시'(단일정의점)
+SIDO_MERGED_ABBR = SIDO_ABBR[SIDO_MERGED_NEW]              # 약칭 단일정의점(SIDO_ABBR)에서 파생
+# 검색 입력 토큰 인식표에도 신 약칭을 넣는다 — 리터럴 재기입이 아니라 파생이다(§B-3 단일정의점).
+SIDO_NM[SIDO_MERGED_CODE] = (SIDO_MERGED_ABBR,)
+SIDO_MERGED_OLD = ("전라남도", "광주광역시")               # DB 실측값(address.sido / lawd_dong.sido 전수)
+SIDO_MERGED_OLD_ABBR = tuple(SIDO_ABBR[x] for x in SIDO_MERGED_OLD)   # ('전남','광주')
+SIDO_MERGED_OLD_CODES = ("46", "29")
+# 신 시도코드 → DB 실제 코드. SIDO_NM 이 '12' 를 물어와도 좁힘 직전에 46·29 로 되돌린다(§B-3).
+SIDO_ALIAS_CODES = {SIDO_MERGED_CODE: SIDO_MERGED_OLD_CODES}
+
+# 치환표(기동 1회 적재). 미적재 시 전면 비활성 = 현행 46/29 응답 유지(fail-open).
+# **부분 치환 금지**: 코드만 12 이고 표기는 '전라남도'(또는 그 반대)인 상태가 아무것도 안 한 것보다 나쁘다.
+# 그래서 표기 치환도 코드 치환과 같은 _HAS_SIDO_REMAP 한 개의 스위치에 묶는다.
+_SIDO_REMAP = {}          # old_emd8(8자리) → new_emd8(8자리), 623행
+_RI_REMAP_EXC = {}        # old_bcode(10자리) → new_bcode(10자리), 리코드까지 재배정되는 4건
+_HAS_SIDO_REMAP = False
+# A-5 관측용: 리를 보유한 읍면동 emd_cd 집합 + 리 미확정 누적 카운터(Phase 1 잔여 2.16% 추적).
+_RI_EMDS = frozenset()
+_RI_UNRESOLVED = 0
+
 
 # ── 표시/응답 헬퍼 (geocode-api.py 와 동일 형태) ─────────────────────
 def _g(r, k): return r.get(k)
@@ -88,11 +131,93 @@ def _limit(qs, dflt, cap=50):
     except (ValueError, TypeError): return dflt
 
 
+# ── 안 A 치환 함수 (응답 경계 전용) ───────────────────────────────────
+# ※ 위 'T018 안 A' 블록의 영구 불일치 경고를 먼저 읽을 것.
+#   DB 는 46/29, 응답만 12. 이 함수들은 **응답을 만드는 순간에만** 호출한다.
+#   WHERE 절·조인·필터에 12 를 넣으면 안 된다(0건).
+def remap_bcode(code):
+    """법정동코드 46/29 → 12 치환. 8자리(읍면동)·10자리(리 포함) 모두 처리.
+
+    매핑표 미적재(_HAS_SIDO_REMAP=False)거나 대상이 아니면 **원값 객체를 그대로** 돌려준다
+    (문자열 trim 조차 하지 않는다 — 비대상 경로의 기존 값 형태를 건드리지 않기 위함).
+    10자리는 리 코드 재배정 예외(4건)를 먼저 보고, 없으면 앞 8자리만 치환하고 뒤 2자리는 보존한다.
+    매핑표에 없는 46/29 코드는 치환하지 않는다(fail-open) — 없는 코드를 지어내지 않는다.
+    """
+    if not _HAS_SIDO_REMAP or code is None:
+        return code
+    s = str(code).strip()                                  # char(n) 공백패딩 btrim
+    if len(s) not in (8, 10) or not s.isdigit() or s[:2] not in SIDO_MERGED_OLD_CODES:
+        return code
+    if len(s) == 10:
+        n = _RI_REMAP_EXC.get(s)                           # 리코드까지 바뀌는 예외 우선
+        if n: return n
+        e = _SIDO_REMAP.get(s[:8])
+        return (e + s[8:]) if e else code
+    return _SIDO_REMAP.get(s) or code
+
+
+def remap_sido_name(sido):
+    """시도 표기 '전라남도'/'광주광역시'(및 약칭) → 통합 표기. 대상 아니면 원값 그대로.
+
+    코드 치환과 **같은 스위치**(_HAS_SIDO_REMAP)에 묶는다 — 표기만 바뀌고 코드가 안 바뀌거나
+    그 반대인 상태는 사용자·후속 대조 스크립트 모두에게 지금보다 나쁘다.
+    """
+    if not _HAS_SIDO_REMAP or sido is None:
+        return sido
+    s = str(sido).strip()
+    if s in SIDO_MERGED_OLD: return SIDO_MERGED_NEW
+    if s in SIDO_MERGED_OLD_ABBR: return SIDO_MERGED_ABBR
+    return sido
+
+
+def sido_input_alias(t):
+    """검색 입력 역치환(§B-3) — 신 시도명 토큰 → [원토큰, 구 표기…] 후보 목록.
+
+    안 A 는 응답만 12 로 바꾸므로, 사용자가 그 응답을 그대로 검색창에 다시 넣으면(round-trip)
+    DB 에 없는 문자열이라 0건이 된다. 여기서 구 표기로 되돌려 양방향을 성립시킨다.
+    원토큰을 항상 첫 원소로 남긴다 — 상호·지명이 우연히 '전남광주…'로 시작해도 죽이지 않는다.
+    구 표기 토큰('전남'·'전라남도'·'광주')은 확장 없이 그대로 통과 → 기존 질의 회귀 없음.
+    _HAS_SIDO_REMAP 에 묶지 않는다: 입력 관용은 치환표 유무와 무관하게 해로울 게 없다.
+    """
+    if not t: return (t,)
+    return (t,) + SIDO_MERGED_OLD if t.startswith(SIDO_MERGED_ABBR) else (t,)
+
+
+def _region_cond(cols, t):
+    """지역토큰 t 를 cols 각각에 ILIKE 매칭하는 (SQL 조각, 인자) 쌍. 신 시도명은 구 표기로 확장.
+
+    반환 조각은 항상 괄호로 감싼 OR — 호출측이 ' AND ' 로 이어붙여도 의미가 깨지지 않는다.
+    conds/args 는 동일한 (별칭, 컬럼) 순회 순서로 만들어야 바인딩이 어긋나지 않는다.
+    """
+    alts = sido_input_alias(t)
+    conds = [f"{c} ILIKE %s" for a in alts for c in cols]
+    args = [f"%{a}%" for a in alts for _ in cols]
+    return "(" + " OR ".join(conds) + ")", args
+
+
+def _note_ri_unresolved(b_code, ri, where):
+    """A-5 관측 가드 — 리 보유 읍면동인데 결과의 리가 미확정이면 stderr 경고(응답 불변).
+
+    Phase 1 리 백필의 잔여 실패분(148,818행 / 2.16%)이 실사용에서 얼마나 노출되는지 추적한다.
+    로그 폭주 방지를 위해 1·2·4·8… 번째 발생에서만 출력하고 총계는 카운터로 보존한다.
+    """
+    global _RI_UNRESOLVED
+    if not _RI_EMDS or ri or b_code is None: return
+    s = str(b_code).strip()
+    if len(s) != 10 or not s.isdigit() or s[8:] != "00": return
+    if s[:8] not in _RI_EMDS: return                       # 리 없는 읍면동 → '00' 이 정답
+    _RI_UNRESOLVED += 1
+    n = _RI_UNRESOLVED
+    if n & (n - 1) == 0:                                   # 2의 거듭제곱 회차만 출력
+        print(f"geocode-api-pg: NOTE 리 미확정 b_code={s} ({where}) 누적={n}", file=sys.stderr)
+
+
 # 지역토큰은 _s 가드 후 결합 — 결측 토큰 생략(display_of/_region 과 동일 계약).
 # f-string 직결이면 시군구 없는 세종(적재가 빈칸을 NULL 로 넣음)에서 'None' 이 문자열로 박힌다.
 # main_no=0 은 유효값이라 _s('0') 로 살아남고, sub_no/bld 결합 규칙은 종전대로.
 def addr_str(r):
-    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), _s(r["emd"]),
+    # 시도명은 응답 경계에서만 통합 표기로 치환(안 A). r["sido"] 자체(DB 값)는 건드리지 않는다.
+    s = " ".join(x for x in (_s(remap_sido_name(r["sido"])), _s(r["sigungu"]), _s(r["emd"]),
                              _s(r["road"]), _s(r["main_no"])) if x)
     if r.get("sub_no"): s += f'-{r["sub_no"]}'
     if r.get("bld"): s += f' ({r["bld"]})'
@@ -106,7 +231,7 @@ def road_str(r):
     # 표시용 addr_str 이 emd 를 항상 넣는 것과는 계약이 다르므로 두 함수를 합치지 않는다.
     emd = _s(_g(r, "emd"))
     if emd and not emd.endswith(("읍", "면")): emd = None
-    s = " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), emd,
+    s = " ".join(x for x in (_s(remap_sido_name(r["sido"])), _s(r["sigungu"]), emd,
                              _s(r["road"]), _s(r["main_no"])) if x)
     if r.get("sub_no"): s += f'-{r["sub_no"]}'
     if r.get("bld"): s += f' ({r["bld"]})'
@@ -115,21 +240,26 @@ def road_str(r):
 
 def parcel_str(r):
     jb = _s(_g(r, "jibun"))
-    return " ".join(x for x in (_s(r["sido"]), _s(r["sigungu"]), jb or _s(r["emd"])) if x)
+    return " ".join(x for x in (_s(remap_sido_name(r["sido"])), _s(r["sigungu"]),
+                                jb or _s(r["emd"])) if x)
 
 
 def addr_obj(r):
     # 기존 키(road/parcel/zipcode/bld/structure) 전부 보존. structure 에 분해계약 신규 필드 가산.
     # 동결: main_no/sub_no(도로명 건물본/부번, address_road_addr_idx 계약) — 의미·값 불변. bld_* 는 alias.
     jm, js, _san = parse_jibun_nums(_g(r, "jibun"))   # address.jibun best-effort(ji_main/ji_sub)
+    _bc = _g(r, "bcode")
+    _note_ri_unresolved(_bc, _g(r, "ri"), "addr")      # A-5: 치환 전 원값(46/29 기준)으로 관측
     return {
         "road": road_str(r), "parcel": parcel_str(r),
         "zipcode": _g(r, "postal") or "", "bld": _g(r, "bld") or "",
         "structure": {
-            "sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
+            "sido": remap_sido_name(r["sido"]), "sigungu": r["sigungu"], "emd": r["emd"],
             "haeng_dong": _g(r, "haeng_dong"),
             # B-1 반증: address.ri 는 실재하는 컬럼(10-base.sql). 미적재 DB 에서는 _g 가 None 을
-            # 돌려주므로 현행과 동일. b_code 는 여기서 손대지 않는다(결정 A/R-1 — 끝 2자리 '00' 불변).
+            # 돌려주므로 현행과 동일. b_code 는 여기서 손대지 않는다(값은 address.bcode 그대로).
+            #   ※ T018 Phase 1(2026-08-10) 이후 끝 2자리는 '00' 고정이 아니다 — 리 지역은
+            #     실제 리 코드가 들어온다(6,743,655행 백필). 구 주석의 "'00' 불변"은 무효.
             "ri": _g(r, "ri"),
             "san": None,                              # F4: address 에 san 컬럼 없음 → null
             "road_name": _g(r, "road"),
@@ -137,7 +267,19 @@ def addr_obj(r):
             "bld_main_no": _g(r, "main_no"), "bld_sub_no": _g(r, "sub_no"),  # alias
             "ji_main": jm, "ji_sub": js,
             "bld_name": _g(r, "bld"), "zipcode": _g(r, "postal"),
-            "b_code": _g(r, "bcode"), "h_code": _g(r, "hcode"),
+            # 치환지점 1/4 — address.bcode(46/29) → 12.
+            # h_code 는 치환하지 않는다. 다만 그 이유가 "다른 시도코드 체계라서"는 **아니다**(구 주석 오류).
+            #   [실측 2026-08-10, address TABLESAMPLE 1%] hcode 앞 2자리 = bcode 앞 2자리 100% 일치
+            #   (46→46 12,626 / 29→29 1,195 / 36→36 656 / 47→47 13,653). 즉 address.hcode 는
+            #   행안부 행정동코드로 시도 2자리가 법정동코드와 같은 46/29 다.
+            # 치환하지 않는 진짜 이유: 안 A 는 **법정동코드 대응표만** 만들었다(lawd_code 원본이
+            # 법정동코드뿐). 행정동코드는 시군구·읍면동 재편이 법정동과 다르게 잡힐 수 있어 앞 2자리만
+            # 갈아끼우는 것은 Master 가 금지한 방식이다(402건 중 60.70%만 일치 → 약 39% 오답).
+            # → 결과적으로 응답 안에서 b_code(12)와 h_code(46/29)가 어긋난다. 안 A 의 알려진 잔여
+            #   불일치이며 docs/ri-dict-runbook.md 부록 B 에 기록돼 있다. 해소는 안 B 몫.
+            # ※ admin_boundary 의 level='adm_dong' 코드는 또 다른 체계다(통계청: 24=광주·36=전남·29=세종).
+            #   법정동코드 / 행안부 행정동코드 / 통계청 행정동코드 셋을 혼동하지 말 것.
+            "b_code": remap_bcode(_bc), "h_code": _g(r, "hcode"),
         },
     }
 
@@ -154,12 +296,42 @@ def category_of(r):
 
 
 # ── 표기 분해계약 헬퍼 (X1) ──────────────────────────────────────
-def pad_bcode(emd_cd):
-    """emd_cd(char(8)) → b_code 10자리. btrim 후 len==8·digit 가드, 비정상 시 None(경고 호출측)."""
+def pad_bcode(emd_cd, ri_cd=None):
+    """emd_cd(char(8)) + 리코드 → b_code 10자리. btrim 후 len==8·digit 가드, 비정상 시 None(경고 호출측).
+
+    ri_cd 가 확정된 2자리 숫자면 그것을 붙이고, 아니면 '00'(동 지역·리 미확정).
+    T018 Phase 1 이후 address.bcode 뒤 2자리는 실제 리 코드를 갖는다. 그러나 여기서
+    '00' 을 무조건 떼거나 붙이는 것은 오답이다 — 존재 읍면동 5,067 중 리를 갖는 것은
+    1,411(27.8%)뿐이고 나머지 3,656(72.2%)은 리가 없어 '00' 이 정답이다.
+    즉 ri_cd 가 확정되지 않으면 '00' 이 유일하게 안전한 값이다(fail-closed).
+    """
     if emd_cd is None: return None
     s = str(emd_cd).strip()                          # char(8) 공백패딩 btrim
     if len(s) != 8 or not s.isdigit(): return None   # 길이/숫자 가드 → 10자리 깨짐 차단
+    if ri_cd is not None:
+        r = str(ri_cd).strip()                       # char(2) 공백패딩 btrim
+        if len(r) == 2 and r.isdigit() and r != "00":
+            return s + r
     return s + "00"
+
+
+def parcel_bcode(r):
+    """parcel 경로 b_code — 1순위 left(pnu,10), 2순위 pad_bcode(emd_cd, ri_cd).
+
+    pnu 19자리 = 법정동코드10 + 대지구분1 + 본번4 + 부번4 이므로 앞 10자리가 곧 b_code 다.
+    [측정 2026-08-10, parcel 39,882,449행 전수] pnu NULL 0건 / left(pnu,8)<>emd_cd 0건 /
+    length(pnu)<>19 는 12건. 즉 앞 8자리는 emd_cd 와 완전히 일치하므로 pnu 채택이
+    lawd_dong 조인으로 복원한 권위 읍면동을 바꾸지 않는다. 기형 12건만 폴백으로 흘린다.
+    앞 8자리 일치를 명시 검사하는 이유: 장래에 pnu 만 remap 되고 emd_cd 가 남는(또는 그 반대)
+    상황에서 조용히 다른 읍면동을 반환하지 않게 하기 위함이다(안 B 에서 실제로 발생 가능).
+    """
+    emd_cd = r.get("emd_cd")
+    pnu = (r.get("pnu") or "").strip()
+    if len(pnu) >= 10 and pnu[:10].isdigit():
+        s = str(emd_cd or "").strip()
+        if pnu[:8] == s:                             # 권위 읍면동 불일치 시 pnu 채택 금지
+            return pnu[:10]
+    return pad_bcode(emd_cd, r.get("ri_cd"))
 
 
 def parse_jibun_nums(jibun):
@@ -196,7 +368,8 @@ def _sido_abbr(sido):
 
 def _region(r, official=False, with_emd=False):
     """시도(약칭/정식) [시군구] [emd] 합성. 'None'/결측 토큰 생략(graceful)."""
-    sido = _s(r.get("sido")); sigungu = _s(r.get("sigungu")); emd = _s(r.get("emd"))
+    sido = _s(remap_sido_name(r.get("sido")))        # 안 A: 표기 경계 치환(코드와 동일 스위치)
+    sigungu = _s(r.get("sigungu")); emd = _s(r.get("emd"))
     sido_disp = (sido if official else _sido_abbr(sido)) if sido else None
     parts = [p for p in (sido_disp, sigungu) if p]
     if with_emd and emd: parts.append(emd)
@@ -269,13 +442,15 @@ def nonaddr_structure(r, pip=None):
     emd = _g(r, "emd") or pip.get("emd")
     return {
         "structure": {
-            "sido": sido, "sigungu": sigungu, "emd": emd,
+            "sido": remap_sido_name(sido), "sigungu": sigungu, "emd": emd,
             "haeng_dong": None, "ri": None, "san": None,
             "road_name": _g(r, "road"), "main_no": _g(r, "main_no"), "sub_no": _g(r, "sub_no"),
             "bld_main_no": _g(r, "main_no"), "bld_sub_no": _g(r, "sub_no"),
             "ji_main": None, "ji_sub": None,
             "bld_name": _g(r, "bld"), "zipcode": _g(r, "postal"),
-            "b_code": _g(r, "bcode"), "h_code": _g(r, "hcode"),
+            # 치환지점 2/4 — poi/building 등 비-addr 경로의 bcode. 리는 이 경로에서 항상 None 이라
+            #   A-5 관측(_note_ri_unresolved)은 호출하지 않는다(전건 오탐이 된다).
+            "b_code": remap_bcode(_g(r, "bcode")), "h_code": _g(r, "hcode"),
         },
     }
 
@@ -318,6 +493,48 @@ def _probe_lawd_ri(cur):
     except Exception:
         _HAS_LAWD_RI = False                 # fail-open
     return _HAS_LAWD_RI
+
+
+def _load_sido_remap(cur):
+    """안 A 치환표(lawd_sido_remap·lawd_ri_remap_exception) 기동 1회 적재 → 전역 캐시.
+
+    _probe_lawd_ri 와 같은 fail-open 계약: 테이블 부재·조회 실패 시 전역을 전부 비우고 False.
+    그러면 remap_* 가 전부 항등함수가 되어 **현행 46/29 응답이 그대로 유지**된다(0건 회귀 없음).
+    **all-or-nothing**: 코드표와 예외표 중 하나만 적재된 상태를 허용하지 않는다 — 부분 치환은
+    "코드는 12 인데 리 코드는 구 체계"를 만들어 아무것도 안 한 것보다 나쁘다.
+    행수는 소수(623 + 4)라 메모리·기동시간 영향은 무시할 수준이다.
+    """
+    global _SIDO_REMAP, _RI_REMAP_EXC, _HAS_SIDO_REMAP
+    try:
+        cur.execute("SELECT to_regclass('public.lawd_sido_remap') IS NOT NULL "
+                    "AND to_regclass('public.lawd_ri_remap_exception') IS NOT NULL AS ok")
+        if not cur.fetchone()["ok"]:
+            raise LookupError("remap tables absent")
+        # char(n) 공백패딩 제거는 적재 시점에 끝낸다 — 조회 경로에서 매번 strip 하지 않기 위함.
+        cur.execute("SELECT btrim(old_emd8) o, btrim(new_emd8) n FROM lawd_sido_remap")
+        m = {r["o"]: r["n"] for r in cur.fetchall()}
+        cur.execute("SELECT btrim(old_bcode) o, btrim(new_bcode) n FROM lawd_ri_remap_exception")
+        x = {r["o"]: r["n"] for r in cur.fetchall()}
+        _SIDO_REMAP, _RI_REMAP_EXC, _HAS_SIDO_REMAP = m, x, bool(m)
+    except Exception:
+        _SIDO_REMAP, _RI_REMAP_EXC, _HAS_SIDO_REMAP = {}, {}, False   # fail-open
+    return _HAS_SIDO_REMAP
+
+
+def _load_ri_emds(cur):
+    """A-5 관측용 — 리를 실제로 보유한 읍면동 emd_cd 집합(1,411건) 기동 1회 적재.
+
+    이 집합에 있는 읍면동인데 응답의 ri 가 비어 있으면 Phase 1 백필 잔여 실패(148,818행/2.16%)
+    또는 조회 경로의 리 미확정이다. 응답은 바꾸지 않고 stderr 경고만 남긴다(관측 전용).
+    lawd_ri 부재 시 빈 집합 → 경고 자체가 비활성(fail-open).
+    """
+    global _RI_EMDS
+    try:
+        cur.execute("SELECT DISTINCT btrim(emd_cd) e FROM lawd_ri WHERE exist")
+        _RI_EMDS = frozenset(r["e"] for r in cur.fetchall())
+    except Exception:
+        _RI_EMDS = frozenset()
+    return len(_RI_EMDS)
 
 
 def parse(q):
@@ -456,6 +673,12 @@ def geocode(cur, q, limit):
         else:
             sido_hit = {code for t in region for code, names in SIDO_NM.items()
                         if any(t.startswith(n) for n in names)}
+            # §B-3 입력 역치환: '12'(전남광주통합특별시)는 DB 에 없는 코드다. 여기서 46·29 로 되돌리지
+            #   않으면 신 시도명으로 검색한 사용자가 0건을 받는다. '전남광주…'는 '전남'으로도 접두매칭돼
+            #   {12,46} 이 되므로, 확장 없이는 광주 소재 동이 전부 탈락한다(부분적 0건 = 더 나쁜 회귀).
+            for _new, _olds in SIDO_ALIAS_CODES.items():
+                if _new in sido_hit:
+                    sido_hit.discard(_new); sido_hit.update(_olds)
             if sido_hit:
                 cds = [c for c in cds if c[:2] in sido_hit]
         # 리(里) 좁힘 — 시도/시군구 좁힘 뒤, sido_cds 산출 전에 수행한다(cds 를 재정의하므로 순서 고정).
@@ -482,7 +705,11 @@ def geocode(cur, q, limit):
             # 공유 컬럼 emd_cd 가 parcel·lawd_dong 양쪽 존재 → 비수식 참조는 "ambiguous" 쿼리실패.
             # WHERE/ORDER BY 공유 컬럼을 모두 parcel. 로 수식(컬럼 수식 의무, F2).
             # char(2)/char(8) 캐스팅·ji_main/ji_sub 정확매칭·좌표식 COALESCE(geom_pt, ST_PointOnSurface) 보존(F9).
+            # T018 A-2: pnu 를 SELECT 목록에 올린다. 기존에는 pnu 가 WHERE 절에만 있었으므로
+            #   b_code 를 pnu 에서 뽑으려면 이 추가가 필수다(없으면 아래 b_code 식이 조용한 no-op).
+            #   조인 추가는 불필요 — pnu 는 parcel 자체 컬럼이다.
             sql = ("SELECT parcel.jibun AS jibun, parcel.emd_cd AS emd_cd, "
+                   "parcel.pnu AS pnu, substr(parcel.pnu,9,2) AS ri_cd, "
                    "parcel.ji_main AS ji_main, parcel.ji_sub AS ji_sub, parcel.san AS san, "
                    "ld.sido AS sido, ld.sigungu AS sigungu, ld.emd AS emd, "
                    "ST_X(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lon, "
@@ -508,13 +735,17 @@ def geocode(cur, q, limit):
                 san_b = bool(r["san"])
                 # ri 는 리 필터가 실제로 걸린 경우에만 채운다. 필터가 없으면 이 행이 그 리인지
                 # 알 수 없으므로 None 유지(현행) — 입력토큰을 확인 없이 되돌려주지 않는다.
-                st = {"sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
-                      "haeng_dong": None, "ri": (p.get("ri") if ri_cds else None), "san": san_b,
+                _ri = p.get("ri") if ri_cds else None
+                _bc = parcel_bcode(r)
+                _note_ri_unresolved(_bc, _ri, "parcel")     # A-5: 치환 전 원값으로 관측
+                st = {"sido": remap_sido_name(r["sido"]), "sigungu": r["sigungu"], "emd": r["emd"],
+                      "haeng_dong": None, "ri": _ri, "san": san_b,
                       "road_name": None, "main_no": None, "sub_no": None,
                       "bld_main_no": None, "bld_sub_no": None,
                       "ji_main": r["ji_main"], "ji_sub": r["ji_sub"],
                       "bld_name": None, "zipcode": None,
-                      "b_code": pad_bcode(r["emd_cd"]), "h_code": None}
+                      # 치환지점 3/4 — pnu/emd_cd 유래 b_code(46/29) → 12.
+                      "b_code": remap_bcode(_bc), "h_code": None}
                 it = {"name": None, "kind": "addr", "subtype": "parcel", "source": "parcel",
                       "lon": r["lon"], "lat": r["lat"]}
                 disp = display_of(it, r)               # parcel 규칙(road 부재) — 지목제거·지역복원
@@ -539,15 +770,22 @@ def geocode(cur, q, limit):
             nums = [exact, f"%{sep}{h[0]}-%"]
         reg_sql = ""; reg_args = []
         for t in region:
-            reg_sql += " AND (sigungu ILIKE %s OR sido ILIKE %s)"
-            reg_args += [f"%{t}%", f"%{t}%"]
+            # §B-3 입력 역치환: 토큰별 조건은 AND 로 이어붙으므로, 신 시도명 하나가 안 맞으면 전체가
+            #   0건이 된다. _region_cond 가 '전남광주…' → 구 표기(전라남도·광주광역시)까지 OR 로 넓힌다.
+            c, a = _region_cond(("sigungu", "sido"), t)
+            reg_sql += " AND " + c
+            reg_args += a
         cur.execute(
             "SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
             f"WHERE kind='addr' AND search_text ILIKE %s AND {num_conds}{reg_sql} "
             f"ORDER BY (search_text ILIKE %s) DESC, sigungu, emd, id LIMIT {ADDR_CAP}",
             (f"%{dong}%", *nums, *reg_args, exact))
         for r in cur.fetchall():
-            bonus = 12 * sum(1 for t in region if t in (r["sigungu"] or "") or t in (r["sido"] or ""))
+            # 가산도 같은 별칭 규칙을 써야 한다 — WHERE 는 통과했는데 가산이 0 이면 신 시도명으로
+            #   검색한 결과만 순위가 밀린다(조용한 품질 저하).
+            bonus = 12 * sum(1 for t in region
+                             if any(a in (r["sigungu"] or "") or a in (r["sido"] or "")
+                                    for a in sido_input_alias(t)))
             it = {"name": addr_str(r), "kind": "addr",
                   "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
             it["display"] = display_of(it, r)          # road/road_name 부재 → parcel 규칙(F3-a/b)
@@ -596,8 +834,10 @@ def geocode(cur, q, limit):
         conds = []; args = []
         for t in p["terms"]:
             if multi:   # search_text(이름+도로명+지번, trgm 인덱스) + 지역 토큰
-                conds.append("(search_text ILIKE %s OR bld ILIKE %s OR sido ILIKE %s OR sigungu ILIKE %s OR emd ILIKE %s)")
-                args += [f"%{t}%", f"%{t}%", f"%{t}%", f"%{t}%", f"%{t}%"]
+                # §B-3 입력 역치환. 원토큰은 _region_cond 가 항상 첫 별칭으로 남기므로 search_text/bld
+                #   매칭(상호명이 우연히 '전남광주…'로 시작하는 경우 포함)은 그대로 유지된다.
+                c, a = _region_cond(("search_text", "bld", "sido", "sigungu", "emd"), t)
+                conds.append(c); args += a
             else:       # 단일 토큰 = search_text/건물명. 3자+만 중간검색('%t%'), 2자↓는 prefix('t%')
                 # — pg_trgm GIN 은 연속 3글자(trigram)가 있어야 인덱스를 탄다. 2자 infix '%서울%' 는 trigram 0개라
                 #   1570만행 Seq Scan(2~11초). 2자↓는 인덱스 타는 prefix 로 유지(기존 동작, 회귀 없음).
@@ -675,7 +915,23 @@ def reverse(cur, lon, lat, limit):
     cur.execute(
         f"""SELECT name, level AS type, code FROM admin_boundary
             WHERE ST_Contains(geom, {pt})""", (lon, lat))
-    areas = [{"name": a["name"], "type": a["type"], "code": a["code"]} for a in cur.fetchall()]
+    # 치환지점 4/4 — areas[].code.
+    # ★ type='emd' 로 한정하는 것이 필수다. admin_boundary 는 level 별로 **다른 코드체계**를 담는다:
+    #     level='emd'      → 법정동코드 (29=광주광역시, 46=전라남도)  → 치환 대상
+    #     level='adm_dong' → 통계청 행정동코드 (**29 = 세종특별자치시**) → 치환하면 세종이 광주로 둔갑
+    #   [실측 2026-08-10, admin_boundary 전량] adm_dong 시도 2자리는 11·21~26·29·31~39 만 나온다.
+    #     그 체계에서 24=광주 · 36=전남 · 29=세종 이다(표본: 금곡동 24040740 / 산이면 36600410 /
+    #     금남면 29010340). 즉 adm_dong 에는 46 이 아예 없고 29 는 전부 세종이다.
+    #   [실측 2026-08-10] 46/29 로 시작하는 admin_boundary 행 649건의 내역:
+    #     emd·len8   421(46) + 202(29) = 623  ← 치환 대상(= lawd_sido_remap 행수)
+    #     adm_dong·len8 24(29, 세종)          ← 치환 금지
+    #     emd·len7      2(46, code='46-1 ??'·'46-2 ??' 기형행) ← 자료품질 결함, 길이가드로 배제
+    #   따라서 조건 없는 left(code,2) 판정은 **금지**다. remap_bcode 도 내부에서 길이·숫자·사전존재를
+    #   재검사하므로 이 가드는 이중 방어다(어느 한쪽만 남기지 말 것).
+    # ※ 안 A 적용 후에도 areas[] 는 두 코드체계가 섞인 배열이다 — emd 는 12, adm_dong 은 29(세종).
+    areas = [{"name": a["name"], "type": a["type"],
+              "code": remap_bcode(a["code"]) if a["type"] == "emd" else a["code"]}
+             for a in cur.fetchall()]
     return {"address": address, "nearest": nearest, "areas": areas}
 
 
@@ -737,6 +993,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _selftest():
     POOL.open()
+    _boot_check()          # 사전·치환표를 실서비스와 동일하게 적재(안 하면 selftest 만 46/29 로 보인다)
     with POOL.connection() as con, con.cursor() as cur:
         for q in sys.argv[2:] or ["화성시 만세구 3.1만세로 5-3", "강남구 테헤란로 152", "강남역"]:
             print(f"\nQ: {q}")
@@ -750,7 +1007,14 @@ def _boot_check():
         with POOL.connection() as con, con.cursor() as cur:
             missing = _check_tables(cur)
             has_ri = _probe_lawd_ri(cur)     # R-9: 필수테이블 아님 — 존재 여부만 1회 확정
+            has_remap = _load_sido_remap(cur)   # 안 A 치환표(부재 시 46/29 현행 유지)
+            n_ri_emds = _load_ri_emds(cur)      # A-5 관측용 리 보유 읍면동 집합
         print(f"geocode-api-pg: lawd_ri: {'present' if has_ri else 'absent'}", file=sys.stderr)
+        # 안 A 상태를 기동 로그에 남긴다 — 운영에서 "왜 아직 46 이 나오냐"를 즉시 판별하기 위함.
+        print(f"geocode-api-pg: sido remap(안 A): "
+              f"{'ON' if has_remap else 'OFF(46/29 유지)'} "
+              f"emd={len(_SIDO_REMAP)} ri_exc={len(_RI_REMAP_EXC)} ri_emds={n_ri_emds}",
+              file=sys.stderr)
         if missing:
             print(f"geocode-api-pg: WARNING degraded — missing tables: {', '.join(missing)}",
                   file=sys.stderr)
