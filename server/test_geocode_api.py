@@ -282,6 +282,67 @@ class TestParse(unittest.TestCase):
         p2 = M.parse("상동 514-8")
         self.assertIsNone(p2["zipcode"])
 
+    # ── task-014 리(里) 토큰 분리 (변경 ③ / 결정 C = R-6 게이팅) ──────
+    # dong 은 현행 그대로 '첫 매칭' 이고, ri 는 dong 이 이미 잡힌 뒤에만 채택된다.
+    # 이 게이팅이 없으면 '양촌리'(상호)·'투다리'(체인점) 같은 단독 리 토큰이 사전 조회를
+    # 유발해 POI 경로를 가로챈다(T-9·T-10 이 그 회귀를 잠근다).
+
+    def test_ri_token_separated_from_emd(self):
+        # T-1: 읍면(dong) 이 먼저 잡힌 뒤의 '리' 토큰은 ri 로 분리된다.
+        p = M.parse("가평군 청평면 청평리 432")
+        self.assertEqual(p["dong"], "청평면")
+        self.assertEqual(p["ri"], "청평리")
+        self.assertEqual(p["house"], (432, 0))
+
+    def test_ri_alone_keeps_current_dong(self):
+        # T-2: 리 단독 질의는 현행대로 dong 에 들어간다(무회귀 — 기준 2).
+        p = M.parse("청평리 432-11")
+        self.assertEqual(p["dong"], "청평리")
+        self.assertIsNone(p["ri"])
+        self.assertEqual(p["house"], (432, 11))
+
+    def test_ri_token_with_sido_sigungu(self):
+        # T-3: 시도·시군구 토큰이 앞에 붙어도 읍(dong) → 리(ri) 순서로 잡힌다.
+        p = M.parse("강원 춘천 신북읍 천전리 300")
+        self.assertEqual(p["dong"], "신북읍")
+        self.assertEqual(p["ri"], "천전리")
+        self.assertEqual(p["house"], (300, 0))
+
+    def test_emd_dong_query_has_no_ri(self):
+        # T-4: 도시(동) 질의는 ri 가 붙지 않는다(기준 6 회귀 방어).
+        p = M.parse("서울 동대문구 이문동 100")
+        self.assertEqual(p["dong"], "이문동")
+        self.assertIsNone(p["ri"])
+
+    def test_road_path_unaffected_by_ri(self):
+        # T-5: 도로명 경로는 리 변경의 영향을 받지 않는다.
+        p = M.parse("테헤란로 152")
+        self.assertEqual(p["road"], "테헤란로")
+        self.assertIsNone(p["ri"])
+        self.assertIsNone(p["dong"])
+
+    def test_parse_keys_are_additive(self):
+        # T-6: 기존 7키 보존 + 'ri' 가산(계약 additive).
+        p = M.parse("가평군 청평면 청평리 432")
+        for k in ("road", "house", "terms", "dong", "san", "bld_dong", "zipcode"):
+            self.assertIn(k, p, f"기존 키 {k} 소실")
+        self.assertIn("ri", p)
+
+    def test_ri_name_colliding_with_biz_not_hijacked(self):
+        # T-9(R-6 오탐 회귀): 상호와 겹치는 리 이름 단독 질의는 ri 를 만들지 않는다
+        #                    → 사전 조회 자체가 일어나지 않는다.
+        for q in ("양촌리", "용산리", "금곡리"):
+            p = M.parse(q)
+            self.assertIsNone(p["ri"], f"{q}: ri 오탐")
+            self.assertIsNone(p["house"], f"{q}: house 오탐")
+
+    def test_poi_query_unchanged(self):
+        # T-10(R-6 오탐 회귀): '투다리'(체인점)도 ri 미생성 — 실서버 baseline
+        #                     8건·source=osm 유지의 코드측 전제.
+        p = M.parse("투다리")
+        self.assertIsNone(p["ri"])
+        self.assertIsNone(p["house"])
+
 
 # ════════════════════════════════════════════════════════════════
 # 단계2 — display_of / addr_obj / category_of / nonaddr_structure
@@ -422,6 +483,32 @@ class TestAddrObj(unittest.TestCase):
         self.assertEqual(st["zipcode"], "04524")
         self.assertEqual(st["bld_name"], "서울시청")
 
+    # ── task-014 리(里) 통과 (변경 ② / 결정 A = R-1) ────────────────
+    def ri_row(self):
+        # 리가 있는 농촌 주소 행(address.ri 는 10-base.sql 에 이미 존재하는 컬럼).
+        r = self.row()
+        r.update({"sido": "경기도", "sigungu": "가평군", "emd": "청평면",
+                  "ri": "청평리", "bcode": "4182032500", "jibun": "청평면 청평리 432-11"})
+        return r
+
+    def test_ri_passthrough_from_address_row(self):
+        # T-7: address.ri 값이 structure.ri 로 그대로 통과한다(하드코딩 None 제거).
+        st = M.addr_obj(self.ri_row())["structure"]
+        self.assertEqual(st["ri"], "청평리")
+
+    def test_b_code_unchanged_when_ri_present(self):
+        # T-8(R-1 회귀 잠금): 리가 채워져도 b_code 의미는 불변 — 끝 2자리는 '00'.
+        st = M.addr_obj(self.ri_row())["structure"]
+        self.assertEqual(st["b_code"], "4182032500")
+        self.assertTrue(st["b_code"].endswith("00"))
+
+    def test_ri_missing_column_is_none(self):
+        # T-11: 'ri' 키가 없는 구스키마 row 도 예외 없이 None(_g fail-safe).
+        r = self.row()
+        self.assertNotIn("ri", r)
+        st = M.addr_obj(r)["structure"]
+        self.assertIsNone(st["ri"])
+
 
 class TestLegacyAddrStrings(unittest.TestCase):
     """addr_str/road_str/parcel_str — 지역토큰 결측 시 'None' 누출 금지.
@@ -530,6 +617,33 @@ class TestAreaPip(unittest.TestCase):
         cur = FakeCursor(fetchall_result=[])  # admin_boundary 0행
         out = M.area_pip(cur, 127.0, 37.5)
         self.assertEqual(out, {})
+
+    # ── task-014 emd 레벨 backfill (변경 ④) ────────────────────────
+    def test_area_pip_returns_emd(self):
+        # T-12: emd 레벨 경계가 적재돼 있으면 out["emd"] 가 채워진다
+        #       (nonaddr_structure 가 이미 pip.get("emd") 를 읽으므로 POI structure 가 살아난다).
+        cur = FakeCursor(fetchall_result=[
+            {"level": "sido", "name": "경기도"},
+            {"level": "sigungu", "name": "가평군"},
+            {"level": "emd", "name": "청평면"},
+        ])
+        out = M.area_pip(cur, 127.419845, 37.737815)
+        self.assertEqual(out.get("emd"), "청평면")
+        self.assertEqual(out.get("sido"), "경기도")
+        self.assertEqual(out.get("sigungu"), "가평군")
+        # 질의에 emd 레벨이 포함돼야 admin_boundary 가 emd 행을 돌려줄 수 있다.
+        sql = cur.executed[0][0]
+        self.assertIn("emd", sql)
+
+    def test_area_pip_without_emd_level_unchanged(self):
+        # T-12(후단): emd 경계 미적재 시 기존 동작 불변(fail-open — emd 키 자체가 없음).
+        cur = FakeCursor(fetchall_result=[
+            {"level": "sido", "name": "서울특별시"},
+            {"level": "sigungu", "name": "강남구"},
+        ])
+        out = M.area_pip(cur, 127.0, 37.5)
+        self.assertEqual(out, {"sido": "서울특별시", "sigungu": "강남구"})
+        self.assertIsNone(out.get("emd"))
 
 
 # ════════════════════════════════════════════════════════════════

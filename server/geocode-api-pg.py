@@ -65,6 +65,10 @@ SIDO_FULL_BY_ABBR = {abbr: full for full, abbr in SIDO_ABBR.items() if full in S
 
 CONTRACT_VERSION = "geocode/2"            # 응답 분해 계약 버전(봉투 신호)
 REQUIRED_TABLES = ["address", "parcel", "lawd_dong", "lawd_sigungu", "admin_boundary"]
+# 리(里) 사전 lawd_ri 존재 여부 — 기동 시 1회 확정하는 모듈 전역(R-9 fail-open).
+# REQUIRED_TABLES 에 넣지 않는다: 사전 미구축 상태에서도 /health 는 정상이어야 하고
+# 리 필터만 조용히 비활성(현행 동작 유지)되어야 한다. Phase 1a 를 무해하게 만드는 장치.
+_HAS_LAWD_RI = False
 KIND_LABEL = {"station": "지하철역", "road": "도로", "place": "장소", "dong": "행정동", "poi": ""}
 KNOWN_NONADDR = {"poi", "biz", "facility", "place", "dong", "road", "station"}
 
@@ -113,7 +117,9 @@ def addr_obj(r):
         "structure": {
             "sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
             "haeng_dong": _g(r, "haeng_dong"),
-            "ri": None,                               # address 무컬럼(best-effort 보류) → null 고정
+            # B-1 반증: address.ri 는 실재하는 컬럼(10-base.sql). 미적재 DB 에서는 _g 가 None 을
+            # 돌려주므로 현행과 동일. b_code 는 여기서 손대지 않는다(결정 A/R-1 — 끝 2자리 '00' 불변).
+            "ri": _g(r, "ri"),
             "san": None,                              # F4: address 에 san 컬럼 없음 → null
             "road_name": _g(r, "road"),
             "main_no": _g(r, "main_no"), "sub_no": _g(r, "sub_no"),   # 동결
@@ -269,11 +275,14 @@ def area_pip(cur, lon, lat):
     cur.execute(
         "SELECT level, name FROM admin_boundary "
         "WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s,%s),4326)) "
-        "AND level IN ('sido','sigungu')", (lon, lat))
+        "AND level IN ('sido','sigungu','emd')", (lon, lat))
     out = {}
     for a in cur.fetchall():
         if a["level"] == "sido": out["sido"] = a["name"]
         elif a["level"] == "sigungu": out["sigungu"] = a["name"]
+        # emd 레벨: nonaddr_structure() 가 이미 pip.get("emd") 를 읽는다(POI structure backfill).
+        # admin_boundary 에 emd 경계가 없으면 행이 안 나와 현행과 동일(fail-open).
+        elif a["level"] == "emd": out["emd"] = a["name"]
     return out
 
 
@@ -285,9 +294,24 @@ def _check_tables(cur):
     return [r["t"] for r in cur.fetchall()]
 
 
+def _probe_lawd_ri(cur):
+    """lawd_ri 존재 여부 1회 평가 → 전역 캐시(_HAS_LAWD_RI).
+
+    REQUIRED_TABLES 에 넣지 않는다 — 사전 미구축 시 부팅 실패/degraded 를 막기 위함(R-9).
+    점검 자체가 실패해도 False 로 떨어져 리 필터가 비활성될 뿐 현행 동작을 해치지 않는다.
+    """
+    global _HAS_LAWD_RI
+    try:
+        cur.execute("SELECT to_regclass('public.lawd_ri') IS NOT NULL AS ok")
+        _HAS_LAWD_RI = bool(cur.fetchone()["ok"])
+    except Exception:
+        _HAS_LAWD_RI = False                 # fail-open
+    return _HAS_LAWD_RI
+
+
 def parse(q):
     q = re.sub(r"(?<=\d)\.(?=\d)", "", norm(q))
-    house = road = dong = bld_dong = zipcode = None; san = False; terms = []
+    house = road = dong = ri = bld_dong = zipcode = None; san = False; terms = []
     for t in re.split(r"[\s,]+", q):
         if not t: continue
         if t == "산": san = True; continue                  # 단독 '산'(임야) 표기
@@ -323,11 +347,16 @@ def parse(q):
         # ※ 읍/면 누락 시 농촌(읍·면) 지번질의 전면 0건이 되므로 반드시 포함. 숫자+동(아파트)은 위에서 이미 분리됨.
         if dong is None and len(ct) >= 2 and (re.search(r"(동|리|읍|면)$", ct) or re.search(r"\d가$", ct)):
             dong = ct
+        # 리(里) 토큰은 dong(읍·면·동)이 이미 잡힌 뒤에만 채택한다(R-6 게이팅).
+        # 이 게이팅이 없으면 '양촌리'·'투다리' 같은 상호 단독 질의가 리 사전 조회를 유발해
+        # POI 경로를 가로챈다(실측 상호 충돌 20,078건). dong 의 의미·우선순위는 불변.
+        elif ri is None and dong is not None and ct != dong and len(ct) >= 2 and ct.endswith("리"):
+            ri = ct
         terms.append(ct)
     # 5자리 숫자가 도로/법정동과 함께면 우편번호가 아니라 번지(예 '○○로 10524') → house 로 승격.
     if zipcode is not None and house is None and (road or dong):
         house = (int(zipcode), 0); zipcode = None
-    return {"road": road, "house": house, "terms": terms, "dong": dong, "san": san,
+    return {"road": road, "house": house, "terms": terms, "dong": dong, "ri": ri, "san": san,
             "bld_dong": bld_dong, "zipcode": zipcode}
 
 
@@ -394,7 +423,9 @@ def geocode(cur, q, limit):
         cds = [r["emd_cd"] for r in cur.fetchall()]
         # 동명중복 좁힘: 지역토큰(시/도)이 특정 시도를 가리키면 그 시도로 한정(엉뚱한 타시도 결과 혼입 방지).
         # 시군구 단위 좁힘은 시군구명 사전 부재로 미적용(후속) — 시도 한정만으로 광역시·도접두 질의 대부분 해소.
-        region = [t for t in p["terms"] if t != p["dong"]]
+        # 리 토큰은 지역토큰(시/도·시군구)이 아니다 → 제외하지 않으면 '청평리'가 sigungu_nm LIKE 에
+        # 걸려 엉뚱한 시군구로 좁혀지거나 SIDO_NM 접두매칭 노이즈가 된다.
+        region = [t for t in p["terms"] if t != p["dong"] and t != p.get("ri")]
         # 동명중복 좁힘 — 시군구(가장 specific) 우선, 없으면 시도. 지정 지역에 해당 동이 없으면 0건(타지역 동명 혼입 차단).
         # 시군구: lawd_sigungu(내비DB 추출 254개, '수원시 영통구' 형식). 지역토큰이 시군구명 단어와 일치하면 그 시군구(emd_cd 앞5)로 한정.
         sgg_hit = set()
@@ -412,6 +443,20 @@ def geocode(cur, q, limit):
                         if any(t.startswith(n) for n in names)}
             if sido_hit:
                 cds = [c for c in cds if c[:2] in sido_hit]
+        # 리(里) 좁힘 — 시도/시군구 좁힘 뒤, sido_cds 산출 전에 수행한다(cds 를 재정의하므로 순서 고정).
+        # R-6 게이팅: p["ri"] 는 dong 이 먼저 잡힌 질의에서만 채워진다(parse()).
+        # R-9 fail-open: 사전 미구축(_HAS_LAWD_RI=False) 또는 사전에 없는 리명이면 아무것도 하지 않고
+        #                현행 동작(리 무시)을 그대로 유지한다 — 0건 회귀를 만들지 않는다.
+        ri_emds = ri_cds = None
+        if p.get("ri") and cds and _HAS_LAWD_RI:
+            cur.execute(
+                "SELECT emd_cd, ri_cd FROM lawd_ri "
+                "WHERE ri = %s AND emd_cd = ANY(%s::char(8)[])", (p["ri"], cds))
+            pairs = [(r["emd_cd"], r["ri_cd"]) for r in cur.fetchall()]
+            if pairs:
+                ri_emds = [a for a, _ in pairs]
+                ri_cds = [b for _, b in pairs]
+                cds = sorted(set(ri_emds))
         if cds:
             sido_cds = list({c[:2] for c in cds})
             # ※ char 캐스팅 필수: char(2)/char(8) 컬럼에 text 배열을 그냥 ANY 하면 파티션 pruning·
@@ -431,14 +476,25 @@ def geocode(cur, q, limit):
                    "WHERE parcel.sido_cd = ANY(%s::char(2)[]) AND parcel.emd_cd = ANY(%s::char(8)[]) "
                    "AND parcel.ji_main = %s AND parcel.ji_sub = %s")
             args = [sido_cds, cds, h[0], h[1]]
+            if ri_cds:
+                # R-5: parcel.pnu 는 NOT NULL 이 아니다 → NULL 안전(모르는 필지를 탈락시키지 않는다).
+                #      (emd_cd, ri_cd) 를 페어로 묶어 교차조합 오매칭을 차단한다
+                #      (emd_cd IN (...) AND ri_cd IN (...) 는 A동+B리 조합을 통과시킨다).
+                # pnu 19자리 = 법정동코드10 + 대지구분1 + 본번4 + 부번4 이므로 9~10번째 2자리가 리코드.
+                sql += (" AND (parcel.pnu IS NULL OR "
+                        "(parcel.emd_cd, substr(parcel.pnu,9,2)::char(2)) IN "
+                        "(SELECT e, r FROM unnest(%s::char(8)[], %s::char(2)[]) AS t(e, r)))")
+                args += [ri_emds, ri_cds]
             if p["san"]:
                 sql += " AND parcel.san = 1"
             sql += f" ORDER BY parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}"
             cur.execute(sql, args)
             for r in cur.fetchall():
                 san_b = bool(r["san"])
+                # ri 는 리 필터가 실제로 걸린 경우에만 채운다. 필터가 없으면 이 행이 그 리인지
+                # 알 수 없으므로 None 유지(현행) — 입력토큰을 확인 없이 되돌려주지 않는다.
                 st = {"sido": r["sido"], "sigungu": r["sigungu"], "emd": r["emd"],
-                      "haeng_dong": None, "ri": None, "san": san_b,
+                      "haeng_dong": None, "ri": (p.get("ri") if ri_cds else None), "san": san_b,
                       "road_name": None, "main_no": None, "sub_no": None,
                       "bld_main_no": None, "bld_sub_no": None,
                       "ji_main": r["ji_main"], "ji_sub": r["ji_sub"],
@@ -676,6 +732,8 @@ def _boot_check():
     try:
         with POOL.connection() as con, con.cursor() as cur:
             missing = _check_tables(cur)
+            has_ri = _probe_lawd_ri(cur)     # R-9: 필수테이블 아님 — 존재 여부만 1회 확정
+        print(f"geocode-api-pg: lawd_ri: {'present' if has_ri else 'absent'}", file=sys.stderr)
         if missing:
             print(f"geocode-api-pg: WARNING degraded — missing tables: {', '.join(missing)}",
                   file=sys.stderr)
