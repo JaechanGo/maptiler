@@ -516,6 +516,8 @@ class TestLegacyAddrStrings(unittest.TestCase):
     address 적재(load_geocode.py)가 CSV 경유라 빈 시군구가 NULL 로 들어간다(세종 전역
     55,846건). f-string 직결이던 세 함수는 그 NULL 을 'None' 문자열로 박았다
     ('세종특별자치시 None 한누리대로 2130'). display_of 와 동일하게 _s 가드로 토큰을 생략한다.
+
+    road_str 만 계약이 다르다 — 도로명주소 표기 규정상 읍·면은 본문에 넣고 동(洞)은 뺀다(de15349).
     """
     def sejong(self):
         return {"sido": "세종특별자치시", "sigungu": None, "emd": "조치원읍",
@@ -527,6 +529,12 @@ class TestLegacyAddrStrings(unittest.TestCase):
                 "road": "가양길", "main_no": 2, "sub_no": 0, "bld": None,
                 "postal": "28198", "jibun": "미원면 가양리 332"}
 
+    def dong(self):
+        # 동(洞) 지역 — 도로명주소 본문에는 법정동을 넣지 않는다(읍·면과 계약이 다름).
+        return {"sido": "서울특별시", "sigungu": "강남구", "emd": "역삼동",
+                "road": "강남대로", "main_no": 396, "sub_no": 0, "bld": None,
+                "postal": "06236", "jibun": "역삼동 858"}
+
     def test_sejong_no_none_token(self):
         r = self.sejong()
         for fn in (M.addr_str, M.road_str, M.parcel_str):
@@ -535,23 +543,30 @@ class TestLegacyAddrStrings(unittest.TestCase):
     def test_sejong_single_space(self):
         r = self.sejong()                                  # 시군구 자리는 생략(공백 2개도 금지)
         self.assertEqual(M.addr_str(r), "세종특별자치시 조치원읍 충현1길 60")
-        self.assertEqual(M.road_str(r), "세종특별자치시 충현1길 60")
+        self.assertEqual(M.road_str(r), "세종특별자치시 조치원읍 충현1길 60")
         self.assertEqual(M.parcel_str(r), "세종특별자치시 조치원읍 죽림리 245-5")
 
     def test_region_present_unchanged(self):
-        r = self.normal()                                  # 회귀 방지 — 시군구 있는 표기 불변
+        r = self.normal()                                  # 회귀 방지 — 시군구 있는 표기(읍·면은 road 에도 포함)
         self.assertEqual(M.addr_str(r), "충청북도 청주시 상당구 미원면 가양길 2")
-        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 2")
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 미원면 가양길 2")
         self.assertEqual(M.parcel_str(r), "충청북도 청주시 상당구 미원면 가양리 332")
 
     def test_sub_no_and_bld_rules_kept(self):
         r = self.normal(); r["sub_no"] = 3; r["bld"] = "청주빌딩"
         self.assertEqual(M.addr_str(r), "충청북도 청주시 상당구 미원면 가양길 2-3 (청주빌딩)")
-        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 2-3 (청주빌딩)")
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 미원면 가양길 2-3 (청주빌딩)")
 
     def test_main_no_zero_is_kept(self):
         r = self.normal(); r["main_no"] = 0                # 0 은 유효값 — 생략되면 안 됨
-        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 가양길 0")
+        self.assertEqual(M.road_str(r), "충청북도 청주시 상당구 미원면 가양길 0")
+
+    def test_dong_excluded_from_road_only(self):
+        # de15349 회귀 잠금 — road_str 은 동을 빼고 addr_str 은 그대로 넣는다(두 함수 계약 분리).
+        # emd 를 무조건 포함하도록 되돌리면 이 테스트만이 그것을 잡는다(픽스처가 전부 읍·면이라서).
+        r = self.dong()
+        self.assertEqual(M.road_str(r), "서울특별시 강남구 강남대로 396")
+        self.assertEqual(M.addr_str(r), "서울특별시 강남구 역삼동 강남대로 396")
 
     def test_parcel_falls_back_to_emd(self):
         r = self.sejong(); r["jibun"] = None               # jibun 부재 → emd 폴백(기존 계약)
