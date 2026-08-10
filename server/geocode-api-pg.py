@@ -413,9 +413,12 @@ def display_of(item, r=None):
             jb = ("산 " if san else "") + f"{jm}" + (f"-{js}" if js else "")
         else:
             jb = clean_jibun(r.get("jibun")) or None
-        main = " ".join(x for x in (emd, jb) if x) or name
+        # 리(里)는 읍·면과 번지 사이에 들어간다('월곶면 성동리 263-8'). 리를 빼면 같은 읍·면 안의
+        # 다른 리와 구분되지 않아 표시만으로는 검증이 불가능하다. r 에 ri 가 없으면 종전과 동일.
+        ri_s = _s(r.get("ri"))
+        main = " ".join(x for x in (emd, ri_s, jb) if x) or name
         secondary = _region(r, official=False, with_emd=False)
-        full = " ".join(x for x in (_region(r, official=True, with_emd=False), emd, jb) if x) or name
+        full = " ".join(x for x in (_region(r, official=True, with_emd=False), emd, ri_s, jb) if x) or name
         return {"main": main, "secondary": secondary, "full": full}
 
     if kind in KNOWN_NONADDR:                         # 비-addr(라벨/카테고리 + PIP 지역)
@@ -537,10 +540,26 @@ def _load_ri_emds(cur):
     return len(_RI_EMDS)
 
 
+def _acc_road(cur, seg):
+    """도로명 조각 누적 — D3-R3 멱등. 이미 누적된 조각이 다시 오면 재누적하지 않는다.
+
+    원본 대장에 도로명이 통짜로 두 번 들어간 행이 실재한다('… 방내시장길 32 방내시장길 32').
+    단순 연결이면 road_norm 이 '방내시장길방내시장길' 이 돼 0건 → 지번경로로 조용히 강등되고
+    15km 떨어진 읍·면 번지를 자신만만하게 반환했다(NO1·43·81·249).
+    """
+    if not seg: return cur
+    if cur and seg in cur: return cur                        # 이미 들어있는 조각 → 스킵
+    return (cur or "") + seg
+
+
 def parse(q):
     q = re.sub(r"(?<=\d)\.(?=\d)", "", norm(q))
+    # D3-R1 입력 정규화 ①: 괄호는 구분자다. '149(맥금동)' 이 한 토큰으로 남으면 아래 ct 정규화가
+    # '149맥금동' 을 통째로 dong 에 넣어 번지가 증발한다(NO117/118 683m 이탈).
+    q = re.sub(r"[()\[\]{}]", " ", q)
     house = road = dong = ri = bld_dong = zipcode = None; san = False; terms = []
     for t in re.split(r"[\s,]+", q):
+        t = t.strip(".·;:'\"")                              # D3-R1 ②: 토큰 양끝 문장부호(꼬리 '.' 등)
         if not t: continue
         if t == "산": san = True; continue                  # 단독 '산'(임야) 표기
         if zipcode is None and re.fullmatch(r"\d{5}", t):    # 5자리 = 신우편번호 후보(번지보다 우선; 도로/동 동반 시 아래서 번지로 승격)
@@ -556,14 +575,23 @@ def parse(q):
         # fullmatch+greedy 라 '로/길로 끝나는 부분 + 순수 끝번지'가 토큰 전체를 덮을 때만 매칭(단지명 오인 차단).
         mr = re.fullmatch(r"(.+(?:로|길))(\d+)(?:-(\d+))?", t)
         if mr:
-            road = (road or "") + rnorm(mr.group(1))
+            road = _acc_road(road, rnorm(mr.group(1)))
             a, b = int(mr.group(2)), int(mr.group(3) or 0)
             if house is None and a <= 99999 and b <= 99999:
                 house = (a, b)
             continue
         # 복합 도로명(상위 '○○대로/로' + 하위 'N길/N나길/N번길')을 띄어 입력하면 두 토큰으로 쪼개진다.
         # 덮어쓰면 마지막 '7나길'만 남아 0건 → 누적 연결로 '과천대로7나길'(정식 road_norm) 복원.
-        if re.search(r"(로|길)$", t): road = (road or "") + rnorm(t); continue
+        if re.search(r"(로|길)$", t): road = _acc_road(road, rnorm(t)); continue
+        # 법정동/리/읍/면/'N가' 접미부와 번지가 공백없이 붙은 토큰('성동리263-8'·'청운동1'·'종로1가15')을
+        # 접미부 + 번지로 분해한다. 위 도로(로/길) 규칙보다 반드시 뒤여야 '검단리1길'이 도로로 먼저 소비된다.
+        # 접미 앞에 한글 1자 이상을 요구해 '101동5'(건물 동) 같은 토큰은 매칭되지 않게 한다.
+        mj = re.fullmatch(r"((?:\d*[가-힣][^\s]*?)(?:동|리|읍|면|가))(산)?(\d+)(?:-(\d+))?", t)
+        if mj:
+            if mj.group(2): san = True
+            a, b = int(mj.group(3)), int(mj.group(4) or 0)
+            if house is None and a <= 99999 and b <= 99999: house = (a, b)
+            t = mj.group(1)          # 접미부만 남겨 아래 dong/ri 판정으로 흘려보낸다
         ct = re.sub(r"[^\w가-힣]", "", t)
         if not ct: continue
         # 아파트 동번호('2105동'·'101동' = 숫자+동)는 법정동이 아니라 건물 동(棟) → bld 검색축(address.bld) 단서.
@@ -584,6 +612,11 @@ def parse(q):
     # 5자리 숫자가 도로/법정동과 함께면 우편번호가 아니라 번지(예 '○○로 10524') → house 로 승격.
     if zipcode is not None and house is None and (road or dong):
         house = (int(zipcode), 0); zipcode = None
+    # 원본 대장에 도로명이 통짜로 반복된 행이 있다('… 방내시장길 32 방내시장길 32').
+    # _acc_road 가 대부분 걸러내지만 표기가 미세하게 달라 통과한 잔여분을 정수배 반복이면 1회로 접는다.
+    if road:
+        mm = re.fullmatch(r"(.+?)\1+", road)
+        if mm: road = mm.group(1)
     return {"road": road, "house": house, "terms": terms, "dong": dong, "ri": ri, "san": san,
             "bld_dong": bld_dong, "zipcode": zipcode}
 
@@ -708,14 +741,20 @@ def geocode(cur, q, limit):
             # T018 A-2: pnu 를 SELECT 목록에 올린다. 기존에는 pnu 가 WHERE 절에만 있었으므로
             #   b_code 를 pnu 에서 뽑으려면 이 추가가 필수다(없으면 아래 b_code 식이 조용한 no-op).
             #   조인 추가는 불필요 — pnu 는 parcel 자체 컬럼이다.
+            # 리(里)명은 질의 토큰이 아니라 결과 행의 pnu 에서 얻는다. 질의에 리가 없어도
+            # 그 필지가 리에 속하면 표시에 리가 나와야 하기 때문(입력 에코가 아닌 DB 사실).
+            # R-9 fail-open 유지: 사전 미구축이면 조인 자체를 붙이지 않고 종전 동작 그대로 간다.
+            ri_sel = "lr.ri AS ri_nm, " if _HAS_LAWD_RI else ""
+            ri_join = (" LEFT JOIN lawd_ri lr ON lr.emd_cd = parcel.emd_cd "
+                       "AND lr.ri_cd = substr(parcel.pnu,9,2)::char(2)") if _HAS_LAWD_RI else ""
             sql = ("SELECT parcel.jibun AS jibun, parcel.emd_cd AS emd_cd, "
-                   "parcel.pnu AS pnu, substr(parcel.pnu,9,2) AS ri_cd, "
+                   "parcel.pnu AS pnu, substr(parcel.pnu,9,2) AS ri_cd, " + ri_sel +
                    "parcel.ji_main AS ji_main, parcel.ji_sub AS ji_sub, parcel.san AS san, "
                    "ld.sido AS sido, ld.sigungu AS sigungu, ld.emd AS emd, "
                    "ST_X(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lon, "
                    "ST_Y(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lat "
-                   "FROM parcel JOIN lawd_dong ld ON ld.emd_cd = parcel.emd_cd "
-                   "WHERE parcel.sido_cd = ANY(%s::char(2)[]) AND parcel.emd_cd = ANY(%s::char(8)[]) "
+                   "FROM parcel JOIN lawd_dong ld ON ld.emd_cd = parcel.emd_cd" + ri_join +
+                   " WHERE parcel.sido_cd = ANY(%s::char(2)[]) AND parcel.emd_cd = ANY(%s::char(8)[]) "
                    "AND parcel.ji_main = %s AND parcel.ji_sub = %s")
             args = [sido_cds, cds, h[0], h[1]]
             if ri_cds:
@@ -729,13 +768,16 @@ def geocode(cur, q, limit):
                 args += [ri_emds, ri_cds]
             if p["san"]:
                 sql += " AND parcel.san = 1"
-            sql += f" ORDER BY parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}"
+            # 질의에 '산'이 없으면 일반 필지를 먼저 준다. 같은 번지에 산(임야)과 일반이 공존하면
+            # 임의 순서로는 임야가 먼저 잡혀 수 km 떨어진 산자락을 반환한다(NO161·162·283·288).
+            order = "parcel.san, " if not p["san"] else ""
+            sql += f" ORDER BY {order}parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}"
             cur.execute(sql, args)
             for r in cur.fetchall():
                 san_b = bool(r["san"])
-                # ri 는 리 필터가 실제로 걸린 경우에만 채운다. 필터가 없으면 이 행이 그 리인지
-                # 알 수 없으므로 None 유지(현행) — 입력토큰을 확인 없이 되돌려주지 않는다.
-                _ri = p.get("ri") if ri_cds else None
+                # 1순위: 이 행의 pnu 리코드로 조회한 사전값(DB 사실). 2순위: 리 필터가 실제로
+                # 걸린 경우의 질의 토큰. 둘 다 없으면 None — 입력토큰을 확인 없이 되돌려주지 않는다.
+                _ri = r.get("ri_nm") or (p.get("ri") if ri_cds else None)
                 _bc = parcel_bcode(r)
                 _note_ri_unresolved(_bc, _ri, "parcel")     # A-5: 치환 전 원값으로 관측
                 st = {"sido": remap_sido_name(r["sido"]), "sigungu": r["sigungu"], "emd": r["emd"],
@@ -748,7 +790,8 @@ def geocode(cur, q, limit):
                       "b_code": remap_bcode(_bc), "h_code": None}
                 it = {"name": None, "kind": "addr", "subtype": "parcel", "source": "parcel",
                       "lon": r["lon"], "lat": r["lat"]}
-                disp = display_of(it, r)               # parcel 규칙(road 부재) — 지목제거·지역복원
+                # ri 를 실어 보낸다 — display_of 는 r 에서 리를 읽어 읍·면과 번지 사이에 넣는다.
+                disp = display_of(it, {**r, "ri": _ri})   # parcel 규칙(road 부재) — 지목제거·지역복원
                 it["name"] = disp["full"]              # name=display.full(정식, 하위호환 alias)
                 it["display"] = disp
                 it["address"] = {"road": None, "parcel": disp["full"], "zipcode": None,

@@ -343,6 +343,136 @@ class TestParse(unittest.TestCase):
         self.assertIsNone(p["ri"])
         self.assertIsNone(p["house"])
 
+    # ── task-020 무공백 접미+번지 분해(P2) / 괄호·중복 정규화(P1·P3) ──
+    # 번지 regex 가 '순수 숫자 토큰'만 보던 탓에 '성동리263-8' 처럼 접미(동·리·읍·면·가)와
+    # 번지가 붙으면 house 가 비고, geocode() 의 두 지번 경로(649·762)가 동시에 skip 돼
+    # POI 경로로 낙하했다 — 매칭 POI 가 없으면 무결과(14건), 있으면 자신만만한 오답.
+
+    def test_ri_jibun_no_space(self):
+        # T1: 리(里)+번지 무공백 — 무결과 14건의 원형.
+        p = M.parse("경기도 김포시 월곶면 성동리263-8")
+        self.assertEqual(p["house"], (263, 8))
+        self.assertEqual(p["dong"], "월곶면")
+        self.assertEqual(p["ri"], "성동리")
+
+    def test_ri_jibun_no_space_main_only(self):
+        # T2: 부번 없는 무공백 리+본번.
+        p = M.parse("충청남도 논산시 은진면 연서리450")
+        self.assertEqual(p["house"], (450, 0))
+        self.assertEqual(p["dong"], "은진면")
+        self.assertEqual(p["ri"], "연서리")
+
+    def test_dong_jibun_no_space(self):
+        # T3: 동(洞)+번지 무공백 — 낙하 후 POI 오답('청운동1' → 카페 청운동 108-5)의 원인.
+        p = M.parse("서울특별시 종로구 청운동1")
+        self.assertEqual(p["house"], (1, 0))
+        self.assertEqual(p["dong"], "청운동")
+
+    def test_ga_jibun_no_space(self):
+        # T4: 'N가'(종로1가) 접미 — 접미 앞 숫자가 있어도 분해된다.
+        p = M.parse("서울특별시 종로구 종로1가15")
+        self.assertEqual(p["house"], (15, 0))
+        self.assertEqual(p["dong"], "종로1가")
+
+    def test_road_whole_duplicate_collapsed(self):
+        # T5: 원본 엑셀에 도로명이 통짜로 두 번 들어간 행(NO1 15,250m 이탈).
+        #     누적 road 가 '방내시장길방내시장길' 이 되어 0건 → 지번경로로 조용히 강등됐다.
+        p = M.parse("강원특별자치도 홍천군 내면 방내시장길 32 방내시장길 32")
+        self.assertEqual(p["road"], "방내시장길")
+        self.assertEqual(p["house"], (32, 0))
+
+    def test_paren_dong_split(self):
+        # T6: 괄호 결합 '149(맥금동)' — ct 정규화가 '149맥금동' 을 통째로 dong 에 넣어
+        #     house 가 비고 도로명만으로 엉뚱한 번지(장터고개길 9)를 잡았다(683m).
+        p = M.parse("경기도 파주시 장터고개길 149(맥금동)")
+        self.assertEqual(p["house"], (149, 0))
+        self.assertEqual(p["dong"], "맥금동")
+        self.assertEqual(p["road"], "장터고개길")
+
+    def test_san_token_preserved(self):
+        # T7: 산(山) 명시 질의는 P2/P4 도입 후에도 그대로 산 필지를 가리킨다.
+        p = M.parse("경남 창원시 의창구 북면 감계리 산163")
+        self.assertIs(p["san"], True)
+        self.assertEqual(p["house"], (163, 0))
+        self.assertEqual(p["dong"], "북면")
+        self.assertEqual(p["ri"], "감계리")
+
+
+class TestParseNoRegression(unittest.TestCase):
+    """task-020 P1~P3 오탐 가드 — 무공백 분해가 기존 파스를 건드리지 않음을 잠근다.
+
+    P2 의 접미 regex 는 접미 앞에 한글 1자 이상을 요구한다(`101동5` 같은 건물동+숫자 보호).
+    삽입 위치도 계약이다 — 로/길 규칙 **뒤**여야 `검단리1길` 이 도로로 먼저 소비된다.
+    """
+
+    def test_g1_spaced_dong_jibun_unchanged(self):
+        # G1: 공백 정상형은 무변화(P2 는 무공백 토큰에만 발화).
+        p = M.parse("서울특별시 종로구 청운동 1")
+        self.assertEqual(p["dong"], "청운동")
+        self.assertEqual(p["house"], (1, 0))
+        self.assertIsNone(p["ri"])
+
+    def test_g2_ri_shaped_road_not_hijacked(self):
+        # G2: '검단리1길' 은 리가 아니라 도로다. P2 가 로/길 규칙보다 앞서면 '검단리'+1 로 쪼개진다.
+        p = M.parse("화성시 향남읍 검단리1길 5")
+        self.assertEqual(p["road"], "검단리1길")
+        self.assertEqual(p["dong"], "향남읍")
+        self.assertIsNone(p["ri"])
+        self.assertEqual(p["house"], (5, 0))
+
+    def test_g3_bld_dong_preserved(self):
+        # G3: 아파트 동번호는 bld_dong 유지 + house 오생성 금지.
+        p = M.parse("타워팰리스 101동")
+        self.assertEqual(p["bld_dong"], "101동")
+        self.assertIsNone(p["house"])
+        p2 = M.parse("우동 1435 아이파크 2105동")
+        self.assertEqual(p2["bld_dong"], "2105동")
+        self.assertEqual(p2["house"], (1435, 0))
+
+    def test_g4_bld_dong_with_number_not_jibun(self):
+        # G4: '101동5'(건물동+호수)는 번지가 아니다 — 접미 앞 한글 요구 가드가 잡는다.
+        p = M.parse("도곡동 101동5")
+        self.assertEqual(p["dong"], "도곡동")
+        self.assertIsNone(p["house"])
+
+    def test_g5_compound_road_spaced(self):
+        # G5: 복합 도로명 누적(과천대로7나길 계열) 무회귀.
+        p = M.parse("판교로 227번길 8")
+        self.assertEqual(p["road"], "판교로227번길")
+        self.assertEqual(p["house"], (8, 0))
+
+    def test_g6_bare_ri_name_still_poi(self):
+        # G6: 상호와 겹치는 단독 리명은 여전히 번지를 만들지 않는다(R-6 게이팅 불변).
+        for q in ("양촌리", "투다리 강남점"):
+            p = M.parse(q)
+            self.assertIsNone(p["house"], f"{q}: house 오탐")
+            self.assertIsNone(p["ri"], f"{q}: ri 오탐")
+
+    def test_g7_spaced_jibun_battery_unchanged(self):
+        # G7: 공백 정상형 지번 표본 — 기존 파스 결과 완전 불변.
+        for q, dong, ri, house in (
+            ("경기도 수원시 영통구 매탄동 1-11", "매탄동", None, (1, 11)),
+            ("세종특별자치시 조치원읍 죽림리 245-5", "조치원읍", "죽림리", (245, 5)),
+            ("청평리 432-11", "청평리", None, (432, 11)),
+            ("서울 강남구 역삼동 736-1", "역삼동", None, (736, 1)),
+        ):
+            p = M.parse(q)
+            self.assertEqual(p["dong"], dong, q)
+            self.assertEqual(p["ri"], ri, q)
+            self.assertEqual(p["house"], house, q)
+
+    def test_g8_trailing_punctuation_token(self):
+        # G8: 꼬리 마침표 단독 토큰은 이미 폐기되지만, 토큰 양끝 부호 제거(P1b) 후에도 결과 동일.
+        p = M.parse("광주광역시 광산구 신운남길 46 .")
+        self.assertEqual(p["road"], "신운남길")
+        self.assertEqual(p["house"], (46, 0))
+
+    def test_g9_partial_road_duplicate_not_over_collapsed(self):
+        # G9: 정수배 완전 반복만 축약한다 — 비정수배 부분중복은 누적 멱등(D3-R3)이 처리하고,
+        #     정상 도로명이 잘려나가지 않아야 한다.
+        self.assertEqual(M.parse("한림상로 100")["road"], "한림상로")
+        self.assertEqual(M.parse("테헤란로 152")["road"], "테헤란로")
+
 
 # ════════════════════════════════════════════════════════════════
 # 단계2 — display_of / addr_obj / category_of / nonaddr_structure
@@ -410,6 +540,38 @@ class TestDisplayAddrParcel(unittest.TestCase):
         d = M.display_of({"name": "x", "kind": "addr"}, r)
         # road 부재이므로 parcel(지번) 규칙 — '상동' 포함, 도로명 형식 아님
         self.assertIn("상동", d["full"])
+
+    # ── task-020 P5: 리(里) 표시 주입 ─────────────────────────────
+    # parcel 경로는 emd(읍·면)까지만 조립해 리를 통째로 떨궜다. '월곶면 263-8' 은
+    # 같은 읍·면 안에서 리가 다른 필지와 구별되지 않아 왕복 검증에서 3km 오선택으로 보였다.
+
+    def test_ri_shown_between_emd_and_jibun(self):
+        # T8: ri 가 있으면 읍·면과 번지 사이에 들어간다.
+        r = {"sido": "경기도", "sigungu": "김포시", "emd": "월곶면", "ri": "성동리",
+             "ji_main": 263, "ji_sub": 8, "san": 0, "jibun": "263-8 답"}
+        d = M.display_of({"name": "x", "kind": "addr", "subtype": "parcel"}, r)
+        self.assertEqual(d["main"], "월곶면 성동리 263-8")
+        self.assertEqual(d["full"], "경기도 김포시 월곶면 성동리 263-8")
+
+    def test_ri_absent_key_leaves_output_unchanged(self):
+        # T9(회귀 가드): ri 키가 없는 기존 row 는 출력 무변화 — r.get("ri") 는 None.
+        d = M.display_of({"name": "x", "kind": "addr", "subtype": "parcel"}, self.row())
+        self.assertEqual(d["main"], "매탄동 1-11")
+        self.assertEqual(d["full"], "경기도 수원시 영통구 매탄동 1-11")
+
+    def test_ri_none_value_leaves_output_unchanged(self):
+        # T9': ri 키가 있으나 None 이어도 동일(빈 토큰 삽입 금지 — 공백 2개 방지).
+        r = self.row(); r["ri"] = None
+        d = M.display_of({"name": "x", "kind": "addr", "subtype": "parcel"}, r)
+        self.assertEqual(d["main"], "매탄동 1-11")
+        self.assertEqual(d["full"], "경기도 수원시 영통구 매탄동 1-11")
+
+    def test_parcel_str_untouched_by_ri_injection(self):
+        # G8: parcel_str 은 jibun 컬럼 기반이라 이미 리를 포함 — P5 가 건드리지 않음을 증명.
+        r = {"sido": "세종특별자치시", "sigungu": None, "emd": "조치원읍",
+             "road": "충현1길", "main_no": 60, "sub_no": 0, "bld": None,
+             "postal": "30034", "jibun": "조치원읍 죽림리 245-5"}
+        self.assertEqual(M.parcel_str(r), "세종특별자치시 조치원읍 죽림리 245-5")
 
 
 class TestDisplayNonAddr(unittest.TestCase):
