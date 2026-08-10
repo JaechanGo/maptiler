@@ -9,6 +9,7 @@ importlib.util.spec_from_file_location 로 모듈 핸들 확보(plan 단계0/F8)
 """
 import importlib.util
 import os
+import re
 import sys
 import unittest
 
@@ -911,6 +912,448 @@ class TestHealthDegraded(unittest.TestCase):
 class TestContractVersion(unittest.TestCase):
     def test_constant(self):
         self.assertEqual(M.CONTRACT_VERSION, "geocode/2")
+
+
+# ════════════════════════════════════════════════════════════════
+# T019 — 역지오코딩 필지 PIP (parcel_at / pip_jibun / reverse 병합)
+#
+# 결함: /reverse 가 address 포인트 테이블 KNN 최근접으로 지번을 골라 원 지번 복원율이 44.9%.
+#       parcel 폴리곤을 한 번도 보지 않는다. 해법은 ST_Contains PIP 로 지번 출처를 바꾸는 것.
+# 함정: parcel.jibun 은 '825-42구' 처럼 지목 한 글자가 접미된다 → 문자열 금지, 정수컬럼 재조립.
+# ════════════════════════════════════════════════════════════════
+
+# 화전동 825-42 — 기준선(8092)이 '화전동 841-4' 를 돌려주던 좌표의 정답 필지.
+PIP_ROW = {
+    "jibun": "825-42구",                       # ← 지목 '구' 접미. 이 문자열을 그대로 쓰면 오답
+    # emd_cd·pnu 는 실물값이다(8099 응답으로 대조 확인: b_code=4128112900).
+    "emd_cd": "41281129", "pnu": "4128112900108250042", "ri_cd": "00", "ri_nm": None,
+    "ji_main": 825, "ji_sub": 42, "san": 0,
+    "sido": "경기도", "sigungu": "고양시 덕양구", "emd": "화전동",
+}
+# addr_at 이 집어 오는 최근접 포인트 — **다른 필지**(이것이 44.9% 의 정체).
+# 읍면동까지 어긋나게 잡아 뒀다: 병합 결과의 지번계열이 정말 PIP 에서 왔는지 판별하려면
+# 두 출처의 값이 달라야 한다(같으면 테스트가 아무것도 증명하지 못한다).
+KNN_ROW = {
+    "sido": "경기도", "sigungu": "고양시 덕양구", "emd": "도내동", "ri": None,
+    "jibun": "도내동 148", "road": "권율대로", "main_no": 570, "sub_no": None,
+    "bld": "", "postal": "10550", "haeng_dong": "행신3동",
+    "bcode": "4128110700", "hcode": "4128163000", "kind": "addr",
+}
+
+
+class SeqCursor(FakeCursor):
+    """SQL 내용으로 응답을 고르는 커서.
+
+    reverse() 는 한 커서로 addr_at / parcel_at / nearest / admin_boundary 네 질의를 던진다.
+    FakeCursor 는 모든 execute 에 같은 결과를 돌려주므로 병합·폴백 검증이 불가능하다.
+    """
+
+    def __init__(self, addr=None, parcel=None, nearest=None, areas=None, parcel_exc=None):
+        super().__init__()
+        self._addr, self._parcel = addr, parcel
+        self._nearest = nearest if nearest is not None else []
+        self._areas = areas if areas is not None else []
+        self._parcel_exc = parcel_exc
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        s = " ".join(sql.split())
+        if "FROM parcel" in s:
+            self._last = "parcel"
+            if self._parcel_exc is not None:
+                raise self._parcel_exc
+        elif "FROM admin_boundary" in s:
+            self._last = "areas"
+        elif "kind='addr'" in s:
+            self._last = "addr"
+        else:
+            self._last = "nearest"
+        return self
+
+    def fetchone(self):
+        return self._addr if self._last == "addr" else self._parcel
+
+    def fetchall(self):
+        return self._areas if self._last == "areas" else self._nearest
+
+    def sql_of(self, tag):
+        """저장된 질의 중 tag('parcel'/'addr'/'areas') 에 해당하는 첫 SQL 을 공백정규화해 반환."""
+        for sql, _ in self.executed:
+            s = " ".join(sql.split())
+            if tag == "parcel" and "FROM parcel" in s: return s
+            if tag == "areas" and "FROM admin_boundary" in s: return s
+            if tag == "addr" and "kind='addr'" in s: return s
+        return None
+
+
+# ── TDD 1: parcel_at() 신설 — PIP 1행 → dict ────────────────────
+class TestParcelAt(unittest.TestCase):
+    def test_returns_row_dict(self):
+        cur = FakeCursor(fetchone_result=dict(PIP_ROW))
+        out = M.parcel_at(cur, 126.8713101, 37.6192808)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["ji_main"], 825)
+        self.assertEqual(out["ji_sub"], 42)
+        self.assertEqual(out["emd"], "화전동")
+
+    def test_query_is_st_contains_pip_limit1(self):
+        cur = FakeCursor(fetchone_result=dict(PIP_ROW))
+        M.parcel_at(cur, 126.8713101, 37.6192808)
+        sql = " ".join(cur.executed[0][0].split())
+        self.assertIn("ST_Contains(parcel.geom", sql)   # KNN(<->) 아님 — 포함관계
+        self.assertNotIn("<->", sql)
+        self.assertIn("FROM parcel", sql)
+        self.assertIn("JOIN lawd_dong", sql)
+        self.assertIn("LIMIT 1", sql)
+        self.assertEqual(cur.executed[0][1], (126.8713101, 37.6192808))
+
+    def test_zero_rows_returns_none(self):
+        cur = FakeCursor(fetchone_result=None)          # 바다·미등록지
+        self.assertIsNone(M.parcel_at(cur, 125.0, 33.0))
+
+
+# ── TDD 2~5: pip_jibun() 재조립 ─────────────────────────────────
+class TestPipJibun(unittest.TestCase):
+    def test_2_reassembles_from_int_cols_not_jibun_string(self):
+        # 지목 '구' 가 붙은 parcel.jibun 을 쓰면 안 된다
+        self.assertEqual(M.pip_jibun(dict(PIP_ROW)), "화전동 825-42")
+
+    def test_3_san_prefix(self):
+        r = {"emd": "여산면", "ji_main": 59, "ji_sub": 5, "san": 1}
+        self.assertEqual(M.pip_jibun(r), "여산면 산 59-5")
+
+    def test_4_ji_sub_zero_omits_dash(self):
+        r = {"emd": "도내동", "ji_main": 148, "ji_sub": 0, "san": 0}
+        self.assertEqual(M.pip_jibun(r), "도내동 148")
+
+    def test_4b_ji_sub_none_omits_dash(self):
+        r = {"emd": "도내동", "ji_main": 148, "ji_sub": None, "san": 0}
+        self.assertEqual(M.pip_jibun(r), "도내동 148")
+
+    def test_5_ri_between_emd_and_bunji(self):
+        r = {"emd": "여산면", "ri_nm": "두여리", "ji_main": 85, "ji_sub": 69, "san": 0}
+        self.assertEqual(M.pip_jibun(r), "여산면 두여리 85-69")
+
+    def test_5b_ri_absent_omitted(self):
+        r = {"emd": "여산면", "ri_nm": None, "ji_main": 85, "ji_sub": 69, "san": 0}
+        self.assertEqual(M.pip_jibun(r), "여산면 85-69")
+
+    def test_5c_ri_key_alias_accepted(self):
+        # 조인 별칭은 ri_nm 이지만 ri 키로 실려 와도 같은 결과여야 한다
+        r = {"emd": "여산면", "ri": "두여리", "ji_main": 85, "ji_sub": 69, "san": 0}
+        self.assertEqual(M.pip_jibun(r), "여산면 두여리 85-69")
+
+    def test_ji_main_null_returns_none(self):
+        # 번지를 만들 수 없으면 None → 호출측이 현행 KNN 지번을 유지한다(무회귀)
+        self.assertIsNone(M.pip_jibun({"emd": "화전동", "ji_main": None, "ji_sub": 3}))
+
+
+# nearest[] 에 실릴 addr 행. PIP 는 address.* 만 바꾸므로 여기엔 새어 들어오면 안 된다.
+NEAR_ROW = dict(KNN_ROW, lon=126.8713101, lat=37.6192808, d=12.3, name=None, subtype=None)
+
+
+def _reverse(addr=KNN_ROW, parcel=PIP_ROW, **kw):
+    """reverse() 를 SeqCursor 로 1회 구동해 address 부분을 돌려주는 축약자."""
+    cur = SeqCursor(addr=dict(addr) if addr else None,
+                    parcel=dict(parcel) if parcel else None, **kw)
+    return M.reverse(cur, 126.8713101, 37.6192808, 1), cur
+
+
+# ── TDD 6: reverse() 병합 — 지번계열은 PIP, 도로명계열은 KNN ─────
+class TestReverseMerge(unittest.TestCase):
+    def test_6a_parcel_string_comes_from_pip(self):
+        out, _ = _reverse()
+        self.assertEqual(out["address"]["parcel"], "경기도 고양시 덕양구 화전동 825-42")
+
+    def test_6b_road_zipcode_bld_come_from_knn(self):
+        # addr_at 은 도로명·우편번호·건물명의 유일한 출처다. PIP 가 이 값을 지우면 회귀다.
+        out, _ = _reverse()
+        base = M.addr_obj(dict(KNN_ROW))
+        for k in ("road", "zipcode", "bld"):
+            self.assertEqual(out["address"][k], base[k], k)
+
+    def test_6c_region_fields_move_with_the_jibun(self):
+        # 지번만 PIP 로 바꾸고 시도·시군구·읍면동을 KNN 것으로 두면
+        # '덕양구 도내동 825-42' 같은 잡종이 나온다 — 지번계열은 한 덩어리로 움직여야 한다.
+        st = _reverse()[0]["address"]["structure"]
+        self.assertEqual(st["emd"], "화전동")
+        self.assertEqual(st["sido"], "경기도")
+        self.assertEqual(st["sigungu"], "고양시 덕양구")
+        self.assertEqual((st["ji_main"], st["ji_sub"]), (825, 42))
+        self.assertIsNone(st["ri"])
+
+    def test_6d_road_side_structure_fields_kept_from_knn(self):
+        st = _reverse()[0]["address"]["structure"]
+        base = M.addr_obj(dict(KNN_ROW))["structure"]
+        for k in ("road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
+                  "bld_name", "zipcode", "haeng_dong", "h_code"):
+            self.assertEqual(st[k], base[k], k)
+
+    def test_6e_nearest_and_areas_untouched(self):
+        # PIP 는 address 에만 적용한다. nearest[] 는 종전 KNN 표기를 유지해야 한다.
+        areas = [{"name": "화전동", "type": "emd", "code": "4128112900"}]
+        cur = SeqCursor(addr=dict(KNN_ROW), parcel=dict(PIP_ROW),
+                        nearest=[dict(NEAR_ROW)], areas=areas)
+        out = M.reverse(cur, 126.8713101, 37.6192808, 1)
+        self.assertEqual(len(out["nearest"]), 1)
+        self.assertEqual(out["nearest"][0]["address"]["parcel"], M.parcel_str(dict(NEAR_ROW)))
+        self.assertEqual(out["areas"], areas)
+
+    def test_6f_pip_only_when_addr_at_empty(self):
+        # 최근접 포인트가 2.5km 안에 없어도 필지는 있다 — 종전엔 address=null 이던 구간의 순증
+        out, _ = _reverse(addr=None)
+        self.assertIsNotNone(out["address"])
+        self.assertEqual(out["address"]["parcel"], "경기도 고양시 덕양구 화전동 825-42")
+        self.assertEqual(out["address"]["structure"]["ji_main"], 825)
+
+
+# ── TDD 7: 폴백 — PIP 가 없거나 죽어도 기준선보다 나빠지지 않는다 ──
+class TestReverseFallback(unittest.TestCase):
+    def test_7a_zero_parcel_keeps_knn_result(self):
+        out, _ = _reverse(parcel=None)
+        self.assertEqual(out["address"], M.addr_obj(dict(KNN_ROW)))
+
+    def test_7b_pip_exception_keeps_knn_result(self):
+        out, _ = _reverse(parcel_exc=psycopg.errors.AmbiguousColumn("column emd_cd is ambiguous"))
+        self.assertEqual(out["address"], M.addr_obj(dict(KNN_ROW)))
+
+    def test_7c_pip_exception_is_not_503_or_500(self):
+        # 예외를 삼키기만 하면 psycopg 트랜잭션이 abort 로 남아 이어지는 nearest/areas 질의가
+        # InFailedSqlTransaction 으로 죽는다 — 폴백이 아니라 500 이 된다. HTTP 경계에서 확인한다.
+        cur = SeqCursor(addr=dict(KNN_ROW), parcel=dict(PIP_ROW),
+                        parcel_exc=psycopg.errors.QueryCanceled("statement timeout"))
+        rec = _run_do_get("/reverse?lon=126.8713101&lat=37.6192808&limit=1", cur=cur)
+        self.assertEqual(rec.code, 200)
+        self.assertEqual(rec.obj["address"], M.addr_obj(dict(KNN_ROW)))
+
+    def test_7d_pip_without_bunji_keeps_knn_result(self):
+        out, _ = _reverse(parcel=dict(PIP_ROW, ji_main=None, ji_sub=None))
+        self.assertEqual(out["address"], M.addr_obj(dict(KNN_ROW)))
+
+    def test_7e_no_addr_no_parcel_stays_null(self):
+        out, _ = _reverse(addr=None, parcel=None)
+        self.assertIsNone(out["address"])
+
+
+# ── TDD 8: addr_at() 무수정 (순방향 주소부착이 같이 쓴다) ─────────
+class TestAddrAtUnchanged(unittest.TestCase):
+    def test_8a_addr_at_still_knn_on_address_table(self):
+        cur = FakeCursor(fetchone_result=dict(KNN_ROW))
+        M.addr_at(cur, 126.8713101, 37.6192808)
+        sql = " ".join(cur.executed[0][0].split())
+        self.assertIn("FROM address", sql)
+        self.assertIn("<->", sql)              # KNN 유지
+        self.assertNotIn("parcel", sql)        # PIP 를 여기에 섞지 않는다
+        self.assertNotIn("ST_Contains", sql)
+
+    def test_8b_reverse_still_calls_addr_at(self):
+        _, cur = _reverse()
+        self.assertIsNotNone(cur.sql_of("addr"))
+
+
+# ── TDD 9: 응답 스키마 불변 ──────────────────────────────────────
+class TestReverseSchemaStable(unittest.TestCase):
+    ADDR_KEYS = {"road", "parcel", "zipcode", "bld", "structure"}
+
+    def _assert_shape(self, address):
+        self.assertEqual(set(address), self.ADDR_KEYS)
+        self.assertEqual(set(address["structure"]),
+                         set(M.addr_obj(dict(KNN_ROW))["structure"]))
+
+    def test_9a_merged(self):
+        self._assert_shape(_reverse()[0]["address"])
+
+    def test_9b_pip_only(self):
+        self._assert_shape(_reverse(addr=None)[0]["address"])
+
+    def test_9c_fallback(self):
+        self._assert_shape(_reverse(parcel=None)[0]["address"])
+
+    def test_9d_san_becomes_real_boolean(self):
+        # F4 주석대로 address 경로의 structure.san 은 지금까지 항상 null 이었다.
+        # PIP 병합분은 실제 산 여부를 싣는다(demo/guide.html:360 문서와 어긋나는 지점 — 보고 대상).
+        self.assertIsNone(M.addr_obj(dict(KNN_ROW))["structure"]["san"])
+        self.assertIs(_reverse()[0]["address"]["structure"]["san"], False)
+        self.assertIs(_reverse(parcel=dict(PIP_ROW, san=1))[0]["address"]["structure"]["san"], True)
+
+    def test_9e_san_stays_null_on_fallback(self):
+        self.assertIsNone(_reverse(parcel=None)[0]["address"]["structure"]["san"])
+
+
+# ── TDD 10: b_code 도 PIP 출처로 (pnu 앞 10자리) ─────────────────
+class TestReverseBcode(unittest.TestCase):
+    def test_10a_bcode_from_parcel_pnu(self):
+        st = _reverse()[0]["address"]["structure"]
+        self.assertEqual(st["b_code"], "4128112900")          # = left(pnu,10) · 8099 실측과 동일
+        self.assertEqual(st["b_code"], M.parcel_bcode(dict(PIP_ROW)))
+        self.assertNotEqual(st["b_code"], KNN_ROW["bcode"])   # KNN 출처가 아님을 못박는다
+
+    def test_10b_bcode_falls_back_to_knn(self):
+        self.assertEqual(_reverse(parcel=None)[0]["address"]["structure"]["b_code"],
+                         M.addr_obj(dict(KNN_ROW))["structure"]["b_code"])
+
+    def test_10c_hcode_never_from_parcel(self):
+        # parcel 에는 행정동코드가 없다. PIP 가 h_code 를 건드리면 안 된다.
+        self.assertEqual(_reverse()[0]["address"]["structure"]["h_code"],
+                         M.addr_obj(dict(KNN_ROW))["structure"]["h_code"])
+
+
+# ── TDD 11: PIP 질의 컬럼 한정 (ambiguous 회귀 가드) ─────────────
+class TestParcelSqlQualified(unittest.TestCase):
+    #  emd_cd 는 parcel·lawd_dong·lawd_ri 세 군데 모두에 있다. 한정하지 않으면 질의가
+    #  ambiguous 로 죽고, 그 예외는 parcel_at 의 폴백에 삼켜져 **조용히 기준선과 같은 값**이 된다.
+    #  즉 이 결함은 500 도 로그도 없이 개선 0% 로만 드러난다 — 그래서 SQL 자체를 검사한다.
+    SHARED = ("emd_cd", "ri_cd", "geom", "jibun", "pnu", "san", "ji_main", "ji_sub",
+              "sido", "sigungu", "emd")
+
+    def _sql(self):
+        cur = FakeCursor(fetchone_result=dict(PIP_ROW))
+        M.parcel_at(cur, 126.8713101, 37.6192808)
+        return " ".join(cur.executed[0][0].split())
+
+    def _assert_all_qualified(self, sql):
+        s = re.sub(r"\bAS\s+\w+", "", sql, flags=re.I)   # 출력 별칭은 모호하지 않다 → 제외
+        for col in self.SHARED:
+            m = re.search(rf"(?<![.\w]){col}\b", s)
+            if m:
+                self.fail(f"한정되지 않은 컬럼 {col!r} 발견 (…{s[max(0,m.start()-40):m.end()+20]}…)")
+
+    def test_11a_qualified_without_lawd_ri(self):
+        saved = M._HAS_LAWD_RI
+        M._HAS_LAWD_RI = False
+        try:
+            self._assert_all_qualified(self._sql())
+        finally:
+            M._HAS_LAWD_RI = saved
+
+    def test_11b_qualified_with_lawd_ri(self):
+        # 운영은 lawd_ri 가 있는 쪽이다(T018 에서 구축). 조인이 붙는 이 경로가 실제 위험 구간.
+        saved = M._HAS_LAWD_RI
+        M._HAS_LAWD_RI = True
+        try:
+            sql = self._sql()
+            self.assertIn("LEFT JOIN lawd_ri", sql)
+            self.assertIn("lr.ri AS ri_nm", sql)
+            self._assert_all_qualified(sql)
+        finally:
+            M._HAS_LAWD_RI = saved
+
+    def test_11c_ri_join_absent_when_dict_missing(self):
+        saved = M._HAS_LAWD_RI
+        M._HAS_LAWD_RI = False
+        try:
+            self.assertNotIn("lawd_ri", self._sql())     # fail-open: 사전 없으면 조인도 없다
+        finally:
+            M._HAS_LAWD_RI = saved
+
+
+# ── TDD 12 (수정 라운드 1 · D-1): PIP↔KNN 교차검증 가드 ──────────
+#  1차 구현은 PIP 가 **1행이라도 나오면** 무조건 KNN 지번을 덮어썼다. 그 결과 산번지 폴리곤이
+#  지적도에 없는 좌표는 전부 옆 일반필지로 조용히 치환됐고(NO119 파주 하지석동 산54-1 → 465-9),
+#  폴백은 parcel_at 이 None 일 때만 있어 설계상 발동할 수 없었다.
+#  가드는 **단방향**이다: KNN=산·PIP=일반 일 때만 KNN 을 지킨다. 반대(PIP=산·KNN=일반)는
+#  PIP 가 정답인 상황이므로 건드리면 안 된다(벤치 595건 중 38건이 이 반대 방향이다).
+SAN_KNN = {                                    # NO119 재현용 KNN 행(산번지 포인트)
+    "sido": "경기도", "sigungu": "파주시", "emd": "하지석동", "ri": None,
+    "jibun": "하지석동 산 54-1", "road": "청암로", "main_no": 100, "sub_no": None,
+    "bld": "", "postal": "10911", "haeng_dong": "교하동",
+    "bcode": "4148011000", "hcode": "4148057000", "kind": "addr",
+}
+GEN_PIP = {                                    # 그 점을 포함하는 **일반** 필지(산 폴리곤이 없어서)
+    "jibun": "465-9 임", "emd_cd": "41480110", "pnu": "4148011000104650009",
+    "ri_cd": "00", "ri_nm": None, "ji_main": 465, "ji_sub": 9, "san": 0,
+    "sido": "경기도", "sigungu": "파주시", "emd": "하지석동",
+}
+SAN_PIP = dict(GEN_PIP, san=1, ji_main=54, ji_sub=1,        # 함정B: PIP 가 산인 정상 상황
+               pnu="4148011000200540001", jibun="산54-1 임")
+
+
+class TestPipSanGuard(unittest.TestCase):
+    def test_12a_knn_san_near_pip_general_keeps_knn(self):
+        # NO119 상황: PIP 는 일반번지 · KNN 은 0.0m 거리의 산번지 → 산 폴리곤 결측 신호 → KNN 유지
+        addr = dict(SAN_KNN, knn_dist_m=0.0)
+        out, _ = _reverse(addr=addr, parcel=GEN_PIP)
+        self.assertEqual(out["address"]["parcel"], "경기도 파주시 하지석동 산 54-1")
+        self.assertEqual(out["address"], M.addr_obj(dict(addr)))   # 전 필드 KNN 원본 그대로
+
+    def test_12b_pip_san_knn_general_adopts_pip(self):
+        # 함정B — 반대 방향은 PIP 가 정답이다. 대칭 가드로 만들면 여기서 회귀한다.
+        out, _ = _reverse(addr=dict(KNN_ROW, knn_dist_m=0.0), parcel=SAN_PIP)
+        self.assertEqual(out["address"]["parcel"], "경기도 파주시 하지석동 산 54-1")
+        self.assertIs(out["address"]["structure"]["san"], True)
+
+    def test_12c_both_general_and_near_adopts_pip(self):
+        # 함정A — 1차에서 고쳐진 253건의 대표(화전동 841-4 → 825-42, KNN 거리 1.35m).
+        # '가까우면 KNN' 같은 거리 단독 가드였다면 이 개선이 되돌아간다.
+        out, _ = _reverse(addr=dict(KNN_ROW, knn_dist_m=1.35), parcel=PIP_ROW)
+        self.assertEqual(out["address"]["parcel"], "경기도 고양시 덕양구 화전동 825-42")
+
+    def test_12d_parcel_none_keeps_existing_fallback(self):
+        # 기존 폴백 무회귀 — 가드가 붙어도 PIP 0행 경로는 그대로여야 한다.
+        out, _ = _reverse(addr=dict(SAN_KNN, knn_dist_m=0.0), parcel=None)
+        self.assertEqual(out["address"], M.addr_obj(dict(SAN_KNN, knn_dist_m=0.0)))
+        out2, _ = _reverse(parcel=None)
+        self.assertEqual(out2["address"], M.addr_obj(dict(KNN_ROW)))
+
+    def test_12e_san_flip_but_knn_far_adopts_pip(self):
+        # 벤치 실측: san 뒤집힘 7건 중 NO119 만 0.00m 이고 나머지 최근접은 32.65m 다.
+        # 거리 상한이 없으면 개선 5건(NO203·538·532·507·586)이 되돌아간다 → 임계 필수.
+        out, _ = _reverse(addr=dict(SAN_KNN, knn_dist_m=32.65), parcel=GEN_PIP)
+        self.assertEqual(out["address"]["parcel"], "경기도 파주시 하지석동 465-9")
+
+    def test_12f_missing_distance_adopts_pip(self):
+        # 거리를 못 구하면 개입하지 않는다(fail-open). 가드가 새 회귀원이 되지 않게.
+        out, _ = _reverse(addr=SAN_KNN, parcel=GEN_PIP)          # knn_dist_m 없음
+        self.assertEqual(out["address"]["parcel"], "경기도 파주시 하지석동 465-9")
+
+    def test_12g_no_knn_row_still_uses_pip(self):
+        out, _ = _reverse(addr=None, parcel=GEN_PIP)
+        self.assertEqual(out["address"]["parcel"], "경기도 파주시 하지석동 465-9")
+
+    def test_12h_threshold_is_five_metres(self):
+        self.assertEqual(M.PIP_SAN_GUARD_M, 5.0)
+        for d, keeps_knn in ((4.99, True), (5.0, True), (5.01, False)):
+            out, _ = _reverse(addr=dict(SAN_KNN, knn_dist_m=d), parcel=GEN_PIP)
+            got_san = "산" in out["address"]["parcel"]
+            self.assertIs(got_san, keeps_knn, f"{d}m 에서 판정이 뒤집혔다")
+
+
+class TestAddrAtMeta(unittest.TestCase):
+    """addr_at 이 거리·산 여부를 **추가로** 돌려준다 — 기존 반환은 그대로."""
+
+    def test_12i_default_return_unchanged(self):
+        cur = FakeCursor(fetchone_result=dict(KNN_ROW))
+        self.assertEqual(M.addr_at(cur, 126.87, 37.61), M.addr_obj(dict(KNN_ROW)))
+
+    def test_12j_with_meta_returns_pair(self):
+        cur = FakeCursor(fetchone_result=dict(SAN_KNN, knn_dist_m=0.0))
+        addr, meta = M.addr_at(cur, 126.738403, 37.760962, with_meta=True)
+        self.assertEqual(addr, M.addr_obj(dict(SAN_KNN, knn_dist_m=0.0)))
+        self.assertEqual(meta["dist_m"], 0.0)
+        self.assertIs(meta["san"], True)
+
+    def test_12k_meta_san_false_for_general_jibun(self):
+        cur = FakeCursor(fetchone_result=dict(KNN_ROW, knn_dist_m=12.5))
+        _, meta = M.addr_at(cur, 126.87, 37.61, with_meta=True)
+        self.assertEqual(meta["dist_m"], 12.5)
+        self.assertIs(meta["san"], False)
+
+    def test_12l_meta_when_no_row(self):
+        cur = FakeCursor(fetchone_result=None)
+        addr, meta = M.addr_at(cur, 125.0, 33.0, with_meta=True)
+        self.assertIsNone(addr)
+        self.assertIsNone(meta["dist_m"])
+
+    def test_12m_sql_carries_distance_and_stays_knn(self):
+        cur = FakeCursor(fetchone_result=dict(KNN_ROW))
+        M.addr_at(cur, 126.87, 37.61, with_meta=True)
+        sql = " ".join(cur.executed[0][0].split())
+        self.assertIn("ST_Distance", sql)
+        self.assertIn("<->", sql)               # KNN 정렬 유지
+        self.assertIn("LIMIT 1", sql)
+        self.assertNotIn("parcel", sql)
+        self.assertNotIn("ST_Contains", sql)
 
 
 if __name__ == "__main__":

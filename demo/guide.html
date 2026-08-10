@@ -357,7 +357,7 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       <tr><td class="mono">structure.sido / sigungu / emd</td><td>string</td><td>시도 / 시군구 / 읍면동(법정동)</td></tr>
       <tr><td class="mono">structure.haeng_dong</td><td>string·null</td><td>행정동</td></tr>
       <tr><td class="mono">structure.ri</td><td>string·null</td><td>리(里). address 무컬럼이라 현재 null 고정</td></tr>
-      <tr><td class="mono">structure.san</td><td>boolean·null</td><td>산(山) 지번 여부 — 지번경로(parcel)만, address 결과는 null</td></tr>
+      <tr><td class="mono">structure.san</td><td>boolean·null</td><td>산(山) 지번 여부 — 지번경로(parcel)와 <span class="mono">/reverse</span>(필지 PIP 병합분)는 boolean, 순방향 address 결과는 null</td></tr>
       <tr><td class="mono">structure.road_name</td><td>string·null</td><td>도로명</td></tr>
       <tr><td class="mono">structure.main_no / sub_no</td><td>string·null</td><td><b>도로명 건물 본/부번</b> (지번 본번이 아님 — 지번은 ji_main/ji_sub)</td></tr>
       <tr><td class="mono">structure.bld_main_no / bld_sub_no</td><td>string·null</td><td>건물 본/부번 — main_no/sub_no 의 의미 명시 alias</td></tr>

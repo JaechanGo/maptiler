@@ -244,6 +244,14 @@ def parcel_str(r):
                                 jb or _s(r["emd"])) if x)
 
 
+# addr_obj().structure 의 키 집합. T019 의 PIP 단독 응답(최근접 포인트는 없고 필지만 있는
+# 좌표)도 이 형을 그대로 채워야 소비자가 분기 없이 읽는다. 아래 addr_obj 와 어긋나면
+# TestReverseSchemaStable 이 잡는다 — 값이 아니라 **키 집합**이 계약이다.
+ADDR_STRUCT_KEYS = ("sido", "sigungu", "emd", "haeng_dong", "ri", "san",
+                    "road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
+                    "ji_main", "ji_sub", "bld_name", "zipcode", "b_code", "h_code")
+
+
 def addr_obj(r):
     # 기존 키(road/parcel/zipcode/bld/structure) 전부 보존. structure 에 분해계약 신규 필드 가산.
     # 동결: main_no/sub_no(도로명 건물본/부번, address_road_addr_idx 계약) — 의미·값 불변. bld_* 는 alias.
@@ -332,6 +340,28 @@ def parcel_bcode(r):
         if pnu[:8] == s:                             # 권위 읍면동 불일치 시 pnu 채택 금지
             return pnu[:10]
     return pad_bcode(emd_cd, r.get("ri_cd"))
+
+
+def pip_jibun(r):
+    """parcel 행 → 지번 문자열 '읍면동 [리] [산 ]본번[-부번]'. 번지 미상이면 None.
+
+    T019. **parcel.jibun 문자열을 쓰지 않는 것이 핵심이다** — 그 값은 '825-42구' 처럼
+    지목 한 글자가 접미되고 읍면동·리 이름이 없다(address.jibun 은 반대로 '여산면 두여리 85-69'
+    형식이라 두 테이블의 jibun 계약이 서로 다르다). 정수 컬럼 san/ji_main/ji_sub 로 재조립하고
+    지역명은 lawd_dong/lawd_ri 조인값에서 가져온다.
+
+    display_of 의 kind=='addr' 지번 규칙(L408~)과 같은 조립식이다. 그쪽은 item/row 를 받는
+    표시 계층이고 여기는 parcel 행 전용이라 합치지 않는다 — 합치면 display_of 가 순방향
+    도로명 경로까지 함께 물고 있어 회귀 반경이 커진다.
+    ji_sub 는 0 과 NULL 을 같게 다룬다(둘 다 부번 없음 → '-0' 을 붙이지 않는다).
+    """
+    jm = r.get("ji_main")
+    if jm is None: return None
+    js = r.get("ji_sub")
+    jb = ("산 " if r.get("san") else "") + f"{jm}" + (f"-{js}" if js else "")
+    # 조인 별칭은 ri_nm(=lawd_ri.ri). 호출측이 ri 키로 실어 보내는 경우도 받아 준다.
+    ri = _s(r.get("ri_nm")) or _s(r.get("ri"))
+    return " ".join(x for x in (_s(r.get("emd")), ri, jb) if x)
 
 
 def parse_jibun_nums(jibun):
@@ -622,19 +652,168 @@ def parse(q):
 
 
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
-def addr_at(cur, lon, lat):
+def addr_at(cur, lon, lat, with_meta=False):
+    """최근접 address 포인트 1행 → 주소객체. with_meta=True 면 (주소객체, meta) 쌍.
+
+    meta 는 D-1 가드 전용 부가정보다(dist_m: 질의점까지 실거리 m, san: 그 포인트가 산번지인가).
+    **기본 반환값·키 집합은 종전과 완전히 같다** — 순방향 주소부착(geocode)이 이 함수를 함께
+    쓰므로 시그니처를 깨면 회귀 반경이 커진다. 그래서 추가 정보는 응답 dict 에 넣지 않고
+    (넣으면 /reverse JSON 계약에 그대로 새어 나간다) 선택 반환값으로만 뺀다.
+
+    거리는 바깥 SELECT 에서 계산한다 — LIMIT 1 서브쿼리 밖이라 ST_Distance 는 정확히 1행에
+    대해서만 평가된다(안쪽 타깃리스트에 두면 KNN 주행 중 스캔되는 모든 행에서 평가될 수 있다).
+    """
     # geom && ST_Expand 는 Index Cond 로 내려가 KNN 주행범위를 묶는다(geography 캐스트한
     # ST_DWithin 은 Filter 로만 걸려 반경 내 0건이면 인덱스 전체를 훑고 statement_timeout).
     # 0.035°는 2.5km 의 경도 상한(위도 38.7°에서 0.0288°) 초과분 — 정확도는 ST_DWithin 이 보장.
     cur.execute(
-        """SELECT * FROM address
-           WHERE kind='addr' AND geom IS NOT NULL
-             AND geom && ST_Expand(ST_SetSRID(ST_MakePoint(%s,%s),4326), 0.035)
-             AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, 2500)
-           ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326) LIMIT 1""",
-        (lon, lat, lon, lat, lon, lat))
+        """SELECT s.*, ST_Distance(s.geom::geography,
+                  ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS knn_dist_m
+           FROM (SELECT * FROM address
+                 WHERE kind='addr' AND geom IS NOT NULL
+                   AND geom && ST_Expand(ST_SetSRID(ST_MakePoint(%s,%s),4326), 0.035)
+                   AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, 2500)
+                 ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326) LIMIT 1) s""",
+        (lon, lat, lon, lat, lon, lat, lon, lat))
     r = cur.fetchone()
-    return addr_obj(r) if r else None
+    if not with_meta:
+        return addr_obj(r) if r else None
+    if not r:
+        return None, {"dist_m": None, "san": False}
+    d = _g(r, "knn_dist_m")
+    # address 에는 san 컬럼이 없다(addr_obj 의 F4 주석 참조) → jibun 문자열에서 판정한다.
+    return addr_obj(r), {"dist_m": (float(d) if d is not None else None),
+                         "san": parse_jibun_nums(_g(r, "jibun"))[2]}
+
+
+# ── 좌표 → 그 점을 **포함하는** 필지(PIP) ──────────────────────────
+def parcel_at(cur, lon, lat):
+    """ST_Contains(parcel.geom, pt) 로 좌표를 포함하는 필지 1행. 0행·실패 시 None.
+
+    T019 결함의 핵심 처방. addr_at 은 address **포인트** 테이블의 최근접(KNN)이라
+    '가장 가까운 다른 번지'를 집는다(원 지번 복원 44.9%). 필지 폴리곤 포함관계는
+    좌표에 대해 유일 정답이므로 지번은 이쪽에서 가져와야 한다.
+
+    - KNN 이 아니라 포함관계라 3033546 의 503 함정(geography ST_DWithin 이 Filter 로만
+      걸려 인덱스 전주행)에 해당하지 않는다. bbox 선행이 불필요하며 실측 정상상태 ~6ms.
+    - sido_cd 를 좌표만으로 알 수 없어 파티션 프루닝은 안 된다(18개 Append). 파티션마다
+      GiST 라 문제되지 않는다.
+    - **모든 공유 컬럼은 parcel. 로 한정한다** — emd_cd 는 parcel 과 lawd_dong 양쪽에 있어
+      한정하지 않으면 ambiguous 로 질의 자체가 죽는다(그러면 아래 폴백에 삼켜져 조용히
+      기준선과 같은 값이 나온다 — 이 함수의 가장 위험한 실패 양식이다).
+    - ORDER BY 는 결정성 확보용. 같은 점을 포함하는 필지가 둘 이상인 경우(경계 중복·산/일반
+      공존)에 산이 아닌 일반 필지, 작은 번지를 우선한다(순방향 parcel 경로 L773 과 같은 취향).
+
+    실패는 삼키고 None 을 돌려 호출측이 현행 KNN 지번을 유지하게 한다(무회귀 보장).
+    다만 **트랜잭션 오염을 반드시 풀어야 한다** — psycopg 는 질의 실패 시 트랜잭션을
+    abort 상태로 만들고 이후 nearest/areas 질의가 전부 InFailedSqlTransaction 으로 죽는다.
+    즉 예외만 삼키면 폴백이 아니라 500 이 된다. connection.transaction() 은 진행 중인
+    트랜잭션 안에서 SAVEPOINT 로 동작하므로 이 구간만 되감을 수 있다.
+    """
+    ri_sel = "lr.ri AS ri_nm, " if _HAS_LAWD_RI else ""
+    ri_join = (" LEFT JOIN lawd_ri lr ON lr.emd_cd = parcel.emd_cd "
+               "AND lr.ri_cd = substr(parcel.pnu,9,2)::char(2)") if _HAS_LAWD_RI else ""
+    sql = ("SELECT parcel.jibun AS jibun, parcel.emd_cd AS emd_cd, "
+           "parcel.pnu AS pnu, substr(parcel.pnu,9,2) AS ri_cd, " + ri_sel +
+           "parcel.ji_main AS ji_main, parcel.ji_sub AS ji_sub, parcel.san AS san, "
+           "ld.sido AS sido, ld.sigungu AS sigungu, ld.emd AS emd "
+           "FROM parcel JOIN lawd_dong ld ON ld.emd_cd = parcel.emd_cd" + ri_join +
+           " WHERE ST_Contains(parcel.geom, ST_SetSRID(ST_MakePoint(%s,%s),4326))"
+           " ORDER BY parcel.san, parcel.ji_main, parcel.ji_sub LIMIT 1")
+    tx = getattr(getattr(cur, "connection", None), "transaction", None)
+    try:
+        if tx is not None:
+            with tx():                                  # 실패 시 SAVEPOINT 까지만 되감기
+                cur.execute(sql, (lon, lat))
+                return cur.fetchone()
+        cur.execute(sql, (lon, lat))
+        return cur.fetchone()
+    except Exception as e:
+        # 조용한 무력화를 막기 위해 반드시 남긴다(ambiguous/타임아웃이 여기로 숨는다).
+        print(f"geocode-api-pg: NOTE parcel PIP 실패 → KNN 폴백 "
+              f"({type(e).__name__}: {str(e)[:120]})", file=sys.stderr)
+        return None
+
+
+# 산번지 폴리곤 결측 판정 거리 임계(m). 벤치 595건 실측 근거:
+#  · KNN=산·PIP=일반 인 좌표는 7건뿐이고, 그중 폴리곤 결측인 NO119 만 거리 0.00m,
+#    나머지 6건 중 최근접이 32.65m 다 → 5m 는 오탐측 경계에서 6.5배 여유.
+#  · 0.5~20m 어느 값을 잡아도 적중은 NO119 1건이고 1차 개선 253건 적중은 0건이다(함정A 회피).
+#  · 반대로 임계를 없애면 개선 5건(NO203·507·532·538·586)이 되돌아간다 → 임계는 필수다.
+#  · 거리 단독 가드는 금물이다 — 개선 253건 중 최소거리가 1.35m(화전동 841-4→825-42)라
+#    '가까우면 KNN' 규칙이면 계획서의 대표 개선사례부터 무너진다. 판별자는 san 뒤집힘이고
+#    거리는 안전마진일 뿐이다.
+PIP_SAN_GUARD_M = 5.0
+
+
+def _pip_polygon_missing(p, knn):
+    """PIP 를 KNN 으로 교차검증 — '산번지 폴리곤 결측' 신호면 True(=PIP 를 버리고 KNN 유지).
+
+    T019 수정 라운드 1(D-1). 1차 구현은 PIP 가 1행이라도 나오면 무조건 지번을 덮어썼고
+    폴백은 parcel_at 이 None 일 때만 있었다. 그런데 산번지는 address 포인트로는 존재하는데
+    지적도 폴리곤이 없는 경우가 있다 — 이때 ST_Contains 는 **그 점을 덮는 옆 일반필지**를
+    1행으로 돌려준다. 0행이 아니므로 폴백은 설계상 발동할 수 없고, 결과는 조용한 오답이다
+    (NO119 파주 하지석동 산54-1 → 465-9). 즉 '0행'이 아니라 '엉뚱한 1행'이 실패 양식이다.
+
+    **반드시 단방향이어야 한다.** 반대 상황(PIP=산 · KNN=일반)은 KNN 이 옆 일반필지를 집은
+    평범한 오차이고 PIP 가 정답이다 — 벤치 595건 중 38건이 이쪽이다. 대칭 가드로 만들면
+    그 38건이 통째로 회귀한다. 그래서 knn.san 이 참인 경우에만 개입한다.
+
+    거리를 못 구하면(meta 없음·구버전 호출) 개입하지 않는다 — fail-open 이라야 가드 자체가
+    새로운 회귀원이 되지 않는다.
+    """
+    if not knn or not knn.get("san"):
+        return False                          # KNN 이 산이 아니면 이 가드의 관할이 아니다
+    if bool(p.get("san")):
+        return False                          # 양쪽 다 산 → 같은 계열, PIP 가 더 정확하다
+    d = knn.get("dist_m")
+    return d is not None and d <= PIP_SAN_GUARD_M
+
+
+def apply_parcel_pip(address, p, knn=None):
+    """addr_at(KNN) 주소객체에 parcel_at(PIP) 결과를 병합한다. p 가 못 쓸 값이면 원본 그대로.
+
+    T019 의 병합 규칙. **지번계열과 도로명계열의 출처를 나눈다.**
+      - 지번계열(parcel 문자열 · sido/sigungu/emd/ri/san/ji_main/ji_sub/b_code) → PIP
+      - 도로명계열(road/zipcode/bld · road_name/main_no/sub_no/bld_*/haeng_dong/h_code) → KNN
+    parcel 테이블에는 도로명·우편번호·건물명·행정동이 아예 없으므로 그쪽은 KNN 이 유일 출처다.
+
+    시도·시군구·읍면동을 **지번과 한 덩어리로** 옮기는 것이 요점이다. 지번 문자열만 갈아끼우면
+    최근접 포인트가 옆 동이었을 때 '덕양구 도내동 825-42' 같은 잡종이 나온다(825-42 는 화전동).
+    같은 이유로 b_code 도 PIP 출처여야 한다 — 안 그러면 코드와 이름이 서로 다른 동을 가리킨다.
+    h_code(행정동)는 parcel 에 없으니 KNN 값을 유지한다. b_code 와 h_code 가 어긋날 수 있으나
+    이는 안 A 의 기존 잔여 불일치와 같은 성격이다(addr 경로 주석 L282 부근 참조).
+    **road(도로명 문자열)도 같은 이유로 KNN 출처다** — 지번계열만 PIP 로 갈아끼우므로 road 는
+    최근접 포인트가 속한 도로명이고, PIP 가 옆 동을 가리키면 road 와 지번의 행정구역이 어긋날
+    수 있다(D-5). 도로명 문자열에는 동(洞) 토큰이 없어 시도·시군구 수준까지만 교차검증이
+    가능하며, 벤치 실측에서는 road 593행 중 시군구 불일치 0·시도 불일치 0 으로 미발현이다.
+
+    address 가 None 이어도 p 만 있으면 주소를 만든다 — 최근접 포인트가 2.5km 안에 없어
+    지금까지 address=null 이던 좌표의 순증분이다. 이때도 키 집합은 ADDR_STRUCT_KEYS 로 동일하다.
+    """
+    jb = pip_jibun(p) if p else None
+    if jb is None:
+        return address                       # PIP 0행·번지 미상 → 현행 KNN 유지(무회귀)
+    if _pip_polygon_missing(p, knn):
+        return address                       # 산번지 폴리곤 결측 → PIP 는 옆 필지다. KNN 유지
+    ri = _s(p.get("ri_nm")) or _s(p.get("ri"))
+    _bc = parcel_bcode(p)
+    _note_ri_unresolved(_bc, ri, "reverse_pip")        # A-5: 치환 전 원값으로 관측
+    # 치환지점 — pnu/emd_cd 유래 b_code(46/29) → 12. 순방향 parcel 경로(L860)와 같은 규칙.
+    pip_st = {"sido": remap_sido_name(p.get("sido")), "sigungu": p.get("sigungu"),
+              "emd": p.get("emd"), "ri": ri, "san": bool(p.get("san")),
+              "ji_main": p.get("ji_main"), "ji_sub": p.get("ji_sub"),
+              "b_code": remap_bcode(_bc)}
+    # 지번 문자열은 parcel_str 로 만든다 — addr 경로와 표기 정의점을 하나로 유지하기 위함이다
+    # (remap_sido_name 적용·결측 토큰 생략 규칙이 그 안에 있다).
+    parcel = parcel_str({"sido": p.get("sido"), "sigungu": p.get("sigungu"),
+                         "jibun": jb, "emd": p.get("emd")})
+    if address is None:
+        st = dict.fromkeys(ADDR_STRUCT_KEYS)           # 없는 값은 전부 None
+        st.update(pip_st)
+        return {"road": "", "parcel": parcel, "zipcode": "", "bld": "", "structure": st}
+    return {**address, "parcel": parcel,
+            "structure": {**address["structure"], **pip_st}}
 
 
 def geocode(cur, q, limit):
@@ -928,7 +1107,12 @@ def geocode(cur, q, limit):
 
 
 def reverse(cur, lon, lat, limit):
-    address = addr_at(cur, lon, lat)
+    # T019: 지번은 필지 폴리곤 포함관계(PIP)에서, 도로명·우편번호·건물명은 종전 KNN 에서.
+    # 두 질의를 모두 던진다 — PIP 는 정상상태 ~6ms 라 p95 에 유의미하지 않다.
+    # nearest[]/areas[] 에는 적용하지 않는다(그쪽은 '주변 무엇'이지 '이 점의 주소'가 아니다).
+    # knn_meta(거리·산 여부)는 D-1 교차검증 가드 전용이다 — 응답에는 실리지 않는다.
+    address, knn_meta = addr_at(cur, lon, lat, with_meta=True)
+    address = apply_parcel_pip(address, parcel_at(cur, lon, lat), knn_meta)
     pt = "ST_SetSRID(ST_MakePoint(%s,%s),4326)"
     # addr_at 과 동일한 이유로 bbox 선행(0.25° > 20km 의 경도 상한 0.2299°).
     cur.execute(
