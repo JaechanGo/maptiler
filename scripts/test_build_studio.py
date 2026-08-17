@@ -241,6 +241,19 @@ class IsolatedBuildHome(unittest.TestCase):
         self.addCleanup(setattr, M, "_DB_READY", M._DB_READY)
         M._DB_READY = False
 
+    # ── 공통 단언 ──────────────────────────────────────────────
+    def assertNeverTargeted(self, *paths):
+        """파괴 프리미티브 8지점 중 **어느 것도** 해당 경로를 인자로 받지 않았다.
+
+        "결과적으로 내용이 남아 있다"보다 강한 단언이다 — 파괴를 시도했다가
+        우연히 복구된 경우까지 잡는다. 실패 경로 전용(성공 교체는 `os.replace(dest, …)`
+        를 정상적으로 부른다).
+        """
+        want = {os.path.realpath(str(p)) for p in paths}
+        for prim, args in self.destructive:
+            for a in args:
+                self.assertNotIn(os.path.realpath(a), want, f"{prim} 가 dest 를 건드렸다")
+
     # ── 테스트 편의 ────────────────────────────────────────────
     def use_sources_copy(self, dest_overrides=None):
         """data-sources.json 을 tmp 로 복사하고 build_input.dest 를 재지정한다.
@@ -515,6 +528,24 @@ class TestHttpDownloadCL(unittest.TestCase):
         dest = os.path.join(self.td, "h4.part")
         size = M._http_download("https://example.test/f", dest, retries=1)
         self.assertEqual(size, len(body))
+
+    # ── A1: 0바이트는 '성공적으로 0바이트 수신'이 아니라 실패다 ──
+    def test_H5_zero_byte_body_raises(self):
+        """CL=0 이면 대조를 통과해버린다 — 이번 사고의 262건이 전부 이 경로였다.
+        반환값(0)이 아니라 **예외**로 전파해야 재시도 백오프와 상위 실패처리가 걸린다."""
+        self._patch(b"", {"Content-Length": "0"})
+        dest = os.path.join(self.td, "h5.part")
+        with self.assertRaises(Exception) as ctx:
+            M._http_download("https://example.test/f", dest, retries=1)
+        self.assertIn("0바이트", str(ctx.exception))
+
+    def test_H5_zero_byte_without_content_length_raises(self):
+        """CL 부재(chunked)라 대조 자체가 생략되는 경로도 막는다."""
+        self._patch(b"", {})
+        dest = os.path.join(self.td, "h5b.part")
+        with self.assertRaises(Exception) as ctx:
+            M._http_download("https://example.test/f", dest, retries=1)
+        self.assertIn("0바이트", str(ctx.exception))
 
 
 # ── I. 격리 안전망 자체 검증 ─────────────────────────────────────
@@ -1042,12 +1073,6 @@ class TestLoadManifest(IsolatedBuildHome):
         rec = M.load_versions().get(key, {})
         self.assertIsNone(rec.get("staged_sig"), "복원하지도 않고 거짓 서명을 남겼다")
 
-    def assertNeverTargeted(self, *paths):
-        want = {os.path.realpath(str(p)) for p in paths}
-        for prim, args in self.destructive:
-            for a in args:
-                self.assertNotIn(os.path.realpath(a), want, f"{prim} 가 dest 를 건드렸다")
-
     # ── M1: 핵심 회귀 — 원본 부재 시 dest 무손상 + skipped + 서명 미기록 ──
     def test_M1_missing_store_keeps_dest_and_skips(self):
         mid = self.write_manifest({self.DIRKEY: {"sha": "de" * 32, "current": "2026-08-01",
@@ -1328,6 +1353,226 @@ class TestCollectUpload(IsolatedBuildHome):
         with self.assertRaises(M._UploadRejected):
             self.apply(self.stage_tmp(truncated=True))
         self.assertFalse(M._COLLECT_LOCK.locked(), "락을 물고 나왔다")
+
+
+# ════════════════════════════════════════════════════════════════
+# T027 2단계-C: run_collect 배선 (A2 동수불변식·A3′ 선삭제 제거·A5 배지·A6 status)
+# ════════════════════════════════════════════════════════════════
+class _ShortList(list):
+    """`len()` 은 선언대로지만 실제로는 그보다 적게 내놓는 URL 목록.
+
+    parcel 258→262 처럼 **목록 산출 개수와 실제 수신 개수가 어긋나는 부분수신**을
+    모사한다. 동수 불변식이 없으면 반쪽 수신물이 그대로 staged 를 갈아끼운다.
+    """
+
+    def __init__(self, items, declared):
+        super().__init__(items)
+        self._declared = declared
+
+    def __len__(self):
+        return self._declared
+
+
+class TestRunCollect(IsolatedBuildHome):
+    """`run_collect` 는 **온전히 받아냈을 때만** staged 를 교체하고, 실패를 반드시 드러낸다.
+
+    사고 재현형: 262건이 전부 0바이트로 실패했는데 `rmtree(dest)` 가 **먼저** 돌아
+    staged 를 비웠고, 로그 한 줄 외엔 흔적 없이 `status="done"` 으로 끝나 UI 는
+    정상으로 보였다(무증상 고착). 배지도 예전 `ok` 가 그대로 남았다.
+    """
+
+    DIRKEY = "sangga"     # dest 확장자 없음 → 디렉터리형(extract) 분기
+    FILEKEY = "police"    # dest 를 .pbf 로 돌려 파일형(file) 분기 검사
+
+    def setUp(self):
+        super().setUp()
+        self.use_sources_copy({self.DIRKEY: "staged/sangga",
+                               self.FILEKEY: "staged/osm/korea.osm.pbf"})
+        self.dest = self.home / "staged" / "sangga"
+        self.orig = {"keep.csv": b"name,lon,lat\nold,127.0,37.0\n"}
+        _fill_files(self.orig)(self.dest)
+        self.fdest = self.home / "staged" / "osm" / "korea.osm.pbf"
+        self.fdest.parent.mkdir(parents=True, exist_ok=True)
+        self.forig = b"OLD-PBF-PAYLOAD"
+        self.fdest.write_bytes(self.forig)
+        self.plans, self.served = {}, {}
+        # 실 출처 레지스트리 대신 픽스처를 물린다 — URL·dest·mode 를 케이스별로 통제한다.
+        self.patch(M, "_collect_plan", lambda key: self.plans[key])
+        self.patch(M, "_http_download", self._fake_download)
+
+    # ── 픽스처 ────────────────────────────────────────────────
+    def patch(self, owner, name, new):
+        p = mock.patch.object(owner, name, new)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def spy_on(self, name):
+        """`M.<name>` 호출을 기록하되 실제 동작은 유지 — 첫 인자(dest)만 모은다."""
+        seen = []
+        real = getattr(M, name)
+        self.patch(M, name, lambda *a, **k: (seen.append(str(a[0])), real(*a, **k))[1])
+        return seen
+
+    def _fake_download(self, url, dest, headers=None, **kw):
+        """실 네트워크 대신 등록된 핸들러 — urlopen 은 하네스가 이미 차단한다."""
+        return self.served[url](pathlib.Path(dest))
+
+    def plan(self, key, urls, dest, mode):
+        self.plans[key] = ({"key": key}, urls, str(dest), mode)
+
+    def serve_zip(self, url, names=("new.csv",)):
+        def h(tmp):
+            _make_valid_zip(tmp, names=names)
+            return tmp.stat().st_size
+        self.served[url] = h
+
+    def serve_raw(self, url, raw):
+        def h(tmp):
+            tmp.write_bytes(raw)
+            return len(raw)
+        self.served[url] = h
+
+    def serve_fail(self, url, msg="차단/에러 리다이렉트"):
+        def h(tmp):
+            raise RuntimeError(msg)
+        self.served[url] = h
+
+    # ── 공통 단언 ──────────────────────────────────────────────
+    def rec(self, key):
+        return M.load_versions().get(key, {})
+
+    def job(self):
+        return M.MGR.jobs["collect"]
+
+    def assertDirIntact(self):
+        self.assertEqual(_tree(self.dest), self.orig, "실패했는데 기존 staged 가 훼손됐다")
+
+    def assertFileIntact(self):
+        self.assertEqual(self.fdest.read_bytes(), self.forig, "실패했는데 파일형 dest 가 훼손됐다")
+
+    # ── A3′: 실패해도 기존 staged 는 보존된다 (핵심 회귀) ────────
+    def test_C1_dir_failure_keeps_existing_staged(self):
+        """1개라도 못 받으면 교체 자체를 하지 않는다 — 예전엔 rmtree 가 선행해 빈 디렉터리만 남았다."""
+        self.plan(self.DIRKEY, ["u1", "u2"], self.dest, "extract")
+        self.serve_zip("u1")
+        self.serve_fail("u2")
+        M.run_collect([self.DIRKEY])
+        self.assertDirIntact()
+        self.assertIsNone(self.rec(self.DIRKEY).get("staged_sig"), "받지도 못하고 거짓 서명을 남겼다")
+
+    def test_C1_no_destructive_primitive_targets_dest_on_failure(self):
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_fail("u1")
+        self.plan(self.FILEKEY, ["f1"], self.fdest, "file")
+        self.serve_fail("f1")
+        M.run_collect([self.DIRKEY, self.FILEKEY])
+        self.assertNeverTargeted(self.dest, self.fdest)
+        self.assertDirIntact()
+        self.assertFileIntact()
+
+    def test_C1_empty_but_valid_payload_never_empties_staged(self):
+        """무결성 게이트를 **통과하는** 빈 zip — 사고의 실제 형태이자 아직 안 막힌 경로.
+
+        `_payload_integrity` 판정이 ('healthy','zip')이라 게이트가 통과시키고,
+        예전 코드는 rmtree 뒤 추출물 0건이라 staged 를 빈 디렉터리로 만들었다.
+        (0바이트 원본은 게이트가 'corrupt'로 이미 막는다 — 이쪽이 남은 구멍이다.)
+        """
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+
+        def h(tmp):
+            _make_empty_zip(tmp)
+            return tmp.stat().st_size
+        self.served["u1"] = h
+        M.run_collect([self.DIRKEY])
+        self.assertDirIntact()
+        self.assertNeverTargeted(self.dest)
+        self.assertEqual(self.job()["status"], "error")
+        self.assertEqual(self.rec(self.DIRKEY).get("validation_status"), "collect_failed")
+        self.assertIsNone(self.rec(self.DIRKEY).get("staged_sig"),
+                          "빈 수신물에 서명을 남기면 다음 회차가 '변경 없음'으로 건너뛴다")
+
+    def test_C1_file_failure_keeps_existing_dest(self):
+        self.plan(self.FILEKEY, ["f1"], self.fdest, "file")
+        self.serve_fail("f1")
+        M.run_collect([self.FILEKEY])
+        self.assertFileIntact()
+        self.assertIsNone(self.rec(self.FILEKEY).get("staged_sig"))
+
+    # ── A2: 동수 불변식 — 부분수신은 교체 전에 멈춘다 ────────────
+    def test_C1_partial_receipt_aborts_before_swap(self):
+        self.plan(self.DIRKEY, _ShortList(["u1"], declared=2), self.dest, "extract")
+        self.serve_zip("u1")
+        M.run_collect([self.DIRKEY])
+        self.assertDirIntact()
+        self.assertNeverTargeted(self.dest)
+        self.assertEqual(self.rec(self.DIRKEY).get("validation_status"), "collect_failed")
+        self.assertIsNone(self.rec(self.DIRKEY).get("staged_sig"))
+        self.assertEqual(self.job()["status"], "error")
+
+    def test_C1_full_receipt_passes_invariant(self):
+        """동수면 통과한다 — 절대 개수 상수가 아니라 **동수 불변식**임을 고정한다."""
+        self.plan(self.DIRKEY, ["u1", "u2", "u3"], self.dest, "extract")
+        for u, nm in (("u1", "a.csv"), ("u2", "b.csv"), ("u3", "c.csv")):
+            self.serve_zip(u, names=(nm,))
+        M.run_collect([self.DIRKEY])
+        self.assertEqual(self.job()["status"], "done")
+        self.assertEqual(sorted(_tree(self.dest)), ["a.csv", "b.csv", "c.csv"])
+
+    # ── A5: 배지 — 성공/실패가 상태 컬럼에 남는다 ────────────────
+    def test_C1_success_writes_collect_ok_badge(self):
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_zip("u1")
+        M.run_collect([self.DIRKEY])
+        r = self.rec(self.DIRKEY)
+        self.assertEqual(r.get("validation_status"), "collect_ok")
+        self.assertIn("1파일", r.get("validation_msg") or "")
+
+    def test_C1_stale_ok_badge_is_overwritten_by_failure(self):
+        """무증상성의 직접 원인 — 실패해도 예전 `ok` 배지가 남아 UI 는 정상으로 보였다."""
+        M._set_validation(self.DIRKEY, "ok", "예전 검증 통과")
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_fail("u1", "빈 응답(0바이트) — 세션/권한 확인")
+        M.run_collect([self.DIRKEY])
+        r = self.rec(self.DIRKEY)
+        self.assertEqual(r.get("validation_status"), "collect_failed")
+        self.assertIn("0바이트", r.get("validation_msg") or "")
+
+    # ── A6: 실패 1건이면 정상 종료 경로에서도 status="error" ──────
+    def test_C1_status_error_on_normal_exit_when_item_failed(self):
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_fail("u1")
+        self.plan(self.FILEKEY, ["f1"], self.fdest, "file")
+        self.serve_raw("f1", b"NEW-PBF-PAYLOAD")
+        M.run_collect([self.DIRKEY, self.FILEKEY])
+        self.assertEqual(self.job()["status"], "error", "262건 전부 실패해도 done 이던 그 경로다")
+        self.assertTrue(self.job()["log"][-1].startswith("실패 1건"),
+                        f"실패 건수가 마지막 줄 선두에 없다: {self.job()['log'][-1]!r}")
+
+    def test_C1_status_done_when_all_succeeded(self):
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_zip("u1")
+        M.run_collect([self.DIRKEY])
+        self.assertEqual(self.job()["status"], "done")
+        self.assertTrue(self.job()["log"][-1].startswith("OK:"))
+
+    # ── 프리미티브 통일 — 파일형/디렉터리형 모두 스왑을 거친다 ────
+    def test_C1_file_branch_goes_through_swap_file(self):
+        seen = self.spy_on("_swap_file")
+        self.plan(self.FILEKEY, ["f1"], self.fdest, "file")
+        self.serve_raw("f1", b"NEW-PBF-PAYLOAD")
+        M.run_collect([self.FILEKEY])
+        self.assertEqual(seen, [str(self.fdest)], "파일형이 아직 copy2 로 dest 를 직접 덮는다")
+        self.assertEqual(self.fdest.read_bytes(), b"NEW-PBF-PAYLOAD")
+        self.assertFalse((self.fdest.parent / (self.fdest.name + ".incoming")).exists())
+
+    def test_C1_dir_branch_goes_through_swap_dir(self):
+        seen = self.spy_on("_swap_dir")
+        self.plan(self.DIRKEY, ["u1"], self.dest, "extract")
+        self.serve_zip("u1")
+        M.run_collect([self.DIRKEY])
+        self.assertEqual(seen, [str(self.dest)], "디렉터리형이 아직 rmtree+재추출로 돈다")
+        self.assertEqual(sorted(_tree(self.dest)), ["new.csv"])
+        self.assertFalse((self.dest.parent / (self.dest.name + ".incoming")).exists())
 
 
 if __name__ == "__main__":

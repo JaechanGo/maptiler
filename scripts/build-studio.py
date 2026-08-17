@@ -1141,6 +1141,19 @@ def _collect_integrity_gate(tmp, item_key, sz):
         raise RuntimeError(f"수집 무결성 거부({verdict}): {item_key} — {detail} ({sz/1e6:.1f}MB)")
 
 
+def _assert_full_receipt(item_key, shas, expected_n):
+    """부분 수신 차단 — 목록 개수와 실제 수신 개수의 **동수 불변식**만 본다.
+
+    절대 개수를 상수로 박지 않는다: parcel 은 원본 파일 수가 258→262 로 변동하므로
+    "몇 개여야 한다"는 판정은 정상 증감에서 오탐이 된다. 볼 수 있는 건 "이번 회차에
+    목록으로 뽑은 만큼 전부 받아냈는가" 뿐이다.
+
+    **파괴적 교체 전에** 불러야 한다 — 반쪽 수신물로 staged 를 갈아끼우는 게 이번 사고다.
+    """
+    if len(shas) != expected_n:
+        raise RuntimeError(f"부분 수신: {item_key} — {len(shas)}/{expected_n}파일만 수신, 교체 중단")
+
+
 def _http_download(url, dest, headers=None, retries=3, timeout=900):
     """파일 다운로드 — 302→/error·HTML 에러페이지 감지 + 백오프 재시도. 스트리밍 저장, size 반환."""
     hd = {**_DL_HEADERS, **(headers or {})}
@@ -1170,6 +1183,12 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
             # transport gzip(CE=gzip 등) 또는 chunked(CL 부재) 는 압축/미선언이라 대조 생략(오탐 방지) →
             # 절단은 _payload_integrity(매직↔구조 정합)가 보완. 재시도 루프 안이라 raise 시 백오프 재시도됨.
             written = os.path.getsize(dest)
+            # A1: 0바이트는 '성공적으로 0바이트를 받았다'가 아니라 실패다. CL=0 이면 아래
+            # 대조를 정상 통과해버리고(수신 0 == 선언 0), CL 부재면 대조 자체가 생략된다 —
+            # 이번 사고의 262건이 전부 이 틈으로 빠져나갔다. 반환값이 아니라 **예외**여야
+            # 재시도 백오프와 상위 실패처리(A5 배지·A6 status)가 걸린다.
+            if written == 0:
+                raise RuntimeError(f"0바이트 수신: 빈 응답은 성공이 아니다  [url={url}]")
             if cl_raw is not None and ce in ("", "identity"):
                 try:
                     expected = int(cl_raw.strip())
@@ -1738,12 +1757,13 @@ def run_collect(selected):
         MGR.publish({"kind": "collect", "status": "running", "progress": 0.0})
         STORE_DIR.mkdir(parents=True, exist_ok=True)
         tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
-        total = len(selected); done = 0; changed = []
+        total = len(selected); done = 0; changed = []; failed = 0
         for item_key in selected:
             try:
                 src, urls, dest, mode = _collect_plan(item_key)
                 hdrs = _collect_headers(src)   # vworld_session 이면 로그인 세션 쿠키 주입
-                MGR._emit("collect", f"⇩ {item_key} 다운로드 ({len(urls)}파일)…")
+                expected_n = len(urls)   # A2 동수 불변식 기준 — 루프 진입 전에 확정한다
+                MGR._emit("collect", f"⇩ {item_key} 다운로드 ({expected_n}파일)…")
                 shas = []
                 if mode == "file":
                     destp = pathlib.Path(dest); destp.parent.mkdir(parents=True, exist_ok=True)
@@ -1751,8 +1771,10 @@ def run_collect(selected):
                     sz = _http_download(urls[0], tmp, headers=hdrs)
                     _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트
                     sha, reused = store_put(tmp); shas.append(sha)
+                    _assert_full_receipt(item_key, shas, expected_n)   # 교체 전 마지막 관문
                     if not reused or not destp.exists():
-                        shutil.copy2(store_path(sha), destp)
+                        # copy2 는 dest 를 먼저 truncate 한다 — 형제 .incoming 경유 원자 교체로 대체.
+                        _swap_file(destp, store_path(sha), on=lambda m: MGR._emit("collect", f"  {m}"))
                     MGR._emit("collect", f"  {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ' → 배치'}")
                 else:
                     allreused = True
@@ -1761,11 +1783,16 @@ def run_collect(selected):
                         sz = _http_download(u, tmp, headers=hdrs)
                         _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트(루프 내)
                         sha, reused = store_put(tmp); shas.append(sha); allreused = allreused and reused
-                        MGR._emit("collect", f"  파일{i+1}/{len(urls)} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
+                        MGR._emit("collect", f"  파일{i+1}/{expected_n} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
+                    _assert_full_receipt(item_key, shas, expected_n)   # 교체 전 마지막 관문
                     if (not allreused) or (not _nonempty_dir(pathlib.Path(dest))):
-                        shutil.rmtree(dest, ignore_errors=True)
-                        for sha in shas:
-                            _extract_into(store_path(sha), dest)
+                        # 예전엔 rmtree(dest) 를 **먼저** 때린 뒤 추출했다 — 추출물이 0건이면
+                        # 그대로 빈 디렉터리가 남았다(이번 사고). 형제 .incoming 에 다 채운
+                        # 뒤에만 갈아끼운다. 채우다 실패하면 dest 는 손도 대지 않는다.
+                        def _fill(staging, _shas=list(shas)):
+                            for s in _shas:
+                                _extract_into(store_path(s), staging)
+                        _swap_dir(dest, _fill, on=lambda m: MGR._emit("collect", f"  {m}"))
                 cur_sha = ",".join(shas); prev = ver.get(item_key, {}).get("staged_sig")
                 rec = ver.setdefault(item_key, {})
                 rec["staged_sig"] = cur_sha; rec["current"] = time.strftime("%Y-%m-%d")
@@ -1773,8 +1800,19 @@ def run_collect(selected):
                 save_versions({item_key: rec})
                 changed.append(item_key) if cur_sha != prev else None
                 MGR._emit("collect", f"  {'✓ 갱신' if cur_sha != prev else '= 변경 없음'}: {item_key}")
+                # save_versions 뒤에 둔다 — 그쪽이 _STATE_COLS 전량을 rec 값으로 덮어써
+                # 먼저 쓰면 낡은 배지로 되돌아간다.
+                _set_validation(item_key, "collect_ok",
+                                f"{len(shas)}파일 수집 {'갱신' if cur_sha != prev else '변경 없음'}")
             except Exception as e:
+                failed += 1
                 MGR._emit("collect", f"  ✗ {item_key}: {str(e)[:140]}")
+                # 실패를 상태 컬럼에 남겨 **낡은 `ok` 배지를 덮는다** — 남겨두면 UI 상
+                # 정상으로 보여 소실이 무증상으로 굳는다(이번 사고의 고착 원인).
+                try:
+                    _set_validation(item_key, "collect_failed", str(e)[:200])
+                except Exception as e2:   # 상태 기록 실패가 원래 원인을 가리지 않게
+                    MGR._emit("collect", f"  ! 상태 기록 실패: {str(e2)[:100]}")
             done += 1
             MGR.jobs["collect"]["progress"] = done / max(total, 1)
             MGR.publish({"kind": "collect", "status": "running", "progress": done / max(total, 1)})
@@ -1784,9 +1822,14 @@ def run_collect(selected):
             if bt:
                 MGR._emit("collect", f"  ▶ OSM 변환 빌드 enqueue: {', '.join(bt)}")
                 MGR.enqueue(bt)
-        MGR.jobs["collect"]["status"] = "done"
-        MGR._emit("collect", f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
-        MGR.publish({"kind": "collect", "status": "done", "progress": 1.0})
+        # A6: 예외 없이 끝나도 item 실패가 있으면 error 다. 예전엔 262건 전부 실패해도
+        # done 이라 UI·SSE 어디에도 사고가 드러나지 않았다. 예외 이탈 시엔 여기 도달
+        # 자체를 못 하므로 _collect_guarded 의 error 와 경합하지 않는다.
+        st = "error" if failed else "done"
+        MGR.jobs["collect"]["status"] = st
+        MGR._emit("collect", f"실패 {failed}건 — 수집 종료(변경 {len(changed)}/{total})" if failed
+                  else f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
+        MGR.publish({"kind": "collect", "status": st, "progress": 1.0})
         return changed
 
 
