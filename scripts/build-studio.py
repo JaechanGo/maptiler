@@ -1853,6 +1853,62 @@ def save_manifest(name=None, with_bundle=False):
     return man
 
 
+class _UploadRejected(Exception):
+    """업로드 거부 — `code` 는 그대로 HTTP 상태로 나간다."""
+
+    def __init__(self, msg, code=400):
+        super().__init__(msg)
+        self.code = code
+
+
+def _apply_upload(key, name, dest, tmp, written, nbytes):
+    """수신이 끝난 임시파일을 **검증한 뒤에만** staged 로 적재한다(C-9).
+
+    예전에는 게이트가 하나도 없었다. 연결이 끊겨 `written < nbytes` 여도 그대로
+    `rmtree(dest)` → 반쪽 파일 추출 → 성공 응답이 나갔고, `_record_upload` 도 부르지
+    않아 파일을 갈아끼워도 옛 `ok` 검증 배지가 남았다. 수집 경로만 고치면 같은 사고가
+    이 통로로 그대로 재현된다.
+
+    락은 **파괴 구간에만** 잡는다(C-11). 다GB 스트리밍과 무결성 검사를 락 안에 넣으면
+    업로드가 도는 내내 수집이 통째로 막힌다. 수신 루프는 아예 이 함수 밖(핸들러)에 있고,
+    여기서도 `store_put` 까지는 락 없이 진행한다. `_swap_dir`/`_swap_file` 은 락을 잡지
+    않으므로(C-6) 획득 지점은 아래 한 곳뿐이다.
+
+    반환: sha — 실패는 전부 `_UploadRejected`. **어느 실패 경로에서도 dest 는 무손상.**
+    """
+    if nbytes <= 0:
+        raise _UploadRejected("본문 길이 없음 — 빈 업로드는 적재하지 않는다", 400)
+    if written != nbytes:
+        raise _UploadRejected(
+            f"수신 불완전 — {written:,}/{nbytes:,}바이트만 도착했다. 기존 파일은 그대로 두었다", 400)
+    try:
+        _collect_integrity_gate(tmp, key, written)     # truncated/corrupt 면 tmp 폐기 후 raise
+    except RuntimeError as e:
+        raise _UploadRejected(f"업로드 무결성 거부: {str(e)[:120]}", 400) from e
+
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+    sha, _ = store_put(tmp)                            # 여기까지 dest 는 손도 대지 않았다
+    sp = store_path(sha)
+
+    if not _COLLECT_LOCK.acquire(timeout=_COLLECT_LOCK_WAIT):
+        raise _UploadRejected("수집이 진행 중이라 적재할 수 없다 — 수집이 끝난 뒤 다시 시도하라", 409)
+    try:
+        if dest.suffix:                                # 파일형(osm .pbf)
+            _swap_file(dest, sp)
+        else:
+            _swap_dir(dest, lambda staging: _extract_into(sp, staging))
+        _record_upload(key, name, written)             # 이력 + 검증배지 pending 리셋
+        # `_record_upload` 가 건드린 뒤에 읽어야 pending 이 살아남는다
+        # (`validation_status` 도 `_STATE_COLS` 라 옛 스냅샷을 쓰면 방금 리셋한 배지를 되돌린다).
+        ver = load_versions(); rec = ver.setdefault(key, {})
+        rec["staged_sig"] = sha
+        rec["current"] = time.strftime("%Y-%m-%d"); rec["file"] = name
+        save_versions({key: rec})
+    finally:
+        _COLLECT_LOCK.release()
+    return sha
+
+
 def load_manifest(mid):
     """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로.
 
@@ -2186,6 +2242,7 @@ class H(BaseHTTPRequestHandler):
             tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
             tmp = tmpdir / ("up_" + key.replace(":", "_") + "_" + name.replace("/", "_"))
             nbytes = int(self.headers.get("Content-Length", "0")); written = 0
+            # 수신은 락 **밖**에서(C-11). 다GB 업로드가 도는 내내 수집이 막히면 안 된다.
             try:
                 with open(tmp, "wb") as o:
                     rem = nbytes
@@ -2193,13 +2250,16 @@ class H(BaseHTTPRequestHandler):
                         ch = self.rfile.read(min(1 << 20, rem))
                         if not ch: break
                         o.write(ch); rem -= len(ch); written += len(ch)
-                STORE_DIR.mkdir(parents=True, exist_ok=True)
-                sha, _ = store_put(tmp)
-                shutil.rmtree(dest, ignore_errors=True); _extract_into(store_path(sha), dest)
-                ver = load_versions(); rec = ver.setdefault(key, {})
-                rec["staged_sig"] = sha; rec["current"] = time.strftime("%Y-%m-%d"); rec["file"] = name
-                save_versions({key: rec})
             except Exception as e:
+                _rm_path(tmp, ignore_errors=True)
+                return self._json({"error": f"수신 실패: {str(e)[:120]}"}, 500)
+            try:
+                sha = _apply_upload(key, name, dest, tmp, written, nbytes)
+            except _UploadRejected as e:
+                _rm_path(tmp, ignore_errors=True)
+                return self._json({"error": str(e), "size": written, "expected": nbytes}, e.code)
+            except Exception as e:
+                _rm_path(tmp, ignore_errors=True)
                 return self._json({"error": f"적재 실패: {str(e)[:120]}"}, 500)
             return self._json({"ok": True, "key": key, "size": written, "sha": sha[:8]})
         if self.path == "/api/collect/check":   # 항목별(하위 포함) 최신일 조회

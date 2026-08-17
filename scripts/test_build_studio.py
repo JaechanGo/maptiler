@@ -1189,5 +1189,146 @@ class TestSwapFile(IsolatedBuildHome):
         self.assertEqual(fresh.read_bytes(), b"X")
 
 
+# ════════════════════════════════════════════════════════════════
+# /api/collect/upload — 사용자 업로드 경로의 무결성(C-9) 과 락 범위(C-11)
+# ════════════════════════════════════════════════════════════════
+class TestCollectUpload(IsolatedBuildHome):
+    DIRKEY = "sangga"
+    FILEKEY = "police"
+
+    def setUp(self):
+        super().setUp()
+        self.use_sources_copy({self.DIRKEY: "staged/sangga",
+                               self.FILEKEY: "staged/osm/korea.osm.pbf"})
+        self.dest = self.home / "staged" / "sangga"
+        self.orig = {"keep.csv": b"name,lon,lat\nold,127.0,37.0\n"}
+        _fill_files(self.orig)(self.dest)
+        self.fdest = self.home / "staged" / "osm" / "korea.osm.pbf"
+        self.fdest.parent.mkdir(parents=True, exist_ok=True)
+        self.forig = b"OLD-PBF-PAYLOAD"
+        self.fdest.write_bytes(self.forig)
+        self.tmpdir = self.home / "tmp"; self.tmpdir.mkdir(parents=True, exist_ok=True)
+
+    # ── 픽스처 ────────────────────────────────────────────────
+    def stage_tmp(self, name="up.zip", *, raw=None, truncated=False):
+        """수신이 끝난 상태의 임시파일 — 핸들러의 스트리밍 루프가 남기는 것과 같은 자리."""
+        p = self.tmpdir / name
+        if raw is not None: p.write_bytes(raw)
+        elif truncated: _make_truncated_zip(p)
+        else: _make_valid_zip(p, names=("new.csv",))
+        return p
+
+    def apply(self, tmp, *, key=None, name="sangga_202601.zip", dest=None,
+              written=None, nbytes=None):
+        full = tmp.stat().st_size
+        return M._apply_upload(key or self.DIRKEY, name,
+                               self.dest if dest is None else dest, tmp,
+                               full if written is None else written,
+                               full if nbytes is None else nbytes)
+
+    def history(self, key):
+        c = M._db()
+        try:
+            return c.execute("SELECT file, size FROM upload_history WHERE key=?", (key,)).fetchall()
+        finally:
+            c.close()
+
+    # ── 공통 단언 ──────────────────────────────────────────────
+    def assertDestIntact(self):
+        self.assertEqual(_tree(self.dest), self.orig, "dest 원본이 훼손됐다")
+        self.assertEqual(self.fdest.read_bytes(), self.forig, "파일형 dest 가 훼손됐다")
+
+    def assertNoSignature(self, key=None):
+        rec = M.load_versions().get(key or self.DIRKEY, {})
+        self.assertIsNone(rec.get("staged_sig"), "적재하지도 않고 서명을 남겼다")
+
+    # ── U1: 무결성 게이트 — 이게 없어서 같은 사고가 업로드로 재현된다 ──
+    def test_U1_partial_receive_rejected_and_dest_kept(self):
+        """`written < nbytes` — 예전엔 그대로 성공 응답이 나가고 dest 가 rmtree 됐다."""
+        tmp = self.stage_tmp()
+        with self.assertRaises(M._UploadRejected):
+            self.apply(tmp, written=tmp.stat().st_size - 3)
+        self.assertDestIntact()
+        self.assertNoSignature()
+        self.assertEqual(self.history(self.DIRKEY), [], "실패했는데 업로드 이력이 남았다")
+
+    def test_U1_zero_length_rejected(self):
+        tmp = self.stage_tmp(raw=b"")
+        with self.assertRaises(M._UploadRejected):
+            self.apply(tmp, written=0, nbytes=0)
+        self.assertDestIntact()
+        self.assertNoSignature()
+
+    def test_U1_corrupt_payload_rejected_by_gate(self):
+        """수신 바이트 수가 맞아도 내용이 깨졌으면 store 에 넣지 않고 거절한다."""
+        tmp = self.stage_tmp(truncated=True)
+        with self.assertRaises(M._UploadRejected):
+            self.apply(tmp)
+        self.assertDestIntact()
+        self.assertNoSignature()
+
+    def test_U1_no_destructive_primitive_targets_dest_on_failure(self):
+        tmp = self.stage_tmp()
+        with self.assertRaises(M._UploadRejected):
+            self.apply(tmp, written=1)
+        want = {os.path.realpath(str(p)) for p in (self.dest, self.fdest)}
+        for prim, args in self.destructive:
+            for a in args:
+                self.assertNotIn(os.path.realpath(a), want, f"{prim} 가 dest 를 건드렸다")
+
+    # ── U2: 정상 적재 + 배지 배선 ──────────────────────────────
+    def test_U2_success_replaces_dest_and_records_signature(self):
+        sha = self.apply(self.stage_tmp())
+        self.assertEqual(sorted(_tree(self.dest)), ["new.csv"])
+        rec = M.load_versions()[self.DIRKEY]
+        self.assertEqual(rec["staged_sig"], sha)
+        self.assertEqual(rec["file"], "sangga_202601.zip")
+
+    def test_U2_wires_record_upload_so_badge_resets(self):
+        """`_record_upload` 미배선이라 파일을 갈아도 옛 `ok` 배지가 남아 있었다."""
+        M._set_validation(self.DIRKEY, "ok", "이전 검증 통과")
+        tmp = self.stage_tmp(); size = tmp.stat().st_size   # store_put 이 tmp 를 옮겨간다
+        self.apply(tmp)
+        rec = M.load_versions()[self.DIRKEY]
+        self.assertEqual(rec.get("validation_status"), "pending", "옛 배지가 그대로 남았다")
+        self.assertIsNone(rec.get("validation_msg"))
+        self.assertEqual(self.history(self.DIRKEY), [("sangga_202601.zip", size)])
+
+    def test_U2_file_type_dest_swapped_atomically(self):
+        tmp = self.stage_tmp("new.pbf", raw=b"NEW-PBF-PAYLOAD")
+        self.apply(tmp, key=self.FILEKEY, name="korea.osm.pbf", dest=self.fdest)
+        self.assertEqual(self.fdest.read_bytes(), b"NEW-PBF-PAYLOAD")
+        self.assertFalse((self.fdest.parent / (self.fdest.name + ".incoming")).exists())
+
+    # ── U3: 락 범위 — 파괴 구간만(C-11) ────────────────────────
+    def test_U3_refuses_while_collect_holds_lock(self):
+        tmp = self.stage_tmp()
+        with self.collect_lock():
+            with self.assertRaises(M._UploadRejected) as cm:
+                self.apply(tmp)
+        self.assertEqual(cm.exception.code, 409)
+        self.assertDestIntact()
+        self.assertNoSignature()
+
+    def test_U3_lock_only_around_destructive_section(self):
+        """무결성 검사·store_put 은 락 밖, 교체만 락 안 — 다GB 업로드가 수집을 막지 않게."""
+        seen = {}
+        real_gate, real_swap = M._collect_integrity_gate, M._swap_dir
+        self.addCleanup(setattr, M, "_collect_integrity_gate", real_gate)
+        self.addCleanup(setattr, M, "_swap_dir", real_swap)
+        M._collect_integrity_gate = lambda *a, **k: (
+            seen.__setitem__("gate", M._COLLECT_LOCK.locked()), real_gate(*a, **k))[1]
+        M._swap_dir = lambda *a, **k: (
+            seen.__setitem__("swap", M._COLLECT_LOCK.locked()), real_swap(*a, **k))[1]
+        self.apply(self.stage_tmp())
+        self.assertFalse(seen["gate"], "무결성 검사가 락 안에서 돌았다 — 수신 구간이 수집을 막는다")
+        self.assertTrue(seen["swap"], "교체가 락 없이 돌았다")
+
+    def test_U3_lock_released_after_failure(self):
+        with self.assertRaises(M._UploadRejected):
+            self.apply(self.stage_tmp(truncated=True))
+        self.assertFalse(M._COLLECT_LOCK.locked(), "락을 물고 나왔다")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
