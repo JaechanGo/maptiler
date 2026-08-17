@@ -39,7 +39,8 @@ import unicodedata
 
 # dedup_er.py:21 원문
 _CORP = re.compile(r"(주식회사|유한회사|유한책임회사|합자회사|합명회사|재단법인|사단법인|의료법인|\(주\)|㈜|\(유\)|\(재\)|\(사\))")
-# dedup_er.py:23 원문
+# 지점표시 토큰(공백분리 마지막 토큰에만 적용 → '파리바게뜨신촌점' 같은 무공백 상호를 깎지 않음)
+# dedup_er.py:22-23 원문. corenrm 외에 dedup_er.branch_of 도 참조한다
 _BRANCH_TOK = re.compile(r"^(본점|직영점|가맹점|영업소|지점|\d{1,3}호점|.{1,5}점)$")
 # dedup_er.py:24 원문 — biznrm_nfkc / corenrm 전용
 _PUNCT = re.compile(r"[\s()\[\]{}<>（）【】·.,/&\-]+")
