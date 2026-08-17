@@ -13,10 +13,10 @@ T6-A 좌표 선정   — 정수 '도' 컬럼 대신 십진 컬럼을 고르는�
 T6-B 계약 불변   — load_facility.pick() 이 여전히 인덱스를 돌려주고
                    override 분기가 살아 있는가
 T6-C 배선        — 11b 가 사본을 지우고 정본을 import 하는가
-T6-D 인코딩      — cp949·utf-8 정상 파싱, 손상 파일은 SystemExit
-                   (11b 쪽 단언은 커밋 9 에서 추가한다)
+T6-D 인코딩      — cp949·utf-8 정상 파싱, 손상 파일은 SystemExit (양쪽 경로)
 """
 import csv
+import importlib.util
 import os
 import re
 import sys
@@ -32,6 +32,24 @@ from _common.csvheur import pick_coord, pick_coord_index  # noqa: E402
 import load_facility  # noqa: E402
 
 _11B = os.path.join(HERE, "11b-build-facility.py")
+
+
+def _load_11b():
+    """11b-build-facility.py 를 모듈로 로드 — 파일명이 숫자 시작 + 하이픈이라 import 불가.
+
+    main() 은 `__name__` 가드 안이라 실행되지 않는다. 최상위에 남는 것은 경로 계산과
+    facility-catalog.json 로드(예외 삼킴)뿐이라 부작용이 없다.
+    SRC/OUT 이 sys.argv 를 보므로 로드 동안만 argv 를 비워 unittest 인자와 섞이지 않게 한다.
+    """
+    spec = importlib.util.spec_from_file_location("_t028_11b", _11B)
+    mod = importlib.util.module_from_spec(spec)
+    argv = sys.argv[:]
+    sys.argv = [_11B]
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.argv = argv
+    return mod
 
 # 민방위대피시설 형식 — 위/경도가 DMS 분해('도' 정수)와 십진(WGS84) 두 벌로 실린다.
 # 이름만 보면 '위도(도)' 가 LAT 힌트에 먼저 걸려 좌표가 정수 격자로 뭉개진다(실사고).
@@ -194,7 +212,7 @@ class TestSourceWiring(unittest.TestCase):
 
 
 class TestEncoding(unittest.TestCase):
-    """T6-D. 인코딩 폴백 — 커밋 8 시점에는 load_facility 만, 11b 는 커밋 9 에서 추가."""
+    """T6-D. 인코딩 폴백 — load_facility 가 정본이고 커밋 9 가 11b 로 이식한다(§4.5)."""
 
     def test_read_rows_utf8(self):
         with tempfile.TemporaryDirectory() as d:
@@ -223,6 +241,70 @@ class TestEncoding(unittest.TestCase):
                 fh.write("시설명,주소\n서울역,중구\n".encode("utf-8")[:-3] + b"\x81\xff\n")
             with self.assertRaises(SystemExit):
                 load_facility.read_rows(p)
+
+
+class Test11bEncoding(unittest.TestCase):
+    """T6-D(11b). 커밋 9 — load_facility 의 인코딩 관례를 11b `read_csv()` 로 이식.
+
+    종전 11b 는 후보가 2개뿐이고 최후에 `errors="replace"` 로 **깨진 문자를 그대로
+    상호명에 실어 적재**했다. 깨진 이름이 지오코딩 색인에 들어가면 조용히 남으므로,
+    중단이 낫다(§4.5). 반환 계약 `(rows, enc)` 는 그대로 둔다 — 호출부가 enc 를 로그에 쓴다.
+    """
+
+    def setUp(self):
+        self.m = _load_11b()
+
+    def _write(self, d, name, encoding):
+        return _write_csv(
+            os.path.join(d, name), SHELTER_HEADER, SHELTER_ROWS, encoding
+        )
+
+    def test_read_csv_utf8(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows, enc = self.m.read_csv(self._write(d, "u.csv", "utf-8-sig"))
+        self.assertEqual(enc, "utf-8-sig")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["시설명"], "○○지하주차장")
+
+    def test_read_csv_cp949(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows, enc = self.m.read_csv(self._write(d, "c.csv", "cp949"))
+        self.assertEqual(enc, "cp949")
+        self.assertEqual(rows[0]["WGS84위도"], "37.5776")
+
+    def test_read_csv_corrupt_exits(self):
+        """커밋 9 의 본체. 전에는 'cp949(replace)' 로 깨진 문자를 돌려줬다."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bad.csv")
+            with open(p, "wb") as fh:
+                fh.write("시설명,주소\n서울역,중구\n".encode("utf-8")[:-3] + b"\x81\xff\n")
+            with self.assertRaises(SystemExit):
+                self.m.read_csv(p)
+
+    def test_read_csv_empty_file_is_not_fatal(self):
+        """0바이트 CSV 는 중단 사유가 아니다 — main() 이 `if not rows: continue` 로 넘긴다.
+
+        load_facility.read_rows 의 `if rows:` 재시도는 **이식하지 않는다**. 이식하면
+        빈 파일이 4후보를 모두 소진해 sys.exit 로 빌드 전체를 죽인다. 수집 단계가
+        0바이트 파일을 남긴 전례가 있어(T027) 실제로 밟는 경로다.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "empty.csv")
+            open(p, "wb").close()
+            rows, _ = self.m.read_csv(p)
+        self.assertEqual(rows, [])
+
+    def test_encoding_candidates_widened(self):
+        """후보 4개 채택 + `errors="replace"` 사본이 되살아나지 않았는가."""
+        with open(_11B, encoding="utf-8") as fh:
+            src = fh.read()
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+            self.assertIn(f'"{enc}"', src, f"인코딩 후보 {enc} 가 없다")
+        # open() 호출에 붙은 것만 본다 — docstring 이 폐지 사유로 인용하는 것과 구별해야 한다.
+        self.assertIsNone(
+            re.search(r'open\([^)]*errors="replace"', src),
+            "깨진 문자로 진행하는 폴백이 되살아났다",
+        )
 
 
 if __name__ == "__main__":

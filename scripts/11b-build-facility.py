@@ -76,15 +76,25 @@ def tm5174_to_wgs(pairs):
 
 
 def read_csv(path):
-    """인코딩 자동판별 — utf-8(BOM) 우선 strict 시도 후 cp949. 표준데이터는 cp949 가 다수."""
-    for enc in ("utf-8-sig", "cp949"):
+    """인코딩 자동판별 — utf-8(BOM) 우선 strict 시도. 표준데이터는 cp949 가 다수.
+
+    후보 목록과 실패 시 중단 정책은 postgis/load_facility.py `read_rows()` 관례를
+    따른다(T028 §4.5 — 인코딩은 그쪽이 우수했다).
+    종전에는 최후에 errors="replace" 로 깨진 문자를 그대로 상호명에 실었다. 그
+    이름은 지오코딩 색인에 들어가 조용히 남으므로, 적재보다 중단이 낫다.
+
+    빈 파일은 실패가 아니다 — rows == [] 로 돌려주고 main() 이 건너뛴다.
+    load_facility 의 `if rows:` 재시도는 이식하지 않는다: 이식하면 0바이트 CSV 가
+    후보를 모두 소진해 빌드 전체를 죽인다(수집이 0바이트를 남긴 전례가 있다).
+    OSError 는 더 이상 삼키지 않는다 — 파일 부재를 인코딩 실패로 오인해 보고했다.
+    """
+    for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
             with open(path, encoding=enc, newline="", errors="strict") as fp:
                 return list(csv.DictReader(fp)), enc
-        except (UnicodeError, OSError):
+        except UnicodeDecodeError:
             continue
-    with open(path, encoding="cp949", newline="", errors="replace") as fp:
-        return list(csv.DictReader(fp)), "cp949(replace)"
+    sys.exit(f"CSV 인코딩 판별 실패: {path}")
 
 
 def main():
