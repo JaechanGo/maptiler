@@ -7,17 +7,38 @@
 그 과정에서 `rmtree(dest)` 선삭제로 staged 원본(parcel·building)이 소실됐는데,
 `sources_state` 는 여전히 "2026-08-10 에 최신화됨"이라고 말한다. 이 무증상성이 사고를 덮었다.
 
-고착(freeze) — 정정이 두 갈래여야 하는 이유
--------------------------------------------
-`staged/parcel/` 에 0바이트 파일이 1개 남아 있어 `_nonempty_dir`(build-studio.py:468,
-`p.is_dir() and any(p.iterdir())`)이 True 를 돌려준다. 저장된 `staged_sig` 도 같은 빈 문자열
-SHA256 이라 재계산 서명과 일치해 `allreused == True` 가 된다. 그 결과 run_collect 의
-`(not allreused) or (not _nonempty_dir(dest))` 가 거짓이 되어 **재추출 자체를 건너뛴다.**
-즉 다음 수집이 "성공"으로 끝나도 손상이 영구 고착된다.
+고착(freeze) — 두 축은 store 중복제거와 `_nonempty_dir` 이다. `staged_sig` 가 아니다
+--------------------------------------------------------------------------------
+run_collect 의 재추출 분기는 `(not allreused) or (not _nonempty_dir(dest))`
+(build-studio.py:1788) 이므로, **두 항이 모두 거짓일 때만** 재추출을 건너뛴다.
+그 두 항이 고착의 두 축이다:
 
-따라서 이 스크립트의 `staged_sig` NULL 화와 0바이트 잔재를 staged 밖으로 옮기는 일은
-**반드시 같은 작업 단위에서 함께** 해야 한다. 하나만 하면 고착이 남는다.
-(향후 "staged_sig 는 기록으로 남겨두자"고 되돌리면 재발한다 — 이유를 여기 남긴다.)
+  1) store 중복제거 — `allreused` 는 `store_put()`(1054-1062) 이 돌려준 `reused` 의
+     누적(1785 `allreused = allreused and reused`)일 뿐이다. `store_put` 은
+     `dest.exists()`, 즉 **content-addressed store 에 같은 SHA 의 blob 이 이미 있는가**
+     만 보고 판단하며 `staged_sig` 를 읽지 않는다. 빈 문자열 SHA256 blob 이 이미
+     store 에 있으므로, 또 0바이트를 받으면 `reused=True` 다.
+  2) `_nonempty_dir` — `staged/parcel/` 에 0바이트 파일이 1개 남아 있어
+     `_nonempty_dir`(469-470, `p.is_dir() and any(p.iterdir())`)이 True 였다.
+
+**`staged_sig` 는 이 분기에 관여하지 않는다.** 수집 경로에서 `staged_sig` 는 사후
+기록용으로 쓰일 뿐이고(1796-1798), `staged_sig` 를 `==` 로 비교하는 곳은 529행 하나뿐인데
+거기는 업로드 적재 경로이며 비교 대상도 SHA 가 아니라 `파일명:크기` 서명(527행)이다.
+(이 docstring 의 이전 판은 "저장된 staged_sig 가 재계산 서명과 일치해 allreused 가
+True 가 된다"고 적었다. 소스와 다르므로 정정했다 — 근거만 바뀌고 결론은 그대로다.)
+
+그렇다면 `staged_sig`/`current` 를 NULL 로 만드는 것이 고치는 것은 고착이 아니라
+**거짓 "수집됨" 표시**다. 그 거짓 표시가 걸리는 곳:
+
+  · `source_presence`(826·828) present 판정 — UI 가 데이터를 보유 중이라고 말한다
+  · `_target_sig`(724-725) 빌드 입력 서명 — 입력이 안 바뀌었다고 보고 재빌드를 건넌다
+  · `_working_snapshot`(1871-1872) — 프로파일 스냅샷에 거짓 sha 가 박힌다
+  · `_referenced_shas`(2030) — 빈해시 blob 이 참조 중으로 잡혀 `gc_store` 가 못 지운다
+
+즉 `staged_sig` NULL 화(거짓 표시 제거)와 0바이트 잔재를 staged 밖으로 옮기는 일
+(고착 해제)은 **서로 다른 손상을 고치는 별개 조치**다. 그래서 **반드시 같은 작업 단위에서
+둘 다** 해야 한다 — 하나만 하면 다른 쪽 손상이 그대로 남는다.
+(향후 "staged_sig 는 기록으로 남겨두자"고 되돌리면 거짓 표시가 재발한다 — 이유를 여기 남긴다.)
 
 `latest` 는 건드리지 않는다 — 원천의 최신 게시일이지 우리 보유 상태가 아니다.
 
@@ -28,6 +49,7 @@ SHA256 이라 재계산 서명과 일치해 `allreused == True` 가 된다. 그 
     python3 scripts/fix_t027_state.py --apply --dump after.json  # 실제 정정 후 덤프
 """
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -54,6 +76,12 @@ BACKUP_DIR = pathlib.Path("~/maptiler-rescue").expanduser()
 COLUMNS = ("key", "current", "latest", "checked_at", "file", "staged_sig",
            "validation_status", "validation_msg", "validated_at")
 
+# SQL 은 모듈 로드 시 1회만 조립한다 — 실행 시점에 문자열로 SQL 을 만들지 않는다.
+# (보간 대상은 모듈 상수 COLUMNS 뿐이고 값은 전부 파라미터 바인딩이다.)
+_COLS_SQL = ",".join(COLUMNS)
+_SELECT_ONE = f"SELECT {_COLS_SQL} FROM sources_state WHERE key = ?"
+_SELECT_ALL = f"SELECT {_COLS_SQL} FROM sources_state ORDER BY key"
+
 
 def _assert_target(key):
     """대상 키 강제 — 쓰기 직전에 반드시 통과해야 한다."""
@@ -79,10 +107,15 @@ def _load_build_studio():
 
 
 def _ro_conn(db_path):
-    """정정 시점 외에는 읽기 전용으로만 연다(C-15)."""
+    """정정 시점 외에는 읽기 전용으로만 연다(C-15). `mode=ro` 는 어떤 경우에도 유지한다.
+
+    `sqlite3.Connection` 자체의 `with` 는 트랜잭션 커밋/롤백만 하고 `close()` 하지 않는다.
+    `closing()` 으로 감싸 `with` 블록을 벗어날 때 fd 를 확실히 회수한다
+    (읽기전용이라 커밋할 트랜잭션이 없으므로 잃는 것이 없다).
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    return conn
+    return contextlib.closing(conn)
 
 
 def _describe_sig(sig):
@@ -109,19 +142,14 @@ def _read_targets(db_path):
     with _ro_conn(db_path) as conn:
         out = {}
         for key in TARGET_KEYS:
-            r = conn.execute(
-                f"SELECT {','.join(COLUMNS)} FROM sources_state WHERE key = ?", (key,)
-            ).fetchone()
-            out[key] = r
+            out[key] = conn.execute(_SELECT_ONE, (key,)).fetchone()
         return out
 
 
 def _fingerprint_others(db_path):
     """대상 외 행들의 지문 — 정정이 그 행들을 건드리지 않았음을 사후에 증명한다."""
     with _ro_conn(db_path) as conn:
-        rows = conn.execute(
-            f"SELECT {','.join(COLUMNS)} FROM sources_state ORDER BY key"
-        ).fetchall()
+        rows = conn.execute(_SELECT_ALL).fetchall()
     out = {}
     for r in rows:
         if r["key"] in TARGET_KEYS:
@@ -236,15 +264,24 @@ def main(argv=None):
     print()
 
     states = {k: _classify(rows[k]) for k in TARGET_KEYS}
-    if all(s == "corrected" for s in states.values()):
+    bad = {k: s for k, s in states.items() if s not in ("contaminated", "corrected")}
+    if bad:
+        raise SystemExit(f"중단: 예상 밖의 상태다 -> {bad}. 사람이 확인해야 한다")
+
+    # 멱등성은 키별로 판정한다. 한 키만 정정된 중간 상태에서 재실행해도 이미 정정된 키는
+    # 건드리지 않는다 — 다시 쓰면 값은 같아도 _set_validation 이 validated_at 을 덮어써
+    # 최초 정정 시각 기록을 잃는다. 스킵은 반드시 출력해 조용한 무동작이 되지 않게 한다.
+    todo = [k for k in TARGET_KEYS if states[k] == "contaminated"]
+    skipped = [k for k in TARGET_KEYS if states[k] == "corrected"]
+    for key in skipped:
+        print(f"건너뜀 : {key} — 이미 정정됨. 재기록하면 validated_at 만 덮어쓴다")
+    if not todo:
         print("이미 정정된 상태다. 쓸 것이 없다.")
         if args.dump:
             _dump(db_path, args.dump)
             print(f"덤프 저장: {args.dump}")
         return 0
-    bad = {k: s for k, s in states.items() if s not in ("contaminated", "corrected")}
-    if bad:
-        raise SystemExit(f"중단: 예상 밖의 상태다 -> {bad}. 사람이 확인해야 한다")
+    print(f"정정 대상 : {', '.join(todo)} ({len(todo)}건)")
 
     if not args.apply:
         print("dry-run 이라 아무것도 쓰지 않았다. 실제 정정은 --apply 를 붙여라.")
@@ -268,13 +305,13 @@ def main(argv=None):
     # 순서 주의: validation 3컬럼을 먼저 쓴다. 중간에 죽어도 배지가 'collect_failed' 로
     # 남아 사람에게 보이는 쪽이, staged_sig 만 지워지고 낡은 'ok' 가 남는 쪽보다 안전하다.
     changed = {}
-    for key in TARGET_KEYS:
+    for key in todo:
         _assert_target(key)
         M._set_validation(key, FIX_STATUS, FIX_MSG)   # validation_status/msg/validated_at 만 upsert
 
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        for key in TARGET_KEYS:
+        for key in todo:
             _assert_target(key)
             # 값까지 전부 파라미터 바인딩. f-string/% 로 SQL 을 조립하지 않는다.
             cur = conn.execute(
@@ -290,7 +327,8 @@ def main(argv=None):
 
     for key, n in changed.items():
         print(f"{key}: staged_sig/current UPDATE 변경 행 수 = {n}")
-    print(f"validation 3컬럼 upsert = {len(TARGET_KEYS)}건")
+    print(f"validation 3컬럼 upsert = {len(todo)}건" +
+          (f" (건너뜀 {len(skipped)}건: {', '.join(skipped)})" if skipped else ""))
 
     # ── 사후 검증: 대상 외 행이 그대로인가 ──
     after_others = _fingerprint_others(db_path)
