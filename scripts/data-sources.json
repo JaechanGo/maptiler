@@ -226,6 +226,26 @@
    }
   },
   {
+   "key": "boundary_ri",
+   "name": "VWorld 구역의 도형 — 리(LSMD_ADM_SECT_RI)",
+   "category": "행정경계",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "월",
+   "note": "법정리 경계. VWorld dsId=30602 「구역의 도형」 LSMD_ADM_SECT_RI_<시도>(시도별 SHP), EPSG:5186·CP949 — 읍면동(30603)과 같은 계열이라 boundary_legal 블록을 복제해 등록했다. 06-gen-areas.py --type legal-ri 로 areas 에 적재. 필드명(RI_NM/RI_CD)은 잠정값 — 반입 후 ogrinfo 로 확정할 것. 수동 업로드(boundary_legal·boundary_admin 과 동일하게 collect 미배선). 아직 한 번도 반입한 적이 없어 areas 에 legal-ri 행이 없다.",
+   "default_collect": false,
+   "build_input": {
+    "dest": "sources/boundary/ri",
+    "extract": "zip",
+    "into": "dir"
+   },
+   "latest_check": {
+    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
+    "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "max"
+   }
+  },
+  {
    "key": "police",
    "name": "경찰청_전국 지구대·파출소 주소 현황",
    "category": "시설",
@@ -256,7 +276,7 @@
    "url": "https://www.data.go.kr/data/15000652/openapi.do",
    "period_fmt": "YYYY-MM-DD",
    "cycle": "수시",
-   "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선.",
+   "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선. ※업로드분은 load-all.sh facility 단계가 디렉토리명→--kind aed 로 자동 적재(soft-wired).",
    "build_input": {"dest": "staged/facility_src/aed", "extract": null, "into": "dir"}
   },
   {

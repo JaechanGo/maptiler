@@ -1575,5 +1575,113 @@ class TestRunCollect(IsolatedBuildHome):
         self.assertFalse((self.dest.parent / (self.dest.name + ".incoming")).exists())
 
 
+# ════════════════════════════════════════════════════════════════
+# T4(데이터부) — data-sources.json `boundary_ri` 등록 (T028 커밋 10)
+# ════════════════════════════════════════════════════════════════
+class TestBoundaryRiSource(IsolatedBuildHome):
+    """T028 §9-T4 중 **데이터 등록분**. 배선 3곳(_VALIDATORS·명령체인·TFRESH)은 커밋 11.
+
+    리(里) 경계는 `06-gen-areas.py --type legal-ri` 로 areas 에 적재할 원천이나
+    목록에 없어 재현이 불가능했다(§5). `boundary_legal`(dsId=30603) 을 복제해
+    dsId=30602 로 등록한다.
+
+    **이번 태스크에서 수집·적재는 하지 않는다**(§5.1) — 배선만 넣는다.
+    """
+
+    RI = "boundary_ri"
+
+    def setUp(self):
+        super().setUp()
+        self.srcs = {s["key"]: s for s in M.load_sources()}
+
+    def test_registered_and_key_count(self):
+        """§8-V6 — 13키 + boundary_ri = 14키."""
+        self.assertIn(self.RI, self.srcs, "boundary_ri 가 등록되지 않았다")
+        self.assertEqual(len(self.srcs), 14, f"키 14개여야 한다: {sorted(self.srcs)}")
+
+    def test_shape_matches_boundary_legal(self):
+        """복제 원본과 필드 구성이 같아야 한다 — 차이는 default_collect 하나뿐.
+
+        `category` 는 `/api/sources` 1674 가 `s["category"]` 로 **직접 인덱싱**하므로
+        누락되면 KeyError 로 콘솔 목록 API 가 통째로 죽는다. 값도 원본과 맞춘다
+        (계획서 스케치의 "경계" 대신 "행정경계" — 아래 test_category_matches_siblings).
+        """
+        leg = self.srcs["boundary_legal"]
+        ri = self.srcs[self.RI]
+        self.assertEqual(set(ri) - set(leg), {"default_collect"})
+        self.assertEqual(set(leg) - set(ri), set())
+
+    def test_no_collect_key(self):
+        """수동 업로드 전용 — `collect` 를 넣지 않는다.
+
+        복제 원본 `boundary_legal` 에도 `collect` 가 없다(실측). 넣으면 UI 에
+        수집 버튼이 살아나는데, VWorld 30602 의 `level`(sido/sigungu)을 확인할
+        방법이 이번 태스크엔 없고(수집 금지), 틀리면 `_vworld_list_filenos` 가
+        엉뚱한 파일을 받는다. 게다가 `run_collect` 는 dest 를 선삭제한다.
+        """
+        self.assertNotIn("collect", self.srcs[self.RI])
+        self.assertNotIn("collect", self.srcs["boundary_legal"], "원본 전제가 깨졌다")
+
+    def test_uploadable_not_collectable(self):
+        """§8-V9 — 카드가 `uploadable:true` / `collectable:false` 로 렌더된다(1675-1676)."""
+        ri = self.srcs[self.RI]
+        self.assertTrue(bool(ri.get("build_input")), "uploadable 이 false 로 렌더된다")
+        self.assertFalse(bool(ri.get("collect")), "collectable 이 true 로 렌더된다")
+        self.assertFalse(ri["default_collect"], "자동수집 대상이 되면 안 된다")
+
+    def test_item_dest(self):
+        """§9-T4 — `_item_dest` 가 BUILD_HOME/sources/boundary/ri 를 준다."""
+        self.assertEqual(self.srcs[self.RI]["build_input"],
+                         {"dest": "sources/boundary/ri", "extract": "zip", "into": "dir"})
+        dest = M._item_dest(self.RI)
+        self.assertIsNotNone(dest, "실재 키여야 _item_dest 가 None 이 아니다")
+        self.assertEqual(pathlib.Path(dest), M.BUILD_HOME / "sources/boundary/ri")
+
+    def test_ds_id_30602(self):
+        """읍면동(30603)이 아니라 리(30602)를 가리켜야 한다 — 복붙 사고 방지."""
+        ri = self.srcs[self.RI]
+        for label, url in (("url", ri["url"]), ("latest_check.url", ri["latest_check"]["url"])):
+            self.assertIn("dsId=30602", url, f"{label} 이 30602 가 아니다")
+            self.assertNotIn("dsId=30603", url, f"{label} 에 원본 dsId 가 남았다")
+
+    def test_latest_check_regex_shared(self):
+        """갱신일 파싱 규칙은 boundary_legal 과 동일 — VWorld 상세면 서식이 같다."""
+        ri, leg = self.srcs[self.RI], self.srcs["boundary_legal"]
+        self.assertEqual(ri["latest_check"]["regex"], leg["latest_check"]["regex"])
+        self.assertEqual(ri["latest_check"]["pick"], leg["latest_check"]["pick"])
+        self.assertEqual(ri["period_fmt"], leg["period_fmt"])
+
+    def test_category_matches_siblings(self):
+        """같은 VWorld 행정구역 경계 3종이 한 카테고리에 모여야 한다.
+
+        계획서 §5.2 스케치는 "경계" 라고 적었으나 기존 두 블록이 "행정경계" 다.
+        `category` 는 UI 그룹핑에 쓰이지 않아(build-studio.py 전체에서 1674 한 곳)
+        기능 영향은 없지만, 리는 법정동 하위 구역이라 분류가 같아야 맞다.
+        """
+        for k in ("boundary_legal", "boundary_admin"):
+            self.assertEqual(self.srcs[self.RI]["category"], self.srcs[k]["category"])
+
+    def test_note_flags_provisional_fields(self):
+        """RI_NM/RI_CD 는 **미검증 잠정값**이다 — SHP 미반입이라 ogrinfo 확인 불가(§8-V5).
+
+        note 에 못박아 두지 않으면 다음 사람이 확정 사실로 읽고 그대로 적재한다.
+        """
+        note = self.srcs[self.RI]["note"]
+        self.assertIn("legal-ri", note)
+        self.assertIn("잠정", note)
+        self.assertIn("ogrinfo", note)
+
+    def test_aed_note_records_soft_wiring(self):
+        """§3.1 — `aed` 는 유령이 아니다. 소비 경로를 note 에 남겨 재오판을 막는다.
+
+        load-all.sh 135-147 이 staged/facility_src/<디렉토리명> 을 그대로 --kind 로
+        넘기므로, 업로드만 하면 `--kind aed` 로 자동 적재된다(soft-wired).
+        """
+        note = self.srcs["aed"]["note"]
+        self.assertIn("load-all.sh", note)
+        self.assertIn("--kind aed", note)
+        self.assertNotIn("collect", self.srcs["aed"], "aed 는 자동수집 미배선 상태 유지")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
