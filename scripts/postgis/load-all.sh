@@ -126,6 +126,43 @@ if has lawd; then
   else
     echo "  (건너뜀) navi 소스 없음 — lawd_sigungu 재생성 skip(기존 254 보존): $NAVI_STAGED / $NAVI_7Z"
   fi
+
+  # (c) lawd_code: 법정동코드 전체자료(code.go.kr) 원본 적재. **lawd_ri 의 유일한 진실 원천.**
+  #     원본 인자를 안 주면 fetch_lawd_code.sh 로 스스로 취득한다 → **네트워크 의존**이라
+  #     build_sigungu_dict.sh 와 같은 등급의 **비치명 skip** 으로 감싼다.
+  #     ⚠ 단 조용히 넘기지 않는다 — 조용한 skip 이 T018/T021 의 미배선을 만든 원인이다(R9).
+  #     (a) 와 무관하나 (d)(e) 가 이것을 읽으므로 순서상 여기다.
+  if run python3 "$HERE/load_lawd_code.py"; then
+    # (d) lawd_ri 재구축: (c) 의존. 폐기된 build_ri_dict.sql(address 역산) 대체.
+    #     원본 기반이라 건물 없는 리도 살아난다. 실패는 치명 — 사전이 반쯤 갱신된 상태를 남기지 않는다.
+    run psql -v ON_ERROR_STOP=1 -f "$HERE/build_ri_dict_from_lawd_code.sql" \
+      || { echo "  ✗ build_ri_dict_from_lawd_code.sql 실패 — lawd_ri 미갱신. 재실행: STEPS=lawd $0" >&2; fail=1; }
+
+    # (e) lawd_sido_remap: 전남·광주 통합(46·29 → 12) 매핑표. (a)+(c) 의존
+    #     — 우리 DB 의 옛 코드(lawd_dong)와 원본 신구 코드(lawd_code)를 맞춰 만들기 때문이다.
+    run psql -v ON_ERROR_STOP=1 -f "$HERE/build_sido_remap.sql" \
+      || { echo "  ✗ build_sido_remap.sql 실패 — lawd_sido_remap 미갱신(API 는 fail-open)" >&2; fail=1; }
+  else
+    # (c) 실패 시 (d)(e) 를 **호출하지 않는다**. lawd_code 없이 돌리면 어차피 실패하는 데다,
+    #     사전·매핑표가 반쯤 갱신된 부분 상태가 아무것도 안 한 것보다 나쁘다((f) 와 같은 원칙).
+    echo "  ⚠ load_lawd_code.py 실패/원본 없음 — lawd_ri 재구축·lawd_sido_remap 생성을 건너뜁니다(부분 갱신 방지)" >&2
+  fi
+
+  # (f) VWorld 30505 → lawd_code_v2 → lawd_sgg_remap (인천 자치구 개편)
+  #     [근거: VWorld dsId=30505 OLD_LAWDCD] — 옛→신 대응은 원천이 한 행에 함께 주는
+  #     OLD_LAWDCD 컬럼에서만 나온다. 명칭 조인으로 되살리지 말 것(폐기된 build_incheon_remap.sql).
+  #     **파일 존재 가드**: 두 자산이 아직 없는 리비전에서도 이 단계가 빌드를 죽이지 않는다
+  #     → S7 을 S2·S3 보다 먼저 커밋해도 안전하다(순서 제약 없음).
+  if [ -f "$HERE/load_lawd_code_v2.py" ] && [ -f "$HERE/build_incheon_remap_from_old_lawdcd.sql" ]; then
+    if ! run python3 "$HERE/load_lawd_code_v2.py"; then
+      echo "  ⚠ load_lawd_code_v2.py 실패 — lawd_sgg_remap 생성을 건너뜁니다(부분 치환 방지)" >&2
+    elif ! run psql -v ON_ERROR_STOP=1 -f "$HERE/build_incheon_remap_from_old_lawdcd.sql"; then
+      # 표가 없으면 API 가 fail-open(현행 응답) 이므로 전체 빌드를 멈출 이유가 없다 — (c) 와 같은 등급.
+      echo "  ⚠ build_incheon_remap_from_old_lawdcd.sql 실패 — 인천 치환은 fail-open 으로 비활성" >&2
+    fi
+  else
+    echo "  ℹ lawd_code_v2 자산 미배치 — 인천 치환 단계 건너뜀(현행 동작 유지)"
+  fi
 fi
 
 # 5) 공공시설 — staged/facility_src/ 아래 (a)평면 CSV(<kind>.csv) 또는 (b)종류별 하위폴더(<kind>/).

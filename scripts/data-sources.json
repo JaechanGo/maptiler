@@ -205,6 +205,27 @@
    }
   },
   {
+   "key": "lawd_code_v2",
+   "name": "법정동코드(신구대응) — VWorld 국가공간정보 dsId=30505",
+   "category": "행정코드",
+   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505",
+   "period_fmt": "YYYY-MM-DD",
+   "cycle": "수시",
+   "note": "OLD_LAWDCD(신구 법정동코드 대응)의 유일 원천. 리 사전 원천인 lawd_code(code.go.kr, 53,387행)와 별개 — 대체하지 말 것. cp949 10컬럼 CSV(LSCT_LAWDCD.csv, 31,172행) → lawd_code_v2 적재(load_lawd_code_v2.py). 인천 신설 4구·전남광주 12체계의 옛→신 대응을 명칭 조인 없이 산출하는 축. ※실측(2026-08-18): 목록에 파일 2건 — fileNo=1 LSCT_LAWDCD.zip(276KB, 본체) · fileNo=2 Z_LURIS_LSCT_LAWDCD.xlsx(11KB, 부수). dsFileId 는 페이지 dsId 와 동일한 '30505'(건물DB 의 '20171128DS00010' 같은 불일치 없음). level=all 이라 xlsx 도 함께 받지만 적재기는 CSV 만 읽으므로 무해하고, fileNo 하드코딩 대신 목록 자동조회를 써야 갱신분을 따라간다.",
+   "latest_check": {
+    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505&datPageSize=100",
+    "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
+    "pick": "max"
+   },
+   "collect": {"method": "vworld_session", "ds_id": "30505", "level": "all", "file_nos": []},
+   "default_collect": false,
+   "build_input": {
+    "dest": "staged/lawd_code_v2",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
    "key": "police",
    "name": "경찰청_전국 지구대·파출소 주소 현황",
    "category": "시설",
