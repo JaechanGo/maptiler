@@ -9,6 +9,9 @@
 """
 import csv, glob, json, os, re, subprocess, sys, unicodedata
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))       # PYTHONSAFEPATH=1 대비
+from _common.csvheur import _nk, pick_coord                          # noqa: E402
+
 N = lambda s: unicodedata.normalize("NFC", s or "")
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/facility")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "poi-all/facility_clean.csv")
@@ -33,10 +36,10 @@ TMX_HINTS   = ["좌표정보(x)", "좌표정보x", "tm_x", "tmx", "x좌표값", 
 TMY_HINTS   = ["좌표정보(y)", "좌표정보y", "tm_y", "tmy", "y좌표값", "epsg5174y"]
 
 
-def _nk(c):
-    return re.sub(r"\s+", "", N(c).lower())
-
-
+# _nk(헤더 키 정규화) 와 pick_coord(좌표 컬럼 값검증) 는 scripts/_common/csvheur.py 가 정본이다(위 import).
+# postgis/load_facility.py 가 같은 값검증을 인덱스 계약으로 쓴다 — 실사고 기록은 그 모듈 docstring 에 있다.
+# find_col 은 여기 남는다: 컬럼**명**을 돌려주며 소비자가 DictReader 라, 인덱스를 돌려주는
+# load_facility.pick() 과 통합하면 양쪽 호출부를 다 고쳐야 한다(T028 §11 배제 기록).
 def find_col(cols, hints):
     keys = {_nk(c): c for c in cols if c}
     for h in hints:                      # 1) 정확 일치
@@ -48,33 +51,6 @@ def find_col(cols, hints):
             if h2 in k:
                 return orig
     return None
-
-
-def pick_coord(cols, rows, hints, lo, hi):
-    """좌표(위/경도) 컬럼 선택 — 이름이 힌트에 걸리는 후보 중 **표본값이 십진수(소수점)+유효범위(lo~hi)**
-    인 비율이 가장 높은 컬럼을 채택. 한 파일에 위도(EPSG4326)·WGS84위도(십진수)와 위도(도)/(분)/(초)
-    (DMS 분해)가 함께 있을 때, 이름 순서만 보면 정수 '도' 컬럼을 먼저 잡아 좌표를 정수격자로 뭉개는 사고가
-    났음(예: 민방위대피시설 → lat 37, 진짜 37.577). 값으로 검증해 십진 컬럼을 우선. 십진 후보 없으면 None."""
-    nh = [_nk(h) for h in hints]
-    cand = [c for c in cols if c and any(h == _nk(c) or h in _nk(c) for h in nh)]
-    best, best_score = None, 0.0
-    for c in cand:
-        good = seen = 0
-        for r in rows[:200]:                 # 앞 200행 표본
-            v = str(r.get(c) or "").strip()
-            if not v:
-                continue
-            seen += 1
-            try:
-                f = float(v)
-            except ValueError:
-                continue
-            if "." in v and lo <= f <= hi:   # 십진수 AND 유효범위
-                good += 1
-        score = good / seen if seen else 0.0
-        if score > best_score:
-            best, best_score = c, score
-    return best
 
 
 def parse_region(*addrs):
