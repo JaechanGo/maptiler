@@ -182,6 +182,7 @@ class IsolatedBuildHome(unittest.TestCase):
         self.destructive = []          # [(prim, [인자…])] — 호출 이력
         self._install_spies()
         self._block_side_effects()
+        self._reset_db_once_flag()
         self.addCleanup(_REAL_RMTREE, str(self.home), ignore_errors=True)
 
     # ── 안전망 구성 ────────────────────────────────────────────
@@ -229,6 +230,16 @@ class IsolatedBuildHome(unittest.TestCase):
             p = mock.patch.object(owner, name, **kw)
             p.start()
             self.addCleanup(p.stop)
+
+    def _reset_db_once_flag(self):
+        """`_DB_READY`(63)는 **모듈 전역**이라 샌드박스가 바뀌어도 True 로 남는다.
+
+        그대로 두면 첫 케이스만 스키마가 깔리고 두 번째부터 새 DB_PATH 에
+        `no such table: sources_state` 가 난다. 매 케이스 초기화해 새 샌드박스마다
+        `SCHEMA_DDL` 이 다시 돌게 한다.
+        """
+        self.addCleanup(setattr, M, "_DB_READY", M._DB_READY)
+        M._DB_READY = False
 
     # ── 테스트 편의 ────────────────────────────────────────────
     def use_sources_copy(self, dest_overrides=None):
@@ -978,6 +989,204 @@ class TestSwapDir(IsolatedBuildHome):
         self.assertIn("EXDEV", str(cm.exception))
         self.assertDestIntact()
         self.assertNoResidue()
+
+
+# ════════════════════════════════════════════════════════════════
+# load_manifest — 프로필 복원(약 5.0GB 파괴 경로)
+# ════════════════════════════════════════════════════════════════
+class TestLoadManifest(IsolatedBuildHome):
+    """`load_manifest` 는 store 원본이 없으면 dest 에 **손도 대지 않는다**.
+
+    사고 재현형: 예전 코드는 `rmtree(dest)` 를 **먼저** 때린 뒤 `store_path(sha)`
+    부재로 복원할 게 없어 빈 디렉터리만 남겼다. 게다가 `staged_sig` 에 그 sha 를
+    기록해 다음 수집이 '변경 없음' 으로 건너뛰게 만들었다 — 소실이 무증상으로 굳는다.
+    """
+
+    DIRKEY = "sangga"     # dest 확장자 없음 → 디렉터리형 분기
+    FILEKEY = "police"    # dest 를 .pbf 로 돌려 파일형 분기 검사(실키를 써야 _item_dest 가 산다)
+
+    def setUp(self):
+        super().setUp()
+        self.use_sources_copy({self.DIRKEY: "staged/sangga",
+                               self.FILEKEY: "staged/osm/korea.osm.pbf"})
+        self.dest = self.home / "staged" / "sangga"
+        self.orig = {"keep.csv": b"name,lon,lat\nold,127.0,37.0\n"}
+        _fill_files(self.orig)(self.dest)
+        self.fdest = self.home / "staged" / "osm" / "korea.osm.pbf"
+        self.fdest.parent.mkdir(parents=True, exist_ok=True)
+        self.forig = b"OLD-PBF-PAYLOAD"
+        self.fdest.write_bytes(self.forig)
+        M.MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ── 픽스처 ────────────────────────────────────────────────
+    def write_manifest(self, sources, mid="p1", name="프로필A"):
+        (M.MANIFESTS_DIR / f"{mid}.json").write_text(
+            json.dumps({"name": name, "sources": sources}, ensure_ascii=False), encoding="utf-8")
+        return mid
+
+    def put_store(self, payload_path):
+        M.STORE_DIR.mkdir(parents=True, exist_ok=True)
+        sha, _ = M.store_put(pathlib.Path(payload_path))
+        return sha
+
+    def store_zip(self, names=("a.csv",)):
+        tmp = self.home / "tmp" / "in.zip"; tmp.parent.mkdir(parents=True, exist_ok=True)
+        return self.put_store(_make_valid_zip(tmp, names=names))
+
+    # ── 공통 단언 ──────────────────────────────────────────────
+    def assertDestIntact(self):
+        self.assertEqual(_tree(self.dest), self.orig, "dest 원본이 훼손됐다")
+        self.assertEqual(self.fdest.read_bytes(), self.forig, "파일형 dest 가 훼손됐다")
+
+    def assertNoSignature(self, key):
+        rec = M.load_versions().get(key, {})
+        self.assertIsNone(rec.get("staged_sig"), "복원하지도 않고 거짓 서명을 남겼다")
+
+    def assertNeverTargeted(self, *paths):
+        want = {os.path.realpath(str(p)) for p in paths}
+        for prim, args in self.destructive:
+            for a in args:
+                self.assertNotIn(os.path.realpath(a), want, f"{prim} 가 dest 를 건드렸다")
+
+    # ── M1: 핵심 회귀 — 원본 부재 시 dest 무손상 + skipped + 서명 미기록 ──
+    def test_M1_missing_store_keeps_dest_and_skips(self):
+        mid = self.write_manifest({self.DIRKEY: {"sha": "de" * 32, "current": "2026-08-01",
+                                                 "file": "sangga.zip"}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 0, "복원한 게 없는데 restored 가 올랐다")
+        self.assertEqual([s["key"] for s in r["skipped"]], [self.DIRKEY])
+        self.assertDestIntact()
+        self.assertNoSignature(self.DIRKEY)
+
+    def test_M1_no_destructive_primitive_ever_targets_dest(self):
+        mid = self.write_manifest({self.DIRKEY: {"sha": "de" * 32},
+                                   self.FILEKEY: {"sha": "ad" * 32}})
+        M.load_manifest(mid)
+        self.assertNeverTargeted(self.dest, self.fdest)
+
+    def test_M1_file_branch_missing_store_is_not_counted(self):
+        """파일형도 선검증한다 — 예전엔 `sp.exists()` 가 False 여도 restored 가 올랐다."""
+        mid = self.write_manifest({self.FILEKEY: {"sha": "ad" * 32}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 0)
+        self.assertEqual(len(r["skipped"]), 1)
+        self.assertDestIntact()
+        self.assertNoSignature(self.FILEKEY)
+
+    def test_M1_partial_multi_sha_skips_whole_key(self):
+        """콤마 다중 sha 중 하나만 없어도 그 키는 통째로 건너뛴다(반쪽 복원 금지)."""
+        good = self.store_zip()
+        mid = self.write_manifest({self.DIRKEY: {"sha": f"{good},{'de' * 32}"}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 0)
+        self.assertEqual(r["skipped"][0]["missing"], 1)
+        self.assertEqual(r["skipped"][0]["total"], 2)
+        self.assertDestIntact()
+        self.assertNoSignature(self.DIRKEY)
+
+    def test_M1_no_sha_is_skipped_not_recorded(self):
+        mid = self.write_manifest({self.DIRKEY: {"sha": None, "current": "2026-08-01"}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 0)
+        self.assertEqual([s["key"] for s in r["skipped"]], [self.DIRKEY])
+        self.assertDestIntact()
+        self.assertNoSignature(self.DIRKEY)
+
+    def test_M1_extract_failure_keeps_dest_and_skips(self):
+        """추출이 깨져도(`_swap_dir` 이 막는다) dest 는 살고 서명은 남지 않는다."""
+        tmp = self.home / "tmp" / "bad.zip"; tmp.parent.mkdir(parents=True, exist_ok=True)
+        sha = self.put_store(_make_truncated_zip(tmp))
+        mid = self.write_manifest({self.DIRKEY: {"sha": sha}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 0)
+        self.assertEqual(len(r["skipped"]), 1)
+        self.assertDestIntact()
+        self.assertNoSignature(self.DIRKEY)
+
+    # ── M2: 정상 복원 ──────────────────────────────────────────
+    def test_M2_restores_dir_and_records_signature(self):
+        sha = self.store_zip(names=("fresh.csv",))
+        mid = self.write_manifest({self.DIRKEY: {"sha": sha, "current": "2026-08-01",
+                                                 "file": "sangga.zip"}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 1)
+        self.assertEqual(r["skipped"], [])
+        self.assertEqual(sorted(_tree(self.dest)), ["fresh.csv"])
+        rec = M.load_versions()[self.DIRKEY]
+        self.assertEqual(rec["staged_sig"], sha)
+        self.assertEqual(rec["current"], "2026-08-01")
+        self.assertEqual(rec["file"], "sangga.zip")
+
+    def test_M2_restores_file_type_atomically(self):
+        tmp = self.home / "tmp" / "new.pbf"; tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(b"NEW-PBF-PAYLOAD")
+        sha = self.put_store(tmp)
+        mid = self.write_manifest({self.FILEKEY: {"sha": sha}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 1)
+        self.assertEqual(self.fdest.read_bytes(), b"NEW-PBF-PAYLOAD")
+        self.assertFalse((self.fdest.parent / (self.fdest.name + ".incoming")).exists())
+
+    def test_M2_mixed_manifest_counts_each_side(self):
+        sha = self.store_zip()
+        mid = self.write_manifest({self.DIRKEY: {"sha": sha},
+                                   self.FILEKEY: {"sha": "ad" * 32}})
+        r = M.load_manifest(mid)
+        self.assertEqual(r["restored"], 1)
+        self.assertEqual([s["key"] for s in r["skipped"]], [self.FILEKEY])
+        self.assertEqual(self.fdest.read_bytes(), self.forig)
+
+    # ── M3: 수집과의 상호배제 ──────────────────────────────────
+    def test_M3_refuses_while_collect_holds_lock(self):
+        sha = self.store_zip()
+        mid = self.write_manifest({self.DIRKEY: {"sha": sha}})
+        with self.collect_lock():
+            with self.assertRaises(RuntimeError):
+                M.load_manifest(mid)
+        self.assertDestIntact()
+        self.assertNoSignature(self.DIRKEY)
+
+    def test_M3_lock_released_after_normal_return(self):
+        mid = self.write_manifest({self.DIRKEY: {"sha": "de" * 32}})
+        M.load_manifest(mid)
+        self.assertFalse(M._COLLECT_LOCK.locked(), "락을 물고 나왔다")
+
+
+# ════════════════════════════════════════════════════════════════
+# _swap_file — 파일형 원자적 교체
+# ════════════════════════════════════════════════════════════════
+class TestSwapFile(IsolatedBuildHome):
+    def setUp(self):
+        super().setUp()
+        self.dest = self.home / "data" / "osm" / "korea.osm.pbf"
+        self.dest.parent.mkdir(parents=True, exist_ok=True)
+        self.dest.write_bytes(b"ORIGINAL")
+
+    def test_F1_replaces_content(self):
+        src = self.home / "src.bin"; src.write_bytes(b"NEW-CONTENT")
+        n_files, n_bytes = M._swap_file(self.dest, src)
+        self.assertEqual(self.dest.read_bytes(), b"NEW-CONTENT")
+        self.assertEqual((n_files, n_bytes), (1, len(b"NEW-CONTENT")))
+
+    def test_F1_zero_byte_source_rejected_and_dest_kept(self):
+        src = self.home / "empty.bin"; src.write_bytes(b"")
+        with self.assertRaises(RuntimeError):
+            M._swap_file(self.dest, src)
+        self.assertEqual(self.dest.read_bytes(), b"ORIGINAL")
+        self.assertFalse((self.dest.parent / (self.dest.name + ".incoming")).exists())
+
+    def test_F1_copy_failure_keeps_dest(self):
+        missing = self.home / "nope.bin"
+        with self.assertRaises(OSError):
+            M._swap_file(self.dest, missing)
+        self.assertEqual(self.dest.read_bytes(), b"ORIGINAL")
+        self.assertFalse((self.dest.parent / (self.dest.name + ".incoming")).exists())
+
+    def test_F1_creates_dest_when_absent(self):
+        fresh = self.home / "data" / "osm" / "new.pbf"
+        src = self.home / "src.bin"; src.write_bytes(b"X")
+        M._swap_file(fresh, src)
+        self.assertEqual(fresh.read_bytes(), b"X")
 
 
 if __name__ == "__main__":

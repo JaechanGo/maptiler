@@ -1036,6 +1036,9 @@ STORE_DIR = BUILD_HOME / "store"
 FACILITY_CATALOG = ROOT / "scripts" / "facility-catalog.json"
 LOCALDATA_REGIONS = ROOT / "scripts" / "localdata-regions.json"
 _COLLECT_LOCK = threading.Lock()
+# 파괴 구간(교체) 진입 대기 상한. 수집은 수십 분이 걸리므로 무한 대기 대신 즉시 거절해
+# 사용자에게 "지금은 수집 중"을 알린다(C-11: 락은 파괴 구간에만, 다GB 수신 루프는 락 밖).
+_COLLECT_LOCK_WAIT = 2.0
 _DL_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.localdata.go.kr/"}
 
 
@@ -1472,6 +1475,38 @@ def _swap_dir(dest, fill, *, keep_old=False, on=None):
     return n_files, n_bytes
 
 
+def _swap_file(dest, src, *, on=None):
+    """파일형 목적지(osm `.pbf` 등)를 **파괴하지 않고** 교체한다 — `_swap_dir` 의 파일 짝.
+
+    기존 `shutil.copy2(sp, dest)` 는 dest 를 먼저 truncate 하고 쓰기 때문에, 복사 도중
+    죽거나 원본이 반쪽이면 dest 가 그 자리에서 깨진다. 형제 `.incoming` 에 먼저 받고
+    크기 게이트를 통과한 뒤에만 `os.replace` 로 갈아끼워 그 창을 없앤다.
+
+    `_swap_dir` 과 같은 계약 — **락을 절대 획득하지 않는다**(C-6). 상호배제는 호출자 몫.
+    스테이징이 `dest.parent` 안이라 EXDEV 는 구조적으로 발생하지 않는다(C-7).
+
+    반환: (1, n_bytes)
+    실패: 스테이징만 삭제하고 예외 재전파. **dest 는 무손상.**
+    """
+    dest = pathlib.Path(dest); src = pathlib.Path(src)
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = parent / (dest.name + _SWAP_INCOMING_SUFFIX)
+    _rm_path(staging, ignore_errors=True)          # 이전 시도의 잔재
+    _assert_same_device(staging, parent, dest)
+    try:
+        shutil.copy2(str(src), str(staging))
+        n_bytes = staging.stat().st_size
+        if n_bytes <= 0:
+            raise RuntimeError(f"교체 거부 — 원본이 0바이트다: {src}")
+    except BaseException:
+        _rm_path(staging, ignore_errors=True)      # dest 는 아직 손도 대지 않았다
+        raise
+    _swap_replace(staging, dest)                   # 원자적 교체(같은 디렉터리 → EXDEV 불가)
+    if on: on(f"   교체 완료: {dest.name} ({n_bytes:,}바이트)")
+    return 1, n_bytes
+
+
 def _vworld_cookie():
     """VWorld 로그인 세션 쿠키 — 환경변수 VWORLD_COOKIE 우선, 없으면 BUILD_HOME/.secrets/vworld_cookie.
     사용자가 브라우저 로그인 후 JSESSIONID(=...; ...) 를 붙여넣어 둔다(만료 시 재주입)."""
@@ -1819,28 +1854,63 @@ def save_manifest(name=None, with_bundle=False):
 
 
 def load_manifest(mid):
-    """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로."""
+    """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로.
+
+    **원본이 store 에 없으면 dest 에 손도 대지 않는다**(C-8). 예전에는 `rmtree(dest)` 를
+    먼저 하고 `sp.exists()` 를 나중에 봤기 때문에, store 가 빈 프로필 하나를 불러오는 것만으로
+    staged 약 5.0GB 가 소리 없이 사라졌다. 게다가 서명 기록이 `if` 블록 **바깥**이라 복원하지도
+    않은 키에 `staged_sig` 가 찍혔고, 다음 수집이 그 거짓 서명을 보고 "이미 최신"이라 판단해
+    재수집조차 하지 않았다 — 소실이 영구화되는 경로다.
+
+    반환: {"id", "name", "restored": n, "skipped": [{"key","reason","missing","total"}, …]}
+    """
     p = MANIFESTS_DIR / f"{mid}.json"
     if not p.is_file():
         raise RuntimeError("프로필 없음")
-    man = json.loads(p.read_text(encoding="utf-8")); ver = load_versions(); restored = 0
-    for key, info in (man.get("sources") or {}).items():
-        sha = info.get("sha"); dest = _item_dest(key)
-        if sha and dest:
-            if dest.suffix:   # 파일형(osm .pbf)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                sp = store_path(sha.split(",")[0])
-                if sp.exists(): shutil.copy2(sp, dest)
-            else:
-                shutil.rmtree(dest, ignore_errors=True)
-                for s in sha.split(","):
-                    sp = store_path(s)
-                    if sp.exists(): _extract_into(sp, dest)
+    man = json.loads(p.read_text(encoding="utf-8"))
+    restored = 0; skipped = []
+
+    def _skip(key, reason, missing=0, total=0):
+        skipped.append({"key": key, "reason": reason, "missing": missing, "total": total})
+
+    # 수집과 동시에 돌면 서로의 staged 를 덮는다 — 파괴 구간을 락으로 감싼다(C-11).
+    # `_swap_dir`/`_swap_file` 은 락을 잡지 않으므로(C-6) 여기가 유일한 획득 지점이다.
+    if not _COLLECT_LOCK.acquire(timeout=_COLLECT_LOCK_WAIT):
+        raise RuntimeError("수집이 진행 중이라 복원할 수 없다 — 수집이 끝난 뒤 다시 시도하라")
+    try:
+        ver = load_versions()
+        for key, info in (man.get("sources") or {}).items():
+            sha = (info or {}).get("sha"); dest = _item_dest(key)
+            if not sha or not dest:
+                _skip(key, "원본 서명 없음" if not sha else "알 수 없는 항목")
+                continue
+            shas = [s for s in str(sha).split(",") if s]
+            miss = [s for s in shas if not store_path(s).exists()]
+            if not shas or miss:
+                # ① 선검증 — 파일형·디렉터리형 **양쪽** 모두. 하나라도 없으면 그 키는 통째로
+                #    건너뛴다(반쪽 복원 금지). dest 는 이 시점까지 한 번도 건드리지 않았다.
+                _skip(key, "store 에 원본 없음", missing=len(miss) or 1, total=len(shas))
+                continue
+            try:
+                if dest.suffix:            # 파일형(osm .pbf) — `.incoming` 경유 원자적 교체
+                    _swap_file(dest, store_path(shas[0]))
+                else:                      # 디렉터리형 — `.incoming` 에 전량 추출 후 교체
+                    def fill(staging, _shas=shas):
+                        for s in _shas:
+                            _extract_into(store_path(s), staging)
+                    _swap_dir(dest, fill)
+            except Exception as e:
+                # ② 교체가 깨져도 dest 무손상이 두 프리미티브의 계약이다. 서명은 남기지 않는다.
+                _skip(key, f"복원 실패: {str(e)[:80]}", missing=0, total=len(shas))
+                continue
             restored += 1
-        rec = ver.setdefault(key, {}); rec["staged_sig"] = sha
-        rec["current"] = info.get("current"); rec["file"] = info.get("file")
-        save_versions({key: rec})
-    return {"id": mid, "name": man.get("name"), "restored": restored}
+            # ③ 서명·상태 기록은 **성공한 키에만**(옛 1578 을 `if` 안으로 들여쓴 자리).
+            rec = ver.setdefault(key, {}); rec["staged_sig"] = sha
+            rec["current"] = info.get("current"); rec["file"] = info.get("file")
+            save_versions({key: rec})
+    finally:
+        _COLLECT_LOCK.release()
+    return {"id": mid, "name": man.get("name"), "restored": restored, "skipped": skipped}
 
 
 def rename_manifest(mid, name):
@@ -2534,7 +2604,12 @@ function editProfile(id){const el=document.querySelector('#pf_'+id+' .pname');if
     fetch('/api/profiles/rename',{method:'POST',body:JSON.stringify({id,name:n})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadBuilds();});};
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();save();}else if(e.key==='Escape'){done=true;renderProfRows();}};inp.onblur=save;}
 function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원할까요? (현재 staged 덮어씀)'))return;
-  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect(false);});}
+  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);
+    var sk=d.skipped||[];
+    logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건 / 건너뜀 '+sk.length+'건) — 갱신할 항목만 체크 후 빌드');
+    if(sk.length){sk.forEach(function(s){logln('   ⚠ 건너뜀 '+s.key+': '+s.reason+(s.total?' ('+s.missing+'/'+s.total+' 누락)':''));});
+      alert('건너뛴 항목 '+sk.length+'건 — store 에 원본이 없어 복원하지 못했습니다.\n기존 staged 파일은 그대로 두었습니다. 해당 항목은 다시 수집해야 합니다:\n\n'+sk.map(function(s){return '· '+s.key+' — '+s.reason;}).join('\n'));}
+    loadCollect(false);});}
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 function loadVw(){fetch('/api/secrets/vworld').then(r=>r.json()).then(d=>{const s=$('#vwState');if(s)s.textContent=d.set?'· 설정됨 ✓':'· 미설정';});}
 function saveVw(){const j=$('#vwPjsess'),b=$('#vwVworld');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({pjsessionid:j.value,vworld:b.value})}).then(r=>r.json()).then(d=>{j.value='';b.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}
