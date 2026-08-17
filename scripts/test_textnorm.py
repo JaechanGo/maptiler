@@ -298,14 +298,21 @@ class TestCopySync(unittest.TestCase):
     def test_geocode_api_pg_rnorm(self):
         self._assert_synced("geocode-api-pg.py", "rnorm")
 
-    @unittest.expectedFailure
-    def test_osm_from_mbtiles_norm(self):
-        """osm-from-mbtiles.py:43 은 `s or ''` 가 없어 norm(None) 이 TypeError 다.
+    def test_osm_from_mbtiles_copy_removed(self):
+        """osm-from-mbtiles.py 는 정본을 import 한다 — 사본이 있으면 안 된다.
 
-        의도적 불일치의 기록이다. 커밋 4 의 임포트 전환으로 이 사본이 사라지면
-        정상 단언(사본 소멸 확인)으로 승격한다.
+        커밋 3 시점엔 이 파일에 `s or ''` 가 빠진 사본이 있어 norm(None) 이
+        TypeError 였고 expectedFailure 로 기록했다. 커밋 4 에서 임포트로 전환해
+        사본 자체를 없앴으므로, 이제는 "사본 대조"가 아니라 "사본 소멸 확인"이다.
         """
-        self._assert_synced("osm-from-mbtiles.py", "norm")
+        path = _COPIES["osm-from-mbtiles.py"]
+        self.assertIsNone(
+            _extract_def(path, "norm"),
+            "osm-from-mbtiles.py 에 norm 인라인 사본이 되살아났다 — 정본 import 로 되돌릴 것",
+        )
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("from _common.textnorm import norm", src)
 
 
 if __name__ == "__main__":
