@@ -48,11 +48,12 @@ _PUNCT = re.compile(r"[\s()\[\]{}<>（）【】·.,/&\-]+")
 _BIZ_PUNCT = re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
 
 
-# 주소 표기 정규화. 09:46 / geocode-api.py:57 / geocode-api-pg.py:126 원문.
+# 주소 표기 정규화. 09-gen-geocode.py(커밋 6 에서 여기로 흡수) / geocode-api.py:57 /
+# geocode-api-pg.py:36 원문 — 뒤 둘은 컨테이너 경계 때문에 인라인 사본을 유지한다.
 # ※ 한 줄 정의를 유지할 것 — T3 사본 대조가 `def norm(s): ...` 한 줄을 추출해
 #   AST 구조까지 비교한다. 함수 내부 docstring 을 넣으면 구조가 달라져 깨진다.
 def norm(s): return re.sub(r"\s+"," ",unicodedata.normalize("NFC",s or "")).strip()
-# 축약 비교용(마침표·공백 제거). 09:47 / geocode-api.py:58 / geocode-api-pg.py:127 원문.
+# 축약 비교용(마침표·공백 제거). geocode-api.py:58 / geocode-api-pg.py:37 원문.
 def rnorm(s): return re.sub(r"[.\s]","",unicodedata.normalize("NFC",s or ""))
 
 

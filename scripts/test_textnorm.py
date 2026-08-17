@@ -280,6 +280,13 @@ class TestCopySync(unittest.TestCase):
             "%s 의 %s 가 정본과 구조가 다르다" % (filename, fname),
         )
 
+        with open(_COPIES[filename], encoding="utf-8") as fh:   # ③ 사본임을 코드가 밝히는가
+            self.assertIn(
+                "scripts/_common/textnorm.py",
+                fh.read(),
+                "%s 에 동기화 주석이 없다 — 사본인 줄 모르고 한쪽만 고칠 수 있다" % filename,
+            )
+
     def _assert_copy_removed(self, filename, fnames, import_names):
         """사본이 사라지고 정본 import 로 대체됐는지 확인한다.
 

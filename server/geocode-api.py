@@ -54,6 +54,8 @@ def point_in_ring(lon, lat, ring):
     return inside
 
 
+# ※scripts/_common/textnorm.py 와 동일 구현(수동 동기화). 컨테이너 빌드 컨텍스트가 server/ 라
+#   import 불가 — 변경 시 양쪽을 함께 고칠 것. 동기화는 test_textnorm.py 의 등가성 테스트가 강제한다.
 def norm(s): return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', s or '')).strip()
 def rnorm(s): return re.sub(r'[.\s]', '', unicodedata.normalize('NFC', s or ''))
 

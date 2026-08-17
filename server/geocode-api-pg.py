@@ -149,6 +149,8 @@ _HAS_SGG_REMAP = False
 
 # ── 표시/응답 헬퍼 (geocode-api.py 와 동일 형태) ─────────────────────
 def _g(r, k): return r.get(k)
+# ※scripts/_common/textnorm.py 와 동일 구현(수동 동기화). 컨테이너 빌드 컨텍스트가 server/ 라
+#   import 불가 — 변경 시 양쪽을 함께 고칠 것. 동기화는 test_textnorm.py 의 등가성 테스트가 강제한다.
 def norm(s): return re.sub(r"\s+", " ", unicodedata.normalize("NFC", s or "")).strip()
 def rnorm(s): return re.sub(r"[.\s]", "", unicodedata.normalize("NFC", s or ""))
 def _limit(qs, dflt, cap=50):
