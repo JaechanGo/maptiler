@@ -9,6 +9,7 @@
        BUILD_HOME=~/geocode-build PORT=18081 python3 scripts/build-studio.py
 """
 import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
+import errno  # _swap_dir 의 크로스 디바이스(EXDEV) 판별
 import pty   # 자식 프로세스를 TTY 에 붙여 외부 도구의 블록버퍼링을 막고 로그를 실시간 스트리밍
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1208,6 +1209,267 @@ def _extract_into(src, dest_dir, orig_name=None):
     nm = orig_name or src.name
     if "." not in nm: nm += ".csv"
     shutil.copy2(src, dest_dir / nm)
+
+
+# ── 원자적 디렉터리 교체(_swap_dir) ────────────────────────────────────
+# 사고 재현 경로: `rmtree(dest)` 로 원본을 **먼저 지우고** 새로 채우다 실패하면 남는 게 없다.
+# 여기서는 순서를 뒤집는다 — 옆에 채우고(.incoming), 검증하고, 그 다음에야 교체한다.
+_SWAP_INCOMING_SUFFIX = ".incoming"
+_SWAP_OLD_SUFFIX = ".old"
+_SWAP_PID_NAME = ".swap-pid.json"
+
+
+def _proc_start_key(pid):
+    """PID 의 프로세스 시작시각 문자열. 조회 실패/미존재면 None.
+
+    C-12: PID 는 재사용된다. 고아 판정을 PID 생존만으로 내리면, 재사용된 남의 PID 를
+    보고 '작업 중'이라 오판해 고아가 영원히 남거나, 반대로 살아있는 작업을 지운다.
+    시작시각을 함께 대조하는 두 번째 열쇠다(표준 라이브러리만 — psutil 비의존)."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def _swap_pid_write(staging):
+    """`.incoming` 안에 소유자 표식(PID + 시작시각)을 남긴다."""
+    p = pathlib.Path(staging) / _SWAP_PID_NAME
+    pid = os.getpid()
+    p.write_text(json.dumps({"pid": pid, "start": _proc_start_key(pid), "at": time.time()}),
+                 encoding="utf-8")
+    return p
+
+
+def _swap_owner_alive(staging):
+    """`.incoming` 의 소유 프로세스가 아직 살아있는가(= 손대면 안 되는가).
+
+    판정 불가(표식 손상 아님 / 시작시각 조회 실패)면 **살아있다**로 본다 —
+    오판이 파괴가 아니라 잔재를 남기는 쪽으로 기울게 하는 편향이다.
+    반대로 표식 자체가 없으면 고아로 본다(정상 경로는 항상 표식을 쓴다)."""
+    f = pathlib.Path(staging) / _SWAP_PID_NAME
+    try:
+        info = json.loads(f.read_text(encoding="utf-8"))
+        pid = int(info.get("pid"))
+    except Exception:
+        return False                      # 표식 없음/깨짐 → 고아
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False                      # 죽음 → 고아
+    except PermissionError:
+        pass                              # 살아있으나 타 사용자 소유 — 시작시각으로 가린다
+    except OSError:
+        return True                       # 판정 불가 → 보수적
+    want = info.get("start")
+    got = _proc_start_key(pid)
+    if not want or got is None:
+        return True                       # 시작시각을 못 얻는 플랫폼 → 보수적
+    return got == want
+
+
+def _dir_stats(root, skip=()):
+    """root 하위 **정규 파일**의 (개수, 바이트합). 심링크는 세지 않는다."""
+    skip = {os.path.realpath(str(s)) for s in skip}
+    n_files = n_bytes = 0
+    for dp, _dn, fns in os.walk(str(root)):
+        for nm in fns:
+            fp = os.path.join(dp, nm)
+            if os.path.realpath(fp) in skip or os.path.islink(fp):
+                continue
+            try:
+                n_bytes += os.stat(fp).st_size
+            except OSError:
+                continue
+            n_files += 1
+    return n_files, n_bytes
+
+
+def _rm_path(p, ignore_errors=False):
+    """디렉터리/파일 어느 쪽이든 제거(교체 잔재 정리 전용)."""
+    p = pathlib.Path(p)
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=ignore_errors)
+        return
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
+def _assert_same_device(*paths):
+    """존재하는 경로들이 같은 파일시스템인지 검증한다(C-7 잔여 — EXDEV 전제 강제).
+
+    `.incoming`/`.old` 를 `dest.parent` 안에 만드는 설계상 rename 양끝은 늘 같은
+    디렉터리 엔트리라 EXDEV 는 구조적으로 불가하다. 다만 dest 자체가 마운트포인트인
+    경우가 남으므로 전제를 코드로 못박는다 — 복사 폴백을 두지 않는 이유는 §docstring 참조."""
+    devs = {}
+    for p in paths:
+        try:
+            devs[str(p)] = os.stat(str(p)).st_dev
+        except OSError:
+            continue
+    if len(set(devs.values())) > 1:
+        raise RuntimeError(
+            "교체 거부 — 서로 다른 파일시스템이라 원자적 rename 불가(EXDEV): "
+            + ", ".join(f"{k}(dev={v})" for k, v in devs.items()))
+
+
+def _swap_replace(src, dst):
+    """rename 한 번. EXDEV 는 원인이 드러나는 메시지로 바꿔 올린다(무성 폴백 금지)."""
+    try:
+        os.replace(str(src), str(dst))
+    except OSError as e:
+        if getattr(e, "errno", None) == errno.EXDEV:
+            raise RuntimeError(
+                f"교체 중단 — 크로스 디바이스(EXDEV) rename 실패: {src} → {dst}. "
+                "dest 와 같은 볼륨에 스테이징을 잡아야 한다") from e
+        raise
+
+
+def _swap_rollback_old(old, on=None):
+    """① `.old` 처리. dest 가 없으면 롤백(원본 회수), 있으면 완료된 교체의 잔재로 보고 폐기."""
+    old = pathlib.Path(old)
+    if not (old.exists() or old.is_symlink()):
+        return []
+    dest = old.parent / old.name[: -len(_SWAP_OLD_SUFFIX)]
+    if not (dest.exists() or dest.is_symlink()):
+        _swap_replace(old, dest)                       # ①직후 사망 → 원본 복구
+        if on: on(f"   복구: {old.name} → {dest.name} 롤백(원본 회수)")
+        return [("rollback", str(dest))]
+    _rm_path(old, ignore_errors=True)                  # ②완료 후 사망 → 정상 종료 처리
+    if on: on(f"   정리: 완료된 교체의 잔재 {old.name} 삭제")
+    return [("drop-old", str(old))]
+
+
+def _swap_sweep_incoming(staging, on=None):
+    """② `.incoming` 처리. 소유자가 살아있으면 절대 손대지 않는다."""
+    staging = pathlib.Path(staging)
+    if not (staging.exists() or staging.is_symlink()):
+        return []
+    if _swap_owner_alive(staging):
+        return [("keep-incoming", str(staging))]
+    _rm_path(staging, ignore_errors=True)
+    if on: on(f"   정리: 고아 스테이징 {staging.name} 삭제")
+    return [("drop-incoming", str(staging))]
+
+
+def _swap_recover(dest, on=None):
+    """dest 한 곳의 교체 잔재를 복구한다.
+
+    C-13: **`.old` 롤백이 `.incoming` 스윕보다 먼저다.** 순서를 뒤집으면
+    'dest 부재 ∧ 두 잔재 공존'(= ① 직후 사망) 상태에서 되돌릴 원본을 잃는다."""
+    dest = pathlib.Path(dest)
+    acts = _swap_rollback_old(dest.parent / (dest.name + _SWAP_OLD_SUFFIX), on=on)
+    acts += _swap_sweep_incoming(dest.parent / (dest.name + _SWAP_INCOMING_SUFFIX), on=on)
+    return acts
+
+
+def _sweep_swap_residue(roots, on=None, max_depth=4):
+    """프로세스 **시동 시 1회** 호출용 전역 스윕. 실행 중에는 부르지 마라.
+
+    C-13 을 전역 수준에서도 지킨다 — `.old` 를 전량 되돌린 뒤에야 `.incoming` 으로 넘어간다.
+    BUILD_HOME 전체 워크(수백만 파일)를 피하려고 깊이를 제한한다(dest 는 전부 얕다)."""
+    if isinstance(roots, (str, pathlib.PurePath)):
+        roots = [roots]
+    olds, incs = [], []
+    for root in roots:
+        root = pathlib.Path(root)
+        if not root.is_dir():
+            continue
+        base = str(root).rstrip(os.sep).count(os.sep)
+        for dp, dns, _fns in os.walk(str(root)):
+            # 이름 수집이 깊이 프루닝보다 **먼저** — 순서를 뒤집으면 경계 깊이의 잔재를 놓친다.
+            for nm in list(dns):
+                if nm.endswith(_SWAP_OLD_SUFFIX):
+                    olds.append(pathlib.Path(dp) / nm); dns.remove(nm)
+                elif nm.endswith(_SWAP_INCOMING_SUFFIX):
+                    incs.append(pathlib.Path(dp) / nm); dns.remove(nm)
+            if dp.count(os.sep) - base >= max_depth:
+                dns[:] = []
+    acts = []
+    for p in olds:                      # ① 전량 롤백 먼저
+        acts += _swap_rollback_old(p, on=on)
+    for p in incs:                      # ② 그 다음 스윕
+        acts += _swap_sweep_incoming(p, on=on)
+    return acts
+
+
+def _swap_dir(dest, fill, *, keep_old=False, on=None):
+    """dest 를 **파괴하지 않고** 통째로 교체한다(원자적 교체 프리미티브).
+
+    호출자가 `_COLLECT_LOCK` 을 보유한 상태로 호출한다 — 이 함수는 **락을 절대 획득하지
+    않는다**(C-6). `threading.Lock` 은 재진입 불가라, 이미 락을 쥔 `run_collect` 안에서
+    여기서 다시 잡으면 그 자리에서 자기교착한다. 상호배제는 전적으로 호출자 책임이다.
+
+    dest     : pathlib.Path — 최종 목적지 디렉터리
+    fill     : callable(staging: pathlib.Path) -> None
+               staging 에 내용물을 채우는 콜백. 예외를 던지면 staging 만 지우고 재전파한다.
+    keep_old : True 면 `.old` 백업을 남긴다(디버깅용, 기본 False)
+    on       : 진행 로그 콜백(선택) — `_unzip_recursive` 와 같은 관행
+
+    반환: (n_files, n_bytes) — 교체된 내용물의 실측치
+    실패: staging 만 삭제하고 예외 재전파. **dest 는 처음부터 끝까지 무손상.**
+
+    순서 — ① `dest.parent/<name>.incoming` 에 전량 채움 → ② 비어있지 않음 검증
+           → ③ dest → `.old` rename → ④ `.incoming` → dest rename → ⑤ `.old` 삭제.
+    ③④ 사이에서 죽으면 dest 가 잠깐 사라지지만, 시동 스윕(`_sweep_swap_residue`)의
+    `.old` 롤백이 원본을 되돌린다.
+
+    EXDEV: 스테이징을 `dest.parent` 안에 만들어(C-7) rename 양끝을 같은 디렉터리 엔트리로
+    고정하므로 크로스 디바이스는 구조적으로 발생하지 않는다. 그럼에도 전제를 `_assert_same_device`
+    로 검사하고 EXDEV 를 명확한 예외로 올린다. **복사 기반 폴백은 두지 않는다** — 3.6GB 복사는
+    원자성을 잃어 이 함수가 막으려는 '교체 도중 반쪽 상태'를 되살리기 때문이다.
+    """
+    dest = pathlib.Path(dest)
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = parent / (dest.name + _SWAP_INCOMING_SUFFIX)
+    old = parent / (dest.name + _SWAP_OLD_SUFFIX)
+
+    # 0) 이전 시도의 잔재부터 — C-13 과 같은 순서(.old 롤백 → .incoming 스윕)를 쓴다.
+    _swap_rollback_old(old, on=on)
+    if staging.exists() or staging.is_symlink():
+        if _swap_owner_alive(staging):
+            raise RuntimeError(f"교체가 이미 진행 중이다(살아있는 소유자): {staging}")
+        _swap_sweep_incoming(staging, on=on)
+    if staging.exists() or staging.is_symlink():
+        raise RuntimeError(f"스테이징 정리 실패 — 수동 확인 필요: {staging}")
+
+    staging.mkdir(parents=True)
+    pidf = _swap_pid_write(staging)
+    _assert_same_device(staging, parent, dest)
+
+    try:
+        fill(staging)
+        n_files, n_bytes = _dir_stats(staging, skip=[pidf])
+        if n_files <= 0 or n_bytes <= 0:
+            raise RuntimeError(
+                f"교체 거부 — 스테이징이 비었다(파일 {n_files}개 / {n_bytes}바이트): {dest}")
+    except BaseException:
+        _rm_path(staging, ignore_errors=True)      # dest 는 아직 손도 대지 않았다
+        raise
+
+    _rm_path(pidf, ignore_errors=True)             # 표식은 dest 로 넘기지 않는다
+    dest_there = dest.exists() or dest.is_symlink()
+    if dest_there:
+        _swap_replace(dest, old)                   # ③ 원본 대피
+    try:
+        _swap_replace(staging, dest)               # ④ 신품 게시
+    except BaseException:
+        if dest_there and not (dest.exists() or dest.is_symlink()):
+            os.replace(str(old), str(dest))        # ④ 실패 → 즉시 롤백
+            if on: on(f"   롤백: {old.name} → {dest.name}(교체 실패, 원본 회수)")
+        _rm_path(staging, ignore_errors=True)
+        raise
+    if dest_there and not keep_old:
+        _rm_path(old, ignore_errors=True)          # ⑤ 여기서 죽어도 시동 스윕이 정리한다
+    if on: on(f"   교체 완료: {dest.name} ({n_files}개 / {n_bytes:,}바이트)")
+    return n_files, n_bytes
 
 
 def _vworld_cookie():
