@@ -8,25 +8,45 @@ importlib.util.spec_from_file_location 로 모듈 핸들 확보(선례 server/te
   _payload_integrity(path) -> (verdict, detail)  … 신규 순수함수
   _extract_into(src, dest_dir, orig_name=None)   … .csv 폴백 구멍 봉쇄
   _http_download(url, dest, ...)                 … Content-Length 대조(urlopen monkeypatch)
+  IsolatedBuildHome                              … 실홈 파괴 차단 안전망(그 자체를 I1-I15 로 검증)
 
 import 안전성: Manager.__init__ 은 데몬 워커 스레드만 기동(포트 바인딩은 __main__ 한정)이라 로드 안전.
-BUILD_HOME 을 임시디렉토리로 지정해 실 홈(~/geocode-build) 비오염.
+격리: 경로형 환경변수를 import 시점에 무조건 덮어써 BUILD_HOME 을 임시디렉토리로 고정하고,
+IsolatedBuildHome 이 파생 상수 전량을 재바인딩한 뒤 파괴 프리미티브 6종을 감시한다.
+안전 경계는 `staged/` 가 아니라 **BUILD_HOME** 이다 — 최대 조각(poi-all/sangga 1.4G,
+sources/boundary/legal 54M)이 staged/ 밖에 있어 staged/ 를 경계로 삼으면 그대로 뚫린다.
 
 실행:  python3 scripts/test_build_studio.py
        또는  python3 -m unittest scripts.test_build_studio -v
 """
+import contextlib
 import importlib.util
 import io
+import json
 import os
+import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest import mock   # `import unittest` 만으로는 unittest.mock 이 보장되지 않는다
 
 # ── 모듈 로드 (하이픈 파일명 대응, BUILD_HOME=tmp 로 실홈 비오염) ──────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MOD_PATH = os.path.join(_HERE, "build-studio.py")
 _BUILD_HOME_TMP = tempfile.mkdtemp(prefix="build_studio_test_home_")
-os.environ.setdefault("BUILD_HOME", _BUILD_HOME_TMP)
+# setdefault 금지 — 운영자 셸의 `export BUILD_HOME=~/geocode-build` 를 반드시 덮어써야 한다.
+# build-studio.py:9 docstring 이 그 export 를 안내하므로, setdefault 로 두면
+# 평소 셸에서 테스트를 돌리는 순간 격리가 통째로 사라지고 실홈에 파괴가 일어난다.
+os.environ["BUILD_HOME"] = _BUILD_HOME_TMP
+# BUILD_HOME 만 덮어써서는 부족하다 — 573-575·20 은 각자 독립 환경변수를 먼저 보므로,
+# 운영자가 `export SRC_JUSO=~/geocode-build/staged/navi` 를 해 둔 셸에서는 그 상수만
+# 실홈에 남는다(571-572 주석이 그 덮어쓰기를 안내한다). 지워서 BUILD_HOME 파생으로
+# 되돌린다. 경로가 아닌 환경변수(PORT·HOST·VWORLD_COOKIE 등)는 건드리지 않는다.
+for _k in ("COMPOSE_FILE", "SRC_JUSO", "SRC_LOCALDATA", "SRC_GIS"):
+    os.environ.pop(_k, None)
+
+# 실 프리미티브 보존 — 파괴 감시 스파이가 활성인 동안에도 샌드박스 밖 픽스처를 정리해야 한다.
+_REAL_RMTREE = shutil.rmtree
 
 
 def _load_module(path=_MOD_PATH):
@@ -37,6 +57,211 @@ def _load_module(path=_MOD_PATH):
 
 
 M = _load_module()
+
+
+# ════════════════════════════════════════════════════════════════
+# 격리 안전망 — 실홈(~/geocode-build) 파괴 차단
+#
+# 안전 경계는 `staged/` 가 아니라 **BUILD_HOME** 이다. 파괴 대상의 최대 조각인
+# poi-all/sangga(1.4G)·sources/boundary/legal(54M)·sources/boundary/admin(980K)
+# 은 staged/ 밖에 있어, staged/ 를 경계로 삼으면 그대로 뚫린다.
+# ════════════════════════════════════════════════════════════════
+_REAL_BUILD_HOME = os.path.realpath(os.path.expanduser("~/geocode-build"))
+
+# BUILD_HOME 파생 모듈전역 상수 전량. import 시점에 굳는 개별 상수라 BUILD_HOME 만
+# 바꾸면 나머지가 실홈에 남는다. 주석의 숫자는 build-studio.py 의 정의 행.
+_REPOINT_ATTRS = (
+    "BUILD_HOME",       # 16
+    "DB_PATH",          # 29
+    "SOURCES_DIR",      # 31
+    "STORE_DIR",        # 1034
+    "MANIFESTS_DIR",    # 1510
+    "DATA_VERSIONS",    # 28   — _migrate_versions_once 82 의 rename 대상. 최우선
+    "ARTIFACTS",        # 27   — _snapshot_artifact 797 unlink
+    "BUILD_STATE",      # 673  — save_build_state 687 이 Path.replace 로 덮어씀
+    "DIST",             # 26
+    "SRC_JUSO",         # 573  (str)
+    "SRC_LOCALDATA",    # 574  (str)
+    "SRC_GIS",          # 575  (str)
+    "COMPOSE_FILE",     # 20   (str)
+)
+
+
+def _root_derived_source_keys():
+    """dest 가 BUILD_HOME 이 아니라 ROOT 파생인 출처키 — 테스트에서 사용 금지.
+
+    _collect_plan 1315 의 geofabrik 분기는 `ROOT / col["dest"]` 를 돌려주므로
+    BUILD_HOME 재바인딩으로도, data-sources.json 사본으로도 막히지 않는다.
+    """
+    try:
+        data = json.loads(pathlib.Path(M.SOURCES_FILE).read_text(encoding="utf-8"))
+        keys = tuple(s["key"] for s in data.get("sources", [])
+                     if (s.get("collect") or {}).get("method") == "geofabrik")
+    except Exception:
+        keys = ()
+    return keys or ("osm",)
+
+
+_ROOT_DERIVED_KEYS = _root_derived_source_keys()
+
+
+def _under(path, root):
+    """realpath 기준으로 path 가 root 이거나 그 하위인가."""
+    p = os.path.realpath(str(path))
+    r = os.path.realpath(str(root))
+    return p == r or p.startswith(r + os.sep)
+
+
+def _check_path(path, safe_roots, prim):
+    """파괴 프리미티브 인자 1개의 안전성 판정(순수 함수).
+
+    스파이가 **실제 호출 이전에** 이 함수를 부르므로, 위반이면 파괴는 일어나지 않고
+    테스트가 실패한다. 순수 함수로 분리해 둔 덕에, 실홈 경로에 대한 거부 동작을
+    실제 파괴 호출 없이 단위테스트할 수 있다.
+    """
+    p = os.path.realpath(str(path))
+    if _under(p, _REAL_BUILD_HOME):
+        raise AssertionError(f"실홈 파괴 시도({prim}): {p}")
+    if not any(_under(p, r) for r in safe_roots):
+        raise AssertionError(f"격리 위반({prim}): {p}")
+    return p
+
+
+def _repoint_build_home(M, root, tc=None):
+    """BUILD_HOME 파생 상수를 _REPOINT_ATTRS 루프로 일괄 재바인딩하고 검증한다.
+
+    개별 나열이 아니라 **반드시 튜플 루프**로 돈다 — 상수가 늘 때마다 다시 새는
+    구조를 만들지 않기 위해서다. tc 를 주면 원값을 addCleanup 으로 복원한다
+    (tearDown 아님 — 중간 예외에도 복원이 보장되어야 한다).
+    """
+    old, new = str(M.BUILD_HOME), str(root)
+    for name in _REPOINT_ATTRS:
+        cur = getattr(M, name)
+        if tc is not None:
+            tc.addCleanup(setattr, M, name, cur)
+        s = str(cur)
+        if s == old:
+            nxt = new
+        elif s.startswith(old + os.sep):
+            nxt = new + s[len(old):]
+        else:
+            # BUILD_HOME 파생이 아닌 값(SRC_*·COMPOSE_FILE 의 외부 export 등)
+            # → 실경로에 닿지 못하도록 샌드박스 안으로 끌어온다.
+            nxt = os.path.join(new, "_repoint", name.lower())
+        setattr(M, name, pathlib.Path(nxt) if isinstance(cur, pathlib.PurePath) else nxt)
+
+    # 재바인딩 직후 검증 — 하나라도 실홈을 가리키면 여기서 즉시 실패시킨다.
+    for name in _REPOINT_ATTRS:
+        v = os.path.realpath(str(getattr(M, name)))
+        assert not _under(v, _REAL_BUILD_HOME), f"{name} 이 실홈을 가리킨다: {v}"
+    return pathlib.Path(new)
+
+
+class IsolatedBuildHome(unittest.TestCase):
+    """BUILD_HOME 전면 재바인딩 + 파괴 프리미티브 감시를 갖춘 테스트 기반 클래스.
+
+    감시 대상 6종(호출형태 기준 8지점). 인자는 **전부** 검사한다 —
+    os.replace(a, b) 는 b 도 파괴하기 때문이다.
+
+      shutil.rmtree   533·1469·1573·1622·1866
+      os.replace      (_swap_dir 신설 예정) / Path.replace 687
+      os.rename       / Path.rename 82  (DATA_VERSIONS.rename)
+      Path.unlink     499·797·1614·1621·1846   ← missing_ok 인자 통과 주의
+      os.remove       1055·1134
+      shutil.move     1057
+
+    run_collect 의 tmpdir 은 `BUILD_HOME / "tmp"`(1443)라 재바인딩만으로
+    샌드박스 안에 들어온다. 따라서 허용 루트는 self.home 하나로 충분하다.
+    """
+
+    def setUp(self):
+        self.home = _repoint_build_home(M, tempfile.mkdtemp(prefix="rc_"), self)
+        self.safe_roots = [str(self.home)]
+        self.destructive = []          # [(prim, [인자…])] — 호출 이력
+        self._install_spies()
+        self._block_side_effects()
+        self.addCleanup(_REAL_RMTREE, str(self.home), ignore_errors=True)
+
+    # ── 안전망 구성 ────────────────────────────────────────────
+    def allow_root(self, path):
+        """샌드박스 밖이지만 이 테스트에 한해 파괴를 허용할 루트 등록."""
+        self.safe_roots.append(str(path))
+
+    def _spy(self, owner, name, nargs):
+        """owner.name 을 감시 래퍼로 교체. 앞 nargs 개 인자를 경로로 보고 검사한다."""
+        real = getattr(owner, name)
+        label = f"{getattr(owner, '__name__', owner)}.{name}"
+
+        def spy(*a, **k):
+            targets = a[:nargs]
+            for t in targets:
+                _check_path(t, self.safe_roots, label)
+            self.destructive.append((label, [str(t) for t in targets]))
+            return real(*a, **k)
+
+        p = mock.patch.object(owner, name, spy)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _install_spies(self):
+        # Path 계열은 클래스에 붙으므로 a[0] 이 곧 대상 경로(self)다.
+        for owner, name, nargs in (
+            (shutil, "rmtree", 1),
+            (shutil, "move", 2),
+            (os, "replace", 2),
+            (os, "rename", 2),
+            (os, "remove", 1),
+            (pathlib.Path, "replace", 2),
+            (pathlib.Path, "rename", 2),
+            (pathlib.Path, "unlink", 1),
+        ):
+            self._spy(owner, name, nargs)
+
+    def _block_side_effects(self):
+        """실 네트워크·실 빌드 기동·수집 간격 대기를 차단한다."""
+        for owner, name, kw in (
+            (M.urllib.request, "urlopen", {"side_effect": AssertionError("실 네트워크 호출")}),
+            (M.MGR, "enqueue", {"new": lambda *a, **k: None}),
+            (M.time, "sleep", {"new": lambda *a, **k: None}),
+        ):
+            p = mock.patch.object(owner, name, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    # ── 테스트 편의 ────────────────────────────────────────────
+    def use_sources_copy(self, dest_overrides=None):
+        """data-sources.json 을 tmp 로 복사하고 build_input.dest 를 재지정한다.
+
+        load_sources()(46-47)가 매 호출 SOURCES_FILE 을 읽으므로 캐시 문제가 없다.
+        `test:*` 같은 가상 키를 쓰면 _item_dest 가 None(1424-1425), _collect_plan 이
+        예외(1300-1301)라 파괴 코드 본문에 도달조차 못 해 검증이 무의미해진다.
+        그래서 **실재 키를 쓰되 dest 만 샌드박스로 돌린다.**
+        """
+        data = json.loads(pathlib.Path(M.SOURCES_FILE).read_text(encoding="utf-8"))
+        for key in (dest_overrides or {}):
+            assert key.partition(":")[0] not in _ROOT_DERIVED_KEYS, (
+                f"{key} 는 dest 가 ROOT 파생이라 사본으로도 격리되지 않는다")
+        for s in data.get("sources", []):
+            if s["key"] in (dest_overrides or {}):
+                s.setdefault("build_input", {})["dest"] = dest_overrides[s["key"]]
+        copy = self.home / "data-sources.json"
+        copy.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.addCleanup(setattr, M, "SOURCES_FILE", M.SOURCES_FILE)
+        M.SOURCES_FILE = copy
+        return copy
+
+    @contextlib.contextmanager
+    def collect_lock(self):
+        """_COLLECT_LOCK 을 잡아야 할 때 **같은 스코프에서** 반납한다.
+
+        addCleanup 으로 `locked() and release()` 를 거는 방식은 금지다 —
+        MGR 데몬 워커가 잡고 있는 락까지 풀어 상호배제를 깬다.
+        """
+        M._COLLECT_LOCK.acquire()
+        try:
+            yield
+        finally:
+            M._COLLECT_LOCK.release()
 
 
 # ── 합성 픽스처 헬퍼 ──────────────────────────────────────────────
@@ -277,6 +502,189 @@ class TestHttpDownloadCL(unittest.TestCase):
         dest = os.path.join(self.td, "h4.part")
         size = M._http_download("https://example.test/f", dest, retries=1)
         self.assertEqual(size, len(body))
+
+
+# ── I. 격리 안전망 자체 검증 ─────────────────────────────────────
+# 안전망은 "있다"가 아니라 "실제로 막는다"를 증명해야 의미가 있다.
+# 실홈 거부는 **순수 함수 _check_path 를 직접 호출**해 검증한다 — 실제 파괴
+# 호출에 실홈 경로를 넘겨 확인하는 방식은, 판정이 틀렸을 때 그 시험 자체가
+# 사고가 된다.
+class TestIsolationHarness(IsolatedBuildHome):
+
+    def test_I1_all_constants_off_real_home(self):
+        """C-1: 13개 상수 전부가 실홈 밖을 가리킨다."""
+        self.assertEqual(len(_REPOINT_ATTRS), len(set(_REPOINT_ATTRS)))
+        for name in _REPOINT_ATTRS:
+            v = os.path.realpath(str(getattr(M, name)))
+            self.assertFalse(_under(v, _REAL_BUILD_HOME), f"{name} → {v}")
+            self.assertTrue(_under(v, self.home), f"{name} 이 샌드박스 밖: {v}")
+        # 대표 상수의 파생관계가 유지되는가
+        self.assertEqual(str(M.DB_PATH), str(self.home / "build-studio.db"))
+        self.assertEqual(str(M.SRC_JUSO), str(self.home / "staged/navi"))
+        self.assertIsInstance(M.DB_PATH, pathlib.PurePath)   # 타입 보존
+        self.assertIsInstance(M.SRC_JUSO, str)
+
+    def test_I2_repoint_is_loop_not_enumeration(self):
+        """C-1: 헬퍼가 튜플 루프다 — 튜플에 이름을 더하면 그 상수도 따라온다."""
+        global _REPOINT_ATTRS
+        M.FAKE_CONST = M.BUILD_HOME / "fake/leaf"
+        self.addCleanup(delattr, M, "FAKE_CONST")
+        orig = _REPOINT_ATTRS
+        _REPOINT_ATTRS = orig + ("FAKE_CONST",)
+        self.addCleanup(lambda: globals().__setitem__("_REPOINT_ATTRS", orig))
+        root2 = self.home / "second"
+        _repoint_build_home(M, root2, self)
+        self.assertEqual(str(M.FAKE_CONST), str(root2 / "fake/leaf"))
+
+    def test_I3_check_path_rejects_real_home(self):
+        """C-10: 안전 경계는 BUILD_HOME 이다 — staged/ 밖 조각도 전부 거부."""
+        for leaf in ("", "staged/localdata", "poi-all/sangga",
+                     "sources/boundary/legal", "store", "geocode.sqlite"):
+            p = os.path.join(_REAL_BUILD_HOME, leaf) if leaf else _REAL_BUILD_HOME
+            with self.assertRaises(AssertionError) as ctx:
+                _check_path(p, self.safe_roots, "rmtree")
+            self.assertIn("실홈 파괴 시도", str(ctx.exception))
+        # 실홈을 허용루트로 등록해도 거부가 유지된다(무조건 거부)
+        with self.assertRaises(AssertionError):
+            _check_path(_REAL_BUILD_HOME + "/staged",
+                        [_REAL_BUILD_HOME], "rmtree")
+
+    def test_I4_check_path_rejects_outside_and_accepts_inside(self):
+        outside = tempfile.mkdtemp(prefix="outside_")
+        self.addCleanup(_REAL_RMTREE, outside, ignore_errors=True)
+        with self.assertRaises(AssertionError) as ctx:
+            _check_path(outside, self.safe_roots, "rmtree")
+        self.assertIn("격리 위반", str(ctx.exception))
+        self.assertTrue(_check_path(self.home / "x/y", self.safe_roots, "rmtree"))
+        self.allow_root(outside)
+        self.assertTrue(_check_path(outside, self.safe_roots, "rmtree"))
+
+    def test_I5_all_six_primitives_are_spied(self):
+        """C-2: 6종 8지점 전부가 감시 래퍼로 교체돼 있다."""
+        for owner, name in ((shutil, "rmtree"), (shutil, "move"),
+                            (os, "replace"), (os, "rename"), (os, "remove"),
+                            (pathlib.Path, "replace"), (pathlib.Path, "rename"),
+                            (pathlib.Path, "unlink")):
+            fn = getattr(owner, name)
+            self.assertEqual(getattr(fn, "__name__", ""), "spy",
+                             f"{owner}.{name} 미감시")
+
+    def test_I6_sandbox_calls_pass_and_are_recorded(self):
+        d = self.home / "d"; d.mkdir(parents=True)
+        (d / "a.txt").write_text("a", encoding="utf-8")
+        (d / "b.txt").write_text("b", encoding="utf-8")
+        (d / "a.txt").unlink()                                   # Path.unlink
+        os.remove(str(d / "b.txt"))                              # os.remove
+        (d / "c.txt").write_text("c", encoding="utf-8")
+        (d / "c.txt").rename(d / "c2.txt")                       # Path.rename
+        os.rename(str(d / "c2.txt"), str(d / "c3.txt"))          # os.rename
+        os.replace(str(d / "c3.txt"), str(d / "c4.txt"))         # os.replace
+        (d / "c4.txt").replace(d / "c5.txt")                     # Path.replace
+        shutil.move(str(d / "c5.txt"), str(d / "c6.txt"))        # shutil.move
+        shutil.rmtree(str(d))                                    # shutil.rmtree
+        prims = {p for p, _ in self.destructive}
+        self.assertEqual(prims, {
+            "shutil.rmtree", "shutil.move", "os.replace", "os.rename",
+            "os.remove", "Path.replace", "Path.rename", "Path.unlink",
+        }, f"감시 이력 불일치: {sorted(prims)}")
+        # 이력에는 인자 경로가 남아, 어디를 지웠는지 사후 추궁이 가능하다
+        self.assertTrue(all(_under(t, self.home)
+                            for _, ts in self.destructive for t in ts))
+        self.assertFalse(d.exists())
+
+    def test_I7_second_argument_is_also_checked(self):
+        """C-2: os.replace(a, b)/shutil.move(a, b) 는 b 도 파괴한다 → dst 도 검사."""
+        outside = tempfile.mkdtemp(prefix="outside_dst_")
+        self.addCleanup(_REAL_RMTREE, outside, ignore_errors=True)
+        src = self.home / "src.txt"; src.write_text("keep", encoding="utf-8")
+        victim = os.path.join(outside, "victim.txt")
+        with open(victim, "w", encoding="utf-8") as f:
+            f.write("원본")
+        for call in (lambda: os.replace(str(src), victim),
+                     lambda: os.rename(str(src), victim),
+                     lambda: shutil.move(str(src), victim),
+                     lambda: src.replace(pathlib.Path(victim)),
+                     lambda: src.rename(pathlib.Path(victim))):
+            with self.assertRaises(AssertionError):
+                call()
+        # 차단됐으므로 양쪽 다 원상태다
+        self.assertEqual(src.read_text(encoding="utf-8"), "keep")
+        with open(victim, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "원본")
+
+    def test_I8_unlink_missing_ok_passthrough(self):
+        """C-2: Path.unlink 의 missing_ok 인자가 래퍼를 통과한다."""
+        p = self.home / "nope.txt"
+        p.unlink(missing_ok=True)                 # 예외 없어야 함
+        p.unlink(True)                            # 위치인자 형태
+        with self.assertRaises(FileNotFoundError):
+            p.unlink()
+
+    def test_I9_use_sources_copy_redirects_dest(self):
+        """C-3: 가상 키가 아니라 실재 키 + dest 재지정."""
+        keys = [s["key"] for s in
+                json.loads(pathlib.Path(M.SOURCES_FILE).read_text(encoding="utf-8"))["sources"]]
+        target = next(k for k in keys if k not in _ROOT_DERIVED_KEYS)
+        copy = self.use_sources_copy({target: "t/redirected"})
+        self.assertEqual(str(M.SOURCES_FILE), str(copy))
+        self.assertTrue(_under(copy, self.home))
+        loaded = {s["key"]: s for s in M.load_sources()}          # 46-47 재읽기
+        self.assertEqual(loaded[target]["build_input"]["dest"], "t/redirected")
+        dest = M._item_dest(target)
+        self.assertIsNotNone(dest, "실재 키여야 _item_dest 가 None 이 아니다")
+        self.assertTrue(_under(dest, self.home), f"dest 가 샌드박스 밖: {dest}")
+
+    def test_I10_root_derived_keys_are_refused(self):
+        """C-3: geofabrik(osm) 키는 사본으로도 격리되지 않으므로 사용 금지."""
+        self.assertIn("osm", _ROOT_DERIVED_KEYS)
+        for key in ("osm", "osm:sub"):
+            with self.assertRaises(AssertionError) as ctx:
+                self.use_sources_copy({key: "t/x"})
+            self.assertIn("ROOT 파생", str(ctx.exception))
+
+    def test_I11_collect_lock_released_in_same_scope(self):
+        """C-5: addCleanup 강제해제 없이, try/finally 로 같은 스코프에서 반납."""
+        self.assertFalse(M._COLLECT_LOCK.locked())
+        with self.collect_lock():
+            self.assertTrue(M._COLLECT_LOCK.locked())
+        self.assertFalse(M._COLLECT_LOCK.locked())
+        with self.assertRaises(RuntimeError):
+            with self.collect_lock():
+                raise RuntimeError("본문 예외")
+        self.assertFalse(M._COLLECT_LOCK.locked(), "예외 경로에서도 반납된다")
+        # 소유하지 않은 락을 푸는 cleanup 이 등록돼 있지 않다
+        srcs = "".join(getattr(f, "__qualname__", str(f))
+                       for f, _, _ in getattr(self, "_cleanups", []))
+        self.assertNotIn("locked", srcs)
+
+    def test_I12_side_effects_blocked(self):
+        with self.assertRaises(AssertionError):
+            M.urllib.request.urlopen("https://example.test/")
+        self.assertIsNone(M.MGR.enqueue("noop"))
+        M.time.sleep(9999)          # 즉시 반환해야 한다
+
+
+class TestHarnessDoesNotLeak(unittest.TestCase):
+    """스파이가 프로세스 전역이므로, 미상속 테스트에 새지 않음을 확인한다."""
+
+    def test_I13_no_spy_outside_isolated_cases(self):
+        self.assertIs(shutil.rmtree, _REAL_RMTREE)
+        for owner, name in ((shutil, "move"), (os, "replace"), (os, "rename"),
+                            (os, "remove"), (pathlib.Path, "replace"),
+                            (pathlib.Path, "rename"), (pathlib.Path, "unlink")):
+            self.assertNotEqual(getattr(getattr(owner, name), "__name__", ""), "spy")
+
+    def test_I14_module_constants_never_point_at_real_home(self):
+        """무조건 대입(§4.1) 결과 — 운영자 셸의 export 와 무관하게 실홈 밖."""
+        self.assertEqual(os.environ["BUILD_HOME"], _BUILD_HOME_TMP)
+        for name in _REPOINT_ATTRS:
+            v = os.path.realpath(str(getattr(M, name)))
+            self.assertFalse(_under(v, _REAL_BUILD_HOME), f"{name} → {v}")
+
+    def test_I15_path_env_overrides_neutralized(self):
+        """BUILD_HOME 만 덮어써서는 573-575·20 이 실홈에 남는다."""
+        for k in ("COMPOSE_FILE", "SRC_JUSO", "SRC_LOCALDATA", "SRC_GIS"):
+            self.assertNotIn(k, os.environ, f"{k} 가 남으면 그 상수만 실홈을 가리킨다")
 
 
 if __name__ == "__main__":
