@@ -137,7 +137,9 @@ def _split_emd_ri(jibun_txt, sido, sgg):   # 결정2: 지번 텍스트 → (법�
             break
     return (bjd, ri)
 _BIZ_PUNCT=re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
-def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()  # 12-build-poi.sh _nrm와 동일 — biz 중복(대표) 판정 키
+# biz 중복(대표) 판정 키. ※과거 "12-build-poi.sh _nrm 와 동일" 주석은 허위였음(해당 파일에 _nrm 부재, 파일도 T028 에서 폐기)
+# — 정규화 정본은 T028 계획서 §4 참조. 여기는 NFC, dedup_er.py 는 NFKC 로 실재 발산(전수 9,061행)이며 의도된 것이다.
+def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()
 def search_text(name, is_station):
     name=norm(name); v={name, name.replace(' ','')}
     if is_station:

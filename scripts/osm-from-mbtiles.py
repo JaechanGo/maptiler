@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """korea.mbtiles → OSM 지오코딩 소스(osm.sqlite) 재추출 (무의존 MVT 디코드).
-scripts/07-gen-geocode.py 의 extract_mbtiles 로직 재현 — iCloud evict된 geocode.sqlite 대체용.
+scripts/09-gen-geocode.py 의 extract_mbtiles 로직 재현(07 은 T028 에서 폐기) — iCloud evict된 geocode.sqlite 대체용.
 출력 places(id,name,type,subtype,lon,lat) 를 09-gen-geocode.py 의 --osm 입력으로 사용.
 """
 import gzip, math, os, sqlite3, sys, re, unicodedata

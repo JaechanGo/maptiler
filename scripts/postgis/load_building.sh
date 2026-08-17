@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # GIS건물통합정보 SHP(VWorld, 시도별) → PostGIS building (시도 LIST 파티션) (Phase 2)
-# 10-gen-buildings.sh 와 동일 컬럼/휴리스틱: A16=높이(m,결측多), A26=지상층수.
+# (구)10-gen-buildings.sh 와 동일 컬럼/휴리스틱 — 해당 스크립트는 T028 에서 폐기, 본 파일이 유일 구현.
+#   A16=높이(m,결측多), A26=지상층수.
 #   render_height = A16>0?A16 : (A26>0?A26*3.3 : 6).  기존 buildings.mbtiles 대체.
 # sido_cd 는 파일명 AL_D010_<시도2>_<YYYYMMDD>.shp(전체분) / CH_D010_*(변동분) 에서 추출.
 #

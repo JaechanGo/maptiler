@@ -1,5 +1,5 @@
 -- CUVIA PostGIS 백본 — POI / 공공시설 (Phase 0)
--- poi: 상가·인허가·생활편의(기존 무인증 collect) → biz/facility. 기존 poi.mbtiles(12-build-poi.sh) 대체.
+-- poi: 상가·인허가·생활편의(기존 무인증 collect) → biz/facility. 기존 poi.mbtiles 방식 대체(생성 스크립트는 T028 에서 폐기).
 -- public_facility: data.go.kr 공공시설(병원·경찰·소방·AED·대피소). 동질 포인트라 단일 테이블+kind.
 
 CREATE TABLE IF NOT EXISTS poi (

@@ -1,6 +1,6 @@
 -- CUVIA PostGIS 백본 — 건물통합정보 building (Phase 0)
 -- ≈6.66M 동. parcel 과 동일 시도 LIST 파티션(수급·갱신 단위 일치).
--- 기존 buildings.mbtiles(10-gen-buildings.sh) 대체. render_height/levels = 3D fill-extrusion.
+-- 기존 buildings.mbtiles 방식 대체(생성 스크립트는 T028 에서 폐기). render_height/levels = 3D fill-extrusion.
 -- building 은 z13+ 표출이라 parcel(z16+)보다 일반화(geom_genN)가 먼저 필요할 후보 — 단 측정 후 추가.
 
 CREATE TABLE IF NOT EXISTS building (

@@ -43,7 +43,7 @@
 
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
-- **지오코딩 적재**: 17개 CSV 병합 후 `python3 scripts/07-gen-geocode.py --poi-csv 상가_전국.csv` (kind=biz). 좌표 이미 4326 → 변환 불필요.
+- **지오코딩 적재**: 17개 CSV 를 한 폴더에 모은 뒤 `python3 scripts/09-gen-geocode.py --poi-csv-dir <상가CSV폴더>` (kind=biz). 좌표 이미 4326 → 변환 불필요.
 - **지도 라벨 타일**: `ogr2ogr`(경도/위도→점) → `tippecanoe`(z12–16, `--drop-densest-as-needed --cluster-distance`) → `tiles/poi.mbtiles`.
 - **반영**: `geocode.sqlite` 교체 → `docker compose restart geocode`; `poi.mbtiles` 등록 → restart tileserver.
 

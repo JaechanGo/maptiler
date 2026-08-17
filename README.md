@@ -31,11 +31,11 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
-./scripts/10-gen-buildings.sh    # 3D 건물 타일 (buildings.mbtiles, GIS건물통합 SHP)
+./scripts/postgis/load-all.sh    # 3D 건물 → PostGIS building (STEPS=building, GIS건물통합 SHP)
 ./scripts/11-build-localdata.py  # LOCALDATA 인허가 → 상가포맷 CSV (영업중·비물리제외·NFC)
 ./scripts/09-gen-geocode.py \    # 통합 지오코딩 인덱스 (geocode.sqlite)
   --src <내비DB> --osm osm.sqlite --poi-csv-dir <상가CSV폴더> --out geocode.sqlite
-./scripts/12-build-poi.sh        # 시설 라벨 타일 (poi.mbtiles, geocode.sqlite의 biz 추출)
+# 시설 라벨은 타일 생성 없음 — PostGIS poi 를 martin poi_mvt 함수소스로 직접 서빙
 ./scripts/13-qc-check.py         # 빌드 QC 검증 (NFC·좌표·시도커버리지·인덱스·골든질의·스타일↔타일)
 ./scripts/build-style.sh         # style.json 조립 ★ 서버 기동 전 필수 (gitignore 산출물)
 ./scripts/package.sh             # 폐쇄망 반입 번들 (QC 게이트 통과 시 dist/, 대용량은 BUILD_HOME)

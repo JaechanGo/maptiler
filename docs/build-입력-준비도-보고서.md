@@ -1,4 +1,5 @@
 <!-- 생성: build-input-readiness 워크플로우 (12 agents, ~630k tok, 읽기전용 인벤토리) · 2026-06-25 -->
+<!-- ※ 본 문서는 작성 시점 기록이다. 07/08/10/12/poc 스크립트는 T028 에서 폐기됐고 각각 09·PostGIS 경로로 대체됐다. -->
 
 # 빌드 입력 준비도 보고서 (Build Input Readiness)
 

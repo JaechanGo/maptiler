@@ -24,7 +24,7 @@ _BRANCH_TOK = re.compile(r"^(본점|직영점|가맹점|영업소|지점|\d{1,3}
 _PUNCT  = re.compile(r"[\s()\[\]{}<>（）【】·.,/&\-]+")
 _REP    = re.compile(r"^(1[5-6]\d{2}|070|060|1588|1577|1644|1666)")
 
-def biznrm(s):                                   # 09 의 biznrm 과 동일사상(괄호/구두점/공백 제거+lower)
+def biznrm(s):                                   # 09 의 biznrm 과 정규화 형식이 다르다(여기 NFKC / 09 NFC). 정본은 NFKC — T028 계획서 §4.2 참조
     return _PUNCT.sub("", unicodedata.normalize("NFKC", s or "")).lower()
 
 def corenrm(s):

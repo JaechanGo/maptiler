@@ -99,7 +99,7 @@ fi
 
 echo
 echo "── [4/5] 빌드 툴체인(GDAL·tippecanoe) 설치 ──────"
-# GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·10-gen-buildings.sh 변환에 필수.
+# GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·load_building.sh 변환에 필수.
 if have gdaltransform && have ogr2ogr; then
   echo "✓ 이미 설치됨: GDAL ($(command -v ogr2ogr))"
 elif have apt-get; then

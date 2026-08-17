@@ -573,7 +573,7 @@ def prepare_sources(keys=None, emit=None):
 # 빌드 입력 — 기본값은 Build Studio 업로드 적재 경로(prepare_sources). 외부 경로는 환경변수로 덮어쓰기.
 SRC_JUSO = os.environ.get("SRC_JUSO", str(BUILD_HOME / "staged/navi"))
 SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", str(BUILD_HOME / "staged/localdata"))
-SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))
+SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))   # 건물 SHP 경로 오버라이드 계약(load-all.sh:88 소비). TARGETS() 미사용은 정상 — test_build_studio.py 가 계약 고정
 
 # ── 빌드 대상 정의 ─────────────────────────────────────────────────
 # kind: 카드 id / label / cmd(argv) / dep(선행 대상) / weight(진행률 가중 단계 키워드)
