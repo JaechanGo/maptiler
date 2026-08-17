@@ -10,7 +10,10 @@
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
 """
-import argparse, collections, io, json, math, os, pathlib, re, sqlite3, sys, time, unicodedata
+import argparse, collections, io, json, math, os, pathlib, re, sqlite3, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
+from _common.textnorm import biznrm_nfc as biznrm, norm, rnorm        # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SIDO = ["seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","sejong","gyunggi",
@@ -43,8 +46,7 @@ def utmk_to_wgs84(E,N):
     lon=_lon0+(D-(1+2*T+C)*D**3/6+(5-2*C+28*T-3*C**2+8*_ep2+24*T**2)*D**5/120)/math.cos(p)
     return round(math.degrees(lon),6), round(math.degrees(lat),6)
 
-def norm(s): return re.sub(r"\s+"," ",unicodedata.normalize("NFC",s or "")).strip()
-def rnorm(s): return re.sub(r"[.\s]","",unicodedata.normalize("NFC",s or ""))
+# norm·rnorm 은 scripts/_common/textnorm.py 가 정본이다(위 import).
 _DORO_RE = re.compile(r"(\S*(?:대로|로|길))\s+(\d+)(?:-(\d+))?")
 _GIL_SP = re.compile(r"([로가])\s+(\d+(?:번|가)?길)")   # '퇴계로 34길' 처럼 번호길 앞 띄어쓰기 → 붙임(안 그러면 '퇴계로'+34번지로 오독)
 def _mainno(s):                 # 결정5: 본번 int4 안전정수화(length<=7). 비정상 자릿수·비숫자→None(매칭 불성립). int4 가드 제거 금지(Global Constraint).
@@ -136,10 +138,9 @@ def _split_emd_ri(jibun_txt, sido, sgg):   # 결정2: 지번 텍스트 → (법�
             if j+1 < len(rest) and rest[j+1].endswith("리"): ri = rest[j+1]   # 다음 토큰이 리(면/읍 하위)면 채움
             break
     return (bjd, ri)
-_BIZ_PUNCT=re.compile(r"[\s()\[\]{}<>（）【】·.,/&-]+")
-# biz 중복(대표) 판정 키. ※과거 "12-build-poi.sh _nrm 와 동일" 주석은 허위였음(해당 파일에 _nrm 부재, 파일도 T028 에서 폐기)
-# — 정규화 정본은 T028 계획서 §4 참조. 여기는 NFC, dedup_er.py 는 NFKC 로 실재 발산(전수 9,061행)이며 의도된 것이다.
-def biznrm(s): return _BIZ_PUNCT.sub("",unicodedata.normalize("NFC",s or "")).lower()
+# biz 중복(대표) 판정 키 = biznrm. 정본은 scripts/_common/textnorm.py 의 biznrm_nfc 다(위 import).
+# 여기는 NFC, dedup_er.py 는 NFKC 로 실재 발산(전수 9,061행)하며 의도된 것 — 근거와
+# 과거 허위주석("12-build-poi.sh _nrm 와 동일")의 전말은 textnorm 모듈 docstring 에 옮겼다.
 def search_text(name, is_station):
     name=norm(name); v={name, name.replace(' ','')}
     if is_station:

@@ -280,11 +280,39 @@ class TestCopySync(unittest.TestCase):
             "%s 의 %s 가 정본과 구조가 다르다" % (filename, fname),
         )
 
-    def test_09_gen_geocode_norm(self):
-        self._assert_synced("09-gen-geocode.py", "norm")
+    def _assert_copy_removed(self, filename, fnames, import_names):
+        """사본이 사라지고 정본 import 로 대체됐는지 확인한다.
 
-    def test_09_gen_geocode_rnorm(self):
-        self._assert_synced("09-gen-geocode.py", "rnorm")
+        전환이 끝난 파일은 "사본이 정본과 같은가"가 아니라 "사본이 없는가"를
+        묻는다. 누군가 정의를 되살리거나 import 를 지우면 실패한다.
+        """
+        path = _COPIES[filename]
+        for fname in fnames:
+            self.assertIsNone(
+                _extract_def(path, fname),
+                "%s 에 %s 인라인 사본이 되살아났다 — 정본 import 로 되돌릴 것"
+                % (filename, fname),
+            )
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        m = re.search(r"^from _common\.textnorm import .*$", src, re.M)
+        self.assertIsNotNone(m, "%s 에 textnorm import 문이 없다" % filename)
+        for name in import_names:
+            self.assertIn(
+                name, m.group(0), "%s 의 import 에 %r 이 없다" % (filename, name)
+            )
+
+    def test_09_gen_geocode_copy_removed(self):
+        """09-gen-geocode.py 는 정본을 import 한다(커밋 6).
+
+        `biznrm_nfc as biznrm` 별칭까지 단언한다. NFKC 판으로 바꿔 달면
+        geocode.sqlite 의 biz 대표 판정 키가 조용히 바뀌기 때문이다(§4.2).
+        """
+        self._assert_copy_removed(
+            "09-gen-geocode.py",
+            ["norm", "rnorm", "biznrm"],
+            ["norm", "rnorm", "biznrm_nfc as biznrm"],
+        )
 
     def test_geocode_api_norm(self):
         self._assert_synced("geocode-api.py", "norm")
@@ -305,14 +333,7 @@ class TestCopySync(unittest.TestCase):
         TypeError 였고 expectedFailure 로 기록했다. 커밋 4 에서 임포트로 전환해
         사본 자체를 없앴으므로, 이제는 "사본 대조"가 아니라 "사본 소멸 확인"이다.
         """
-        path = _COPIES["osm-from-mbtiles.py"]
-        self.assertIsNone(
-            _extract_def(path, "norm"),
-            "osm-from-mbtiles.py 에 norm 인라인 사본이 되살아났다 — 정본 import 로 되돌릴 것",
-        )
-        with open(path, encoding="utf-8") as fh:
-            src = fh.read()
-        self.assertIn("from _common.textnorm import norm", src)
+        self._assert_copy_removed("osm-from-mbtiles.py", ["norm"], ["norm"])
 
 
 if __name__ == "__main__":
