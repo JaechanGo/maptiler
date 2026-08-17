@@ -26,7 +26,9 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -1681,6 +1683,187 @@ class TestBoundaryRiSource(IsolatedBuildHome):
         self.assertIn("load-all.sh", note)
         self.assertIn("--kind aed", note)
         self.assertNotIn("collect", self.srcs["aed"], "aed 는 자동수집 미배선 상태 유지")
+
+
+# ════════════════════════════════════════════════════════════════
+# T4(배선부) — build-studio.py areas 3곳 배선 (T028 커밋 11)
+#
+# 검증기·명령체인·TFRESH 세 곳이 붙어야 리 SHP 가 "업로드하면 그냥 적재되는"
+# 원천이 된다. 하나라도 빠지면 조용히 절름발이가 된다:
+#   검증기 누락  → 업로드 화면이 "검증기 미정의" warn 으로 통과시킨다
+#   명령 누락    → 업로드해도 areas 에 legal-ri 가 영영 안 들어간다
+#   TFRESH 누락  → 리 SHP 를 교체해도 areas 가 fresh 로 판정돼 재빌드가 안 된다
+# ════════════════════════════════════════════════════════════════
+class TestBoundaryRiWiring(IsolatedBuildHome):
+    """T028 §9-T4 배선부. 데이터 등록분(data-sources.json)은 커밋 10.
+
+    명령 문자열은 **문자열 단언만으로는 부족하다**. rev0 안이 통째로 폐기된
+    이유 3가지(§5.2)가 전부 "문자열은 그럴듯한데 실행하면 틀린" 종류였다:
+      1) f-string 리터럴 `{` 미이스케이프 → import 시점 SyntaxError(콘솔 전면 불능)
+      2) `$RI` 미정의 → `[ -d "" ]` 가 항상 거짓 → 리가 있어도 영구 건너뜀
+      3) `A && B || echo` → 06 실패를 rc=0 으로 삼켜 areas 가 성공으로 보고됨
+    그래서 여기서는 **생성된 가드 절편을 실제로 bash 에 넣어 돌린다**(2·3 검출).
+    다만 `06-gen-areas.py` 자체는 절대 실행하지 않는다 — geocode.sqlite 에
+    DELETE(`06:80-81`)를 거는 스크립트다. python3 호출부만 `echo`/`false` 로
+    치환해 **분기 판정과 rc 전파만** 본다.
+    """
+
+    RI = "boundary_ri"
+
+    def setUp(self):
+        super().setUp()
+        self.cmd = M.TARGETS()["areas"]["cmd"]
+
+    # ── 절편 추출 헬퍼 ────────────────────────────────────────
+    def _fragment(self, stub):
+        """areas 명령의 마지막 ` && ` 조각(= 리 가드)에서 06 호출만 stub 으로 치환.
+
+        `rpartition` 을 쓰는 이유: 가드 내부에는 ` && ` 가 없어야 한다(if/else 로
+        쓰기로 한 이유 그 자체). 만약 누군가 가드 안에 `&&` 를 넣으면 절편이
+        잘려 뒤따르는 실행 테스트가 깨지므로, 그것도 회귀 신호가 된다.
+
+        **뽑아낸 조각이 진짜 리 가드인지 먼저 확인한다.** 이 단언이 없으면 가드
+        자체가 통째로 없을 때 admin-dong 조각이 대신 잡혀, 실행 테스트 3개가
+        엉뚱한 명령을 검사하며 초록으로 통과한다(실제로 그렇게 통과했다).
+        """
+        frag = self.cmd[2].rpartition(" && ")[2]
+        self.assertIn("legal-ri", frag, f"마지막 && 조각이 리 가드가 아니다: {frag[:80]!r}")
+        return re.sub(r'python3 "[^"]*06-gen-areas\.py"', stub, frag)
+
+    def _run(self, frag):
+        return subprocess.run(["bash", "-c", frag], capture_output=True, text=True)
+
+    @property
+    def _ri_dir(self):
+        return self.home / "sources" / "boundary" / "ri"
+
+    # ── 1) 검증기 ─────────────────────────────────────────────
+    def test_validator_registered(self):
+        """`_v_boundary` 를 **재사용**한다(동일 함수 객체여야 한다).
+
+        복제본을 만들면 zip-of-zips 처리 로직이 두 벌로 갈라진다. `boundary_legal`
+        이 시도별 중첩 zip 인데 리(30602)도 같은 계열이라 같은 검증기가 맞다.
+        """
+        self.assertIs(M._VALIDATORS.get(self.RI), M._v_boundary)
+        self.assertIs(M._VALIDATORS["boundary_legal"], M._v_boundary)
+
+    def test_validator_actually_runs(self):
+        """등록만이 아니라 `_validate_source` 경로가 실제로 그 검증기를 탄다.
+
+        미등록이면 `:302-303` 이 ("warn", "N개 파일(검증기 미정의)") 로 빠져
+        형식이 틀려도 업로드가 통과한다 — 그 폴백과 구분되는지 본다.
+        """
+        d = M.SOURCES_DIR / self.RI
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "LSMD_ADM_SECT_RI_11.shp").write_bytes(b"\x00")
+        verdict, detail = M._validate_source(self.RI)
+        self.assertEqual(verdict, "ok")
+        self.assertNotIn("검증기 미정의", detail)
+
+    # ── 2) TFRESH ─────────────────────────────────────────────
+    def test_tfresh_src_includes_ri(self):
+        """리 SHP 를 교체하면 areas 가 stale 로 떨어져야 한다.
+
+        `src` 는 staged_sig 변경 추적 대상 원천키 목록이다(`:633`). 빠뜨리면
+        새 리 경계를 올려도 areas 가 fresh 로 판정돼 **조용히 재빌드를 건너뛴다**.
+        기존 2키가 유지되는지도 함께 본다(치환 사고 방지).
+        """
+        src = M.TFRESH["areas"]["src"]
+        self.assertIn(self.RI, src)
+        self.assertIn("boundary_legal", src)
+        self.assertIn("boundary_admin", src)
+        self.assertEqual(len(src), len(set(src)), "중복 등록")
+        self.assertEqual(M.TFRESH["areas"]["dep_art"], ["geocode"])
+        self.assertEqual(M.TFRESH["areas"]["scripts"], ["scripts/06-gen-areas.py"])
+
+    # ── 3) 명령 체인 ──────────────────────────────────────────
+    def test_areas_cmd_has_legal_ri(self):
+        """3번째 호출이 붙었고 `--type legal-ri` 로 나간다.
+
+        `06-gen-areas.py:57` 의 `--type` 은 choices 없는 자유 문자열이라
+        오타가 나도 인자 파싱은 통과하고 areas 에 엉뚱한 type 이 적재된다.
+        """
+        self.assertEqual(self.cmd[:2], ["bash", "-c"])
+        s = self.cmd[2]
+        self.assertEqual(s.count("06-gen-areas.py"), 3, "legal-dong·admin-dong·legal-ri 3회")
+        self.assertIn("--type legal-ri", s)
+        self.assertIn("--name-field RI_NM", s)
+        self.assertIn("--code-field RI_CD", s)
+        self.assertEqual(s.count("--srs EPSG:5186"), 3)
+        # 기존 2개는 그대로
+        self.assertIn("--type legal-dong", s)
+        self.assertIn("--type admin-dong", s)
+
+    def test_areas_cmd_guard_shape(self):
+        """`if/else` 여야 한다 — `&&` + `|| echo` 는 **실패를 삼킨다**(폐기 사유 3).
+
+        디렉터리가 있는데 06 이 실패하면 `|| echo` 가 rc 를 0 으로 덮어써
+        areas 단계가 성공으로 보고된다. 실행 테스트(test_guard_propagates_failure)
+        가 동작으로도 잡지만, 형태 자체를 못박아 재도입을 막는다.
+        """
+        s = self.cmd[2]
+        self.assertIn("if [ -d ", s)
+        self.assertIn("; then", s)
+        self.assertIn("else", s)
+        self.assertTrue(s.rstrip().endswith("fi"), f"가드가 fi 로 닫히지 않는다: …{s[-40:]!r}")
+        self.assertNotIn("|| echo", s)
+
+    def test_areas_cmd_no_shell_var(self):
+        """경로는 **파이썬이 박는다** — 셸 변수 참조가 있으면 안 된다(폐기 사유 2).
+
+        `bash -c` 가 받는 것은 조립된 문자열뿐이고 `$RI`·`$BUILD_HOME` 은 이
+        셸에 상속되지 않는다. 참조하면 `[ -d "" ]` 가 항상 거짓이 되어
+        **리 경계가 있어도 영구히 건너뛴다** — 조용해서 가장 늦게 발견된다.
+        리터럴 중괄호(폐기 사유 1)도 여기서 함께 차단한다.
+        """
+        s = self.cmd[2]
+        self.assertNotIn("$", s)
+        self.assertNotIn("{", s)
+        self.assertNotIn("}", s)
+        self.assertIn(str(self._ri_dir), s, "BUILD_HOME 파생 실경로가 박혀 있어야 한다")
+
+    def test_areas_cmd_bash_syntax(self):
+        """§8-V2b — `py_compile` 은 셸 문법을 못 잡는다. `bash -n` 으로 별도 확인."""
+        p = self.home / "_areas_cmd.sh"
+        p.write_text(self.cmd[2], encoding="utf-8")
+        r = subprocess.run(["bash", "-n", str(p)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"셸 문법 오류: {r.stderr}")
+
+    # ── 4) 가드 동작(실행) ────────────────────────────────────
+    def test_guard_skips_when_absent(self):
+        """리 미반입 상태(=지금)에서 rc=0 으로 통과하고 안내를 남긴다.
+
+        이게 커밋 11 을 "실질 무해"하게 만드는 근거다(§10). rc 가 0 이 아니면
+        `&&` 체인이 끊겨 **기존 areas 빌드까지 실패**한다.
+        """
+        self.assertFalse(self._ri_dir.exists())
+        r = self._run(self._fragment("echo RAN"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("건너뜀", r.stdout)
+        self.assertNotIn("RAN", r.stdout)
+
+    def test_guard_runs_when_present(self):
+        """디렉터리가 생기면 실제로 then 분기로 들어간다(`$RI` 사고의 동작 검출).
+
+        문자열 단언만으로는 폐기 사유 2 를 못 잡는다 — `[ -d "$RI" ]` 도
+        `if [ -d ` 를 포함하기 때문이다. 분기가 **바뀌는지**를 봐야 한다.
+        """
+        self._ri_dir.mkdir(parents=True)
+        r = self._run(self._fragment("echo RAN"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RAN", r.stdout)
+        self.assertIn("--type legal-ri", r.stdout)
+        self.assertNotIn("건너뜀", r.stdout)
+
+    def test_guard_propagates_failure(self):
+        """06 이 실패하면 rc 가 전파돼야 한다(폐기 사유 3 의 동작 검출).
+
+        `|| echo` 였다면 여기서 rc=0 이 나오고, areas 는 아무 것도 적재하지
+        않은 채 '성공'으로 기록된다.
+        """
+        self._ri_dir.mkdir(parents=True)
+        r = self._run(self._fragment("false"))
+        self.assertNotEqual(r.returncode, 0, "06 실패가 삼켜졌다")
 
 
 if __name__ == "__main__":

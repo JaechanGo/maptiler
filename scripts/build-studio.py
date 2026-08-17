@@ -290,7 +290,8 @@ def _v_style(files):
 
 
 _VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building,
-               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary, "style": _v_style}
+               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary, "boundary_ri": _v_boundary,
+               "style": _v_style}
 
 
 def _validate_source(key):
@@ -598,10 +599,22 @@ def TARGETS():
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
                  "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er"]),   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
-        "areas": dict(label="행정구역 경계 (법정동·행정동 → areas)", dep="geocode",
+        # 리(legal-ri)는 if/else 가드로 감싼다 — 아직 한 번도 반입한 적이 없어 보통 디렉터리가 없다.
+        #   · `&& … || echo` 로 쓰지 않는 이유: 디렉터리가 있는데 06 이 실패해도 rc 가 0 으로 덮여
+        #     areas 단계가 '성공'으로 기록된다. if/else 는 06 의 rc 를 그대로 전파한다.
+        #   · 경로에 셸 변수를 쓰지 않는 이유: 이 bash -c 는 BUILD_HOME 을 상속받지 않는다.
+        #     `[ -d "$RI" ]` 로 쓰면 항상 거짓이 되어 리가 있어도 영구히 건너뛴다(조용한 실패).
+        #   · --name-field RI_NM / --code-field RI_CD 는 **잠정값**이다. 리 SHP 반입 시 ogrinfo 로
+        #     확정할 것. 틀리면 06-gen-areas.py:95 의 skip 카운터가 전건 skip 으로 자기진단한다.
+        "areas": dict(label="행정구역 경계 (법정동·행정동·리 → areas)", dep="geocode",
             cmd=["bash", "-c",
                  f'python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/legal"}" --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
-                 f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"']),
+                 f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
+                 f' && if [ -d "{BUILD_HOME/"sources/boundary/ri"}" ]; then'
+                 f' python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/ri"}"'
+                 f' --srs EPSG:5186 --name-field RI_NM --code-field RI_CD --type legal-ri'
+                 f' --db "{BUILD_HOME/"geocode.sqlite"}";'
+                 f' else echo "(건너뜀) 리 경계 없음: {BUILD_HOME/"sources/boundary/ri"}"; fi']),
         # 하이브리드: 건물·필지·POI·시설은 PostGIS→martin(/dyn) 서빙으로 일원화 → buildings.mbtiles/poi.mbtiles 타깃 폐기.
         # 동적 레이어 = scripts/postgis/load-all.sh(admin·parcel·building·geocode→address/poi·facility) 한 타깃으로.
         # (PostGIS 적재는 빌드호스트에서 compose --profile postgis 기동 후 실행.)
@@ -650,7 +663,9 @@ TFRESH = {
     "geocode": {"src": ["juso_navi", "sangga"], "dep_art": ["osm_sqlite", "localdata", "facility"],
                 "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py"],
                 "out": [BUILD_HOME / "geocode.sqlite"]},
-    "areas": {"src": ["boundary_legal", "boundary_admin"], "dep_art": ["geocode"],
+    # boundary_ri: 리 SHP 를 새로 올리거나 교체하면 areas 가 stale 로 떨어져 재적재된다.
+    #   빠뜨리면 새 경계를 올려도 fresh 판정으로 조용히 건너뛴다.
+    "areas": {"src": ["boundary_legal", "boundary_admin", "boundary_ri"], "dep_art": ["geocode"],
               "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
     "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility"],
                      "dep_art": ["geocode"],
