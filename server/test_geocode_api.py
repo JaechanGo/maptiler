@@ -945,6 +945,14 @@ KNN_ROW = {
     "bld": "", "postal": "10550", "haeng_dong": "행신3동",
     "bcode": "4128110700", "hcode": "4128163000", "kind": "addr",
 }
+# 합성PNU 조인이 집어 오는 '같은 필지 안'의 주소점(T029). 도로명계열은 KNN_ROW 와 전부 다르게
+# 둔다 — 값이 겹치면 "조인이 이겼다"와 "조인이 죽어서 KNN 이 그대로다"를 구별할 수 없다.
+JOIN_ROW = {
+    "sido": "경기도", "sigungu": "고양시 덕양구", "emd": "화전동", "ri": None,
+    "jibun": "화전동 825-42", "road": "화랑로", "main_no": 12, "sub_no": 3,
+    "bld": "화전빌딩", "postal": "10561", "haeng_dong": "화전동",
+    "bcode": "4128112900", "hcode": "4128155000", "kind": "addr",
+}
 
 
 class SeqCursor(FakeCursor):
@@ -954,42 +962,58 @@ class SeqCursor(FakeCursor):
     FakeCursor 는 모든 execute 에 같은 결과를 돌려주므로 병합·폴백 검증이 불가능하다.
     """
 
-    def __init__(self, addr=None, parcel=None, nearest=None, areas=None, parcel_exc=None):
+    def __init__(self, addr=None, parcel=None, nearest=None, areas=None,
+                 parcel_exc=None, join=None, join_exc=None):
         super().__init__()
         self._addr, self._parcel = addr, parcel
         self._nearest = nearest if nearest is not None else []
         self._areas = areas if areas is not None else []
         self._parcel_exc = parcel_exc
+        self._join = join            # None = 조인 0행(도로 필지) → 폴백 경로
+        self._join_exc = join_exc    # 예외 주입 → SAVEPOINT 폴백(7c) 검사용
         self._last = None
 
     def execute(self, sql, params=None):
-        self.executed.append((sql, params))
         s = " ".join(sql.split())
-        if "FROM parcel" in s:
+        self.executed.append((s, params))
+        # ── 조인 질의 고유 토큰을 '가장 먼저' 검사한다.
+        #    조인 질의는 FROM address a 라 아래 세 분기 어디에도 안 걸리고 else(nearest)로
+        #    떨어지는데, 그러면 fetchone() 이 PIP_ROW(지적도 행)를 돌려주어 조인이 '항상 성공'
+        #    하는 것처럼 보인다 — 0행/예외를 주입할 방법도 사라진다.
+        if "substr(a.bd_mgt_sn" in s:
+            self._last = "join"
+            if self._join_exc is not None:
+                raise self._join_exc
+        elif "FROM parcel" in s:
             self._last = "parcel"
             if self._parcel_exc is not None:
                 raise self._parcel_exc
         elif "FROM admin_boundary" in s:
             self._last = "areas"
-        elif "kind='addr'" in s:
+        elif "kind='addr'" in s or "kind = 'addr'" in s:
             self._last = "addr"
         else:
             self._last = "nearest"
         return self
 
     def fetchone(self):
-        return self._addr if self._last == "addr" else self._parcel
+        if self._last == "join":
+            return self._join            # None → 0행 → 호출부가 KNN 으로 폴백
+        if self._last == "addr":
+            return self._addr
+        return self._parcel
 
     def fetchall(self):
         return self._areas if self._last == "areas" else self._nearest
 
     def sql_of(self, tag):
-        """저장된 질의 중 tag('parcel'/'addr'/'areas') 에 해당하는 첫 SQL 을 공백정규화해 반환."""
+        """저장된 질의 중 tag('join'/'parcel'/'addr'/'areas') 에 해당하는 첫 SQL 을 반환."""
         for sql, _ in self.executed:
             s = " ".join(sql.split())
+            if tag == "join" and "substr(a.bd_mgt_sn" in s: return s
             if tag == "parcel" and "FROM parcel" in s: return s
             if tag == "areas" and "FROM admin_boundary" in s: return s
-            if tag == "addr" and "kind='addr'" in s: return s
+            if tag == "addr" and ("kind='addr'" in s or "kind = 'addr'" in s): return s
         return None
 
 
@@ -1360,6 +1384,69 @@ class TestAddrAtMeta(unittest.TestCase):
         self.assertIn("LIMIT 1", sql)
         self.assertNotIn("parcel", sql)
         self.assertNotIn("ST_Contains", sql)
+
+
+# ── TDD 13 (T029): 합성PNU 키조인 SQL 형태 계약 ──────────────────
+#  road_at_parcel() 이 만드는 SQL 은 '문자열 그 자체'가 계약이다. 이 질의는 세 가지가 동시에
+#  맞아야만 의도대로 도는데, 셋 다 틀려도 예외가 안 나서 런타임으로는 구별이 안 된다:
+#
+#   (a) kind 강제 — 없으면 bcode/bd_mgt_sn 이 NULL 인 biz·poi 행까지 후보에 섞인다.
+#   (b) 합성키 — raw bd_mgt_sn 앞 19자로 맞추면 앞 10자리에 박힌 '폐지된' 법정동코드 때문에
+#       완주군에서 매칭률이 2.8% 로 무너진다(bcode 로 갈아끼우면 97.2%).
+#   (c) MATERIALIZED — 빠지면 PG12+ 가 CTE 를 인라인하고, 플래너가 ORDER BY geom <-> pt 를
+#       보고 address_addr_geom_gix 를 골라 버린다. 합성키는 Index Cond 가 아니라 Filter 로
+#       강등되고 1076만행을 훑는다. 결과는 '느리지만 정답'이라 테스트로만 잡힌다.
+#
+#  그리고 모든 컬럼은 a. 로 수식한다 — 미수식 컬럼은 ambiguous 예외를 부르고, 그 예외는
+#  SAVEPOINT 폴백에 삼켜져 **조용히 기준선과 똑같은 출력**이 된다(TestParcelSqlQualified 와 같은 이유).
+class TestJoinSqlContract(unittest.TestCase):
+    PNU = "4128112900108250042"          # PIP_ROW 의 필지(화전동 825-42)
+    LON, LAT = 126.8713101, 37.6192808
+
+    def _sql(self):
+        cur = FakeCursor(fetchone_result=dict(JOIN_ROW))
+        M.road_at_parcel(cur, self.PNU, self.LON, self.LAT)
+        return " ".join(cur.executed[0][0].split())
+
+    def test_13a_kind_addr_forced(self):
+        # §3.2 고정 표기 — 등호 양옆 공백. SeqCursor 의 분기와 문자열이 맞아야 한다.
+        self.assertIn("a.kind = 'addr'", self._sql())
+
+    def test_13b_synthetic_pnu_not_raw(self):
+        sql = self._sql()
+        self.assertIn("a.bcode || substr(a.bd_mgt_sn, 11, 9)", sql)
+        # raw 19자 절단(= 폐지 법정동코드를 그대로 믿는 방식)이 아님을 못박는다.
+        self.assertNotIn("substr(a.bd_mgt_sn, 1, 19)", sql)
+        self.assertNotIn("left(a.bd_mgt_sn", sql)
+
+    def test_13c_materialized_fence(self):
+        sql = self._sql()
+        self.assertIn("WITH cand AS MATERIALIZED", sql)
+        self.assertIn("<->", sql)                 # 필지 내 최근접 타이브레이크
+        self.assertIn("LIMIT 1", sql)
+
+    def test_13d_all_columns_qualified(self):
+        # address 쪽에서 이 질의가 만지는 컬럼 전부. AS 별칭은 모호하지 않으니 제외.
+        s = re.sub(r"\bAS\s+\w+", "", self._sql(), flags=re.I)
+        for col in ("kind", "bcode", "bd_mgt_sn", "geom"):
+            m = re.search(rf"(?<![.\w]){col}\b", s)
+            if m:
+                self.fail(f"한정되지 않은 컬럼 {col!r} 발견 (…{s[max(0,m.start()-40):m.end()+20]}…)")
+
+    def test_13e_params_are_bound_not_interpolated(self):
+        # PNU 는 외부 입력이다. 문자열 보간이면 SQL 에 값이 박혀 나온다.
+        cur = FakeCursor(fetchone_result=dict(JOIN_ROW))
+        M.road_at_parcel(cur, self.PNU, self.LON, self.LAT)
+        sql, params = cur.executed[0]
+        self.assertNotIn(self.PNU, sql)
+        self.assertIn(self.PNU, list(params))
+        self.assertEqual(len(params), 5)          # lon,lat(거리) · pnu · lon,lat(정렬)
+
+    def test_13f_distance_is_geography_metres(self):
+        # join_dist_m 은 §5 판정(필지소속·폴백 발화)에 쓰인다. degree 로 재면 무의미하다.
+        sql = self._sql()
+        self.assertIn("::geography", sql)
+        self.assertIn("join_dist_m", sql)
 
 
 if __name__ == "__main__":

@@ -866,6 +866,70 @@ def parcel_at(cur, lon, lat):
         return None
 
 
+def road_at_parcel(cur, pnu, lon, lat):
+    """PIP 로 확정한 필지(pnu) **안에 있는** address 주소점 1행. 0행·실패 시 None.
+
+    parcel_at 이 지번축을 고쳤지만 도로명·우편번호·건물명·행정동은 여전히 addr_at(KNN)
+    출처다. 그래서 응답이 '지번은 A필지, 도로명은 B필지' 로 섞인다(before 실측 65.5%).
+    필지가 확정됐으면 도로명도 **그 필지 안의 주소점**에서 가져와야 한다 — 이 함수가 그
+    한 줄을 집는다. 조인축은 필지 식별자 PNU 다.
+
+    키를 raw bd_mgt_sn 앞 19자가 아니라 bcode||substr(bd_mgt_sn,11,9) 로 합성하는 이유:
+      bd_mgt_sn 은 '건물관리번호' 라 앞 10자리가 법정동코드인데, 그 값이 **폐지된 코드로
+      박제**돼 있다. 예컨대 완주군은 4571041023(전라북도, exist=f)로 남아 있고 현행은
+      5271041023(전북특별자치도, exist=t)이다. parcel.pnu 는 현행 코드를 쓰므로 raw 로
+      맞추면 완주군 매칭률이 2.8% 까지 무너진다. 앞 10자리를 버리고 같은 행의 bcode(현행)로
+      갈아끼우면 97.2% 로 회복된다. 뒤 9자리(산 구분 1 + 본번 4 + 부번 4)는 양쪽이 같다.
+
+    WITH cand AS MATERIALIZED 는 장식이 아니라 **최적화 울타리**다. 빼면 PG12+ 가 CTE 를
+    인라인하고, 플래너는 ORDER BY geom <-> pt 를 보고 address_addr_geom_gix 를 골라
+    합성키를 Index Cond 가 아닌 Filter 로 강등시킨다(실측). 결과가 틀리지는 않으므로
+    1076만행 전주행을 눈치채지 못한 채 배포하게 된다.
+
+    kind = 'addr' 는 인덱스 술어와 질의 양쪽에 건다. bd_mgt_sn·bcode 가 100% 채워진 건
+    addr(1069만행)뿐이고 biz(491만)는 bcode 가, poi/road/facility 등(~68만)은 둘 다 NULL
+    이라 애초에 조인 키가 성립하지 않는다.
+
+    0행은 오류가 아니라 **정상 경로**다. 도로·하천 같은 필지에는 주소점이 없고(도 필지
+    실측 0/29), 전국 필지의 16.3% 가 도다. 그때는 호출측이 기존 KNN 값을 그대로 쓴다.
+    거리 임계는 두지 않는다 — 118,332㎡ 행당동 347 이나 대현동 11-1(362.6m) 처럼 정상적으로
+    먼 대필지가 임계에 걸려 되돌아가기 때문이다. '같은 필지 안' 이라는 사실이 곧 보증이다.
+
+    한 필지에 주소점이 여럿일 수 있어(종로 실측 필지당 평균 1.16행·최대 8행) 질의점에서
+    가장 가까운 하나를 고른다. 이 정렬은 CTE **밖**이라 후보 집합이 이미 필지 안으로
+    좁혀진 뒤에 돈다.
+
+    모든 컬럼을 a. 로 수식하는 것과 실패 시 SAVEPOINT 로 되감는 것은 parcel_at 과 같은
+    이유다 — 미수식/예외는 폴백에 삼켜져 **조용히 기준선과 똑같은 출력**을 내고, 예외를
+    삼키기만 하면 트랜잭션이 abort 로 남아 뒤따르는 질의가 전부 죽는다(폴백이 아니라 500).
+    """
+    sql = ("WITH cand AS MATERIALIZED ("
+           " SELECT a.*, ST_Distance(a.geom::geography,"
+           " ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS join_dist_m"
+           " FROM address a"
+           " WHERE a.kind = 'addr'"
+           " AND a.bcode || substr(a.bd_mgt_sn, 11, 9) = %s"
+           " )"
+           " SELECT c.* FROM cand c"
+           " ORDER BY c.geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326)"
+           " LIMIT 1")
+    params = (lon, lat, pnu, lon, lat)
+    tx = getattr(getattr(cur, "connection", None), "transaction", None)
+    try:
+        if tx is not None:
+            with tx():                                  # 실패 시 SAVEPOINT 까지만 되감기
+                cur.execute(sql, params)
+                return cur.fetchone()
+        cur.execute(sql, params)
+        return cur.fetchone()
+    except Exception as e:
+        # 조용한 무력화를 막기 위해 반드시 남긴다. 이 예외는 폴백에 삼켜지면
+        # '조인이 통째로 죽은 상태'와 '도로 필지라 0행인 정상 상태'가 겉보기에 같아진다.
+        print(f"geocode-api-pg: NOTE 합성PNU 조인 실패 → KNN 도로명 유지 "
+              f"({type(e).__name__}: {str(e)[:120]})", file=sys.stderr)
+        return None
+
+
 # 산번지 폴리곤 결측 판정 거리 임계(m). 벤치 595건 실측 근거:
 #  · KNN=산·PIP=일반 인 좌표는 7건뿐이고, 그중 폴리곤 결측인 NO119 만 거리 0.00m,
 #    나머지 6건 중 최근접이 32.65m 다 → 5m 는 오탐측 경계에서 6.5배 여유.
