@@ -1096,12 +1096,24 @@ class TestReverseMerge(unittest.TestCase):
         out, _ = _reverse()
         self.assertEqual(out["address"]["parcel"], "경기도 고양시 덕양구 화전동 825-42")
 
-    def test_6b_road_zipcode_bld_come_from_knn(self):
-        # addr_at 은 도로명·우편번호·건물명의 유일한 출처다. PIP 가 이 값을 지우면 회귀다.
-        out, _ = _reverse()
+    def test_6b_road_side_falls_back_to_knn_when_join_empty(self):
+        # 조인 0행이면 addr_at 이 도로명·우편번호·건물명의 유일한 출처다. PIP 가 이 값을
+        # 지우면 회귀다. 이 경로는 예외가 아니라 상시 경로다 — 전국 필지의 16.28% 가
+        # 도(道)이고 도로 필지에는 주소점이 없다(도 필지 실측 매칭 0/29).
+        out, _ = _reverse(join=None)
         base = M.addr_obj(dict(KNN_ROW))
         for k in ("road", "zipcode", "bld"):
             self.assertEqual(out["address"][k], base[k], k)
+
+    def test_6b2_road_side_comes_from_join_when_key_join_hits(self):
+        # 조인 1행이면 도로명축은 '확정된 필지 안'의 주소점으로 교체된다.
+        # assertNotEqual 을 함께 걸지 않으면 조인이 통째로 죽어 KNN 이 그대로 남은 상태도
+        # 두 출처 값이 우연히 같기만 하면 통과한다 — 그것이 이 태스크의 대표 실패 모드다.
+        out, _ = _reverse(join=dict(JOIN_ROW))
+        want, knn = M.addr_obj(dict(JOIN_ROW)), M.addr_obj(dict(KNN_ROW))
+        for k in ("road", "zipcode", "bld"):
+            self.assertEqual(out["address"][k], want[k], k)
+            self.assertNotEqual(out["address"][k], knn[k], k)
 
     def test_6c_region_fields_move_with_the_jibun(self):
         # 지번만 PIP 로 바꾸고 시도·시군구·읍면동을 KNN 것으로 두면
@@ -1113,12 +1125,30 @@ class TestReverseMerge(unittest.TestCase):
         self.assertEqual((st["ji_main"], st["ji_sub"]), (825, 42))
         self.assertIsNone(st["ri"])
 
+    def test_6c2_jibun_side_stays_pip_even_when_join_hits(self):
+        # 조인행은 도로명계열 9필드만 덮는다. structure 전체를 조인행으로 갈아끼우는 구현은
+        # JOIN_ROW 의 지번계열이 PIP 와 같은 필지라 대부분 값이 겹쳐 눈에 띄지 않는데,
+        # san 하나만은 갈린다 — PIP 는 bool(False), addr_obj 는 항상 None 이다(F4).
+        st = _reverse(join=dict(JOIN_ROW))[0]["address"]["structure"]
+        self.assertIs(st["san"], False)
+        self.assertEqual((st["ji_main"], st["ji_sub"]), (825, 42))
+        self.assertEqual(st["emd"], "화전동")
+
     def test_6d_road_side_structure_fields_kept_from_knn(self):
-        st = _reverse()[0]["address"]["structure"]
+        st = _reverse(join=None)[0]["address"]["structure"]
         base = M.addr_obj(dict(KNN_ROW))["structure"]
         for k in ("road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
                   "bld_name", "zipcode", "haeng_dong", "h_code"):
             self.assertEqual(st[k], base[k], k)
+
+    def test_6d2_road_side_structure_fields_come_from_join(self):
+        st = _reverse(join=dict(JOIN_ROW))[0]["address"]["structure"]
+        want = M.addr_obj(dict(JOIN_ROW))["structure"]
+        knn = M.addr_obj(dict(KNN_ROW))["structure"]
+        for k in ("road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
+                  "bld_name", "zipcode", "haeng_dong", "h_code"):
+            self.assertEqual(st[k], want[k], k)
+            self.assertNotEqual(st[k], knn[k], k)
 
     def test_6e_nearest_and_areas_untouched(self):
         # PIP 는 address 에만 적용한다. nearest[] 는 종전 KNN 표기를 유지해야 한다.
@@ -1164,6 +1194,28 @@ class TestReverseFallback(unittest.TestCase):
     def test_7e_no_addr_no_parcel_stays_null(self):
         out, _ = _reverse(addr=None, parcel=None)
         self.assertIsNone(out["address"])
+
+    def test_7f_join_exception_keeps_knn_road_side(self):
+        # 조인 질의가 죽어도 도로명축은 기준선(KNN)으로 되돌아갈 뿐 나빠지지 않는다.
+        out, _ = _reverse(join_exc=psycopg.errors.QueryCanceled("statement timeout"))
+        base = M.addr_obj(dict(KNN_ROW))
+        for k in ("road", "zipcode", "bld"):
+            self.assertEqual(out["address"][k], base[k], k)
+        st, bs = out["address"]["structure"], base["structure"]
+        for k in ("road_name", "main_no", "sub_no", "bld_name", "haeng_dong", "h_code"):
+            self.assertEqual(st[k], bs[k], k)
+        # 지번축은 PIP 정본 그대로다 — 조인 실패가 지번까지 되돌리면 그건 폴백이 아니라 회귀다.
+        self.assertEqual(out["address"]["parcel"], "경기도 고양시 덕양구 화전동 825-42")
+
+    def test_7g_join_exception_is_not_503_or_500(self):
+        # psycopg3 는 질의 하나가 실패하면 트랜잭션 전체를 abort 로 남긴다. SAVEPOINT 로
+        # 감싸지 않으면 뒤따르는 질의가 전부 InFailedSqlTransaction 이 되어, 결과는 폴백이
+        # 아니라 /reverse 500 이다. 7c(PIP 예외)와 같은 계약을 조인 경로에도 건다.
+        cur = SeqCursor(addr=dict(KNN_ROW), parcel=dict(PIP_ROW),
+                        join_exc=psycopg.errors.QueryCanceled("statement timeout"))
+        rec = _run_do_get("/reverse?lon=126.8713101&lat=37.6192808&limit=1", cur=cur)
+        self.assertEqual(rec.code, 200)
+        self.assertEqual(rec.obj["address"]["road"], M.addr_obj(dict(KNN_ROW))["road"])
 
 
 # ── TDD 8: addr_at() 무수정 (순방향 주소부착이 같이 쓴다) ─────────
@@ -1224,9 +1276,18 @@ class TestReverseBcode(unittest.TestCase):
                          M.addr_obj(dict(KNN_ROW))["structure"]["b_code"])
 
     def test_10c_hcode_never_from_parcel(self):
-        # parcel 에는 행정동코드가 없다. PIP 가 h_code 를 건드리면 안 된다.
-        self.assertEqual(_reverse()[0]["address"]["structure"]["h_code"],
-                         M.addr_obj(dict(KNN_ROW))["structure"]["h_code"])
+        # parcel 에는 행정동코드가 없다(법정동 계열만 있다). PIP 가 h_code 를 건드리면 안 된다.
+        # assertIsNotNone 이 실질화 장치다 — PIP_ROW 에 h_code 가 없으므로 오염되면 값이
+        # 곧 None 이 되는데, 앞 단언만으로는 KNN 쪽도 None 인 경우를 통과시킨다.
+        st = _reverse(join=None)[0]["address"]["structure"]
+        self.assertEqual(st["h_code"], M.addr_obj(dict(KNN_ROW))["structure"]["h_code"])
+        self.assertIsNotNone(st["h_code"])
+
+    def test_10d_hcode_from_join_row_when_key_join_hits(self):
+        # 조인 성공 경로에서도 h_code 의 출처는 parcel 이 아니다 — 조인행(address)이다.
+        st = _reverse(join=dict(JOIN_ROW))[0]["address"]["structure"]
+        self.assertEqual(st["h_code"], JOIN_ROW["hcode"])
+        self.assertNotEqual(st["h_code"], KNN_ROW["hcode"])
 
 
 # ── TDD 11: PIP 질의 컬럼 한정 (ambiguous 회귀 가드) ─────────────

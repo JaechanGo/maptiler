@@ -326,6 +326,12 @@ ADDR_STRUCT_KEYS = ("sido", "sigungu", "emd", "haeng_dong", "ri", "san",
                     "road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
                     "ji_main", "ji_sub", "bld_name", "zipcode", "b_code", "h_code")
 
+# T029 — 합성PNU 키조인이 1행을 물었을 때 조인행 값으로 갈아끼우는 도로명계열 structure 키.
+# ADDR_STRUCT_KEYS 의 진부분집합이고, 여기 없는 나머지(지번계열)는 PIP 정본을 그대로 둔다.
+# 이 목록이 곧 "필지 안 주소점이 KNN 최근접점보다 옳다"고 판단한 축의 정의다.
+ROAD_SIDE_STRUCT_KEYS = ("road_name", "main_no", "sub_no", "bld_main_no", "bld_sub_no",
+                         "bld_name", "zipcode", "haeng_dong", "h_code")
+
 
 def addr_obj(r):
     # 기존 키(road/parcel/zipcode/bld/structure) 전부 보존. structure 에 분해계약 신규 필드 가산.
@@ -965,32 +971,45 @@ def _pip_polygon_missing(p, knn):
     return d is not None and d <= PIP_SAN_GUARD_M
 
 
-def apply_parcel_pip(address, p, knn=None):
+def apply_parcel_pip(cur, lon, lat, address, p, knn=None):
     """addr_at(KNN) 주소객체에 parcel_at(PIP) 결과를 병합한다. p 가 못 쓸 값이면 원본 그대로.
+
+    반환은 **`(address, address_source)` 튜플**이다(T029). `address_source` 는 도로명축을
+    어느 경로로 얻었는지를 뜻하며 여기서는 `"pip_key"`(합성PNU 키조인 성공) / `"knn"`(그 외)
+    둘뿐이다. `"none"`(주소 자체가 없음)은 이 함수가 판정하지 않는다 — `reverse()` 가 반환
+    직전에 `address is None` 하나로만 정한다(§4.4). 판정점을 한 곳에 모아 두지 않으면
+    "조인은 성공했는데 address 는 None" 같은 모순 조합이 응답에 나온다.
 
     T019 의 병합 규칙. **지번계열과 도로명계열의 출처를 나눈다.**
       - 지번계열(parcel 문자열 · sido/sigungu/emd/ri/san/ji_main/ji_sub/b_code) → PIP
-      - 도로명계열(road/zipcode/bld · road_name/main_no/sub_no/bld_*/haeng_dong/h_code) → KNN
-    parcel 테이블에는 도로명·우편번호·건물명·행정동이 아예 없으므로 그쪽은 KNN 이 유일 출처다.
+      - 도로명계열(road/zipcode/bld · ROAD_SIDE_STRUCT_KEYS) → 합성PNU 키조인 우선, 0행이면 KNN
+    parcel 테이블에는 도로명·우편번호·건물명·행정동이 아예 없다. T019 는 그래서 KNN 을 유일
+    출처로 삼았지만, 그 결과 응답이 '지번은 A필지, 도로명은 B필지'로 섞였다(before 실측
+    2,401건 중 65.5%). T029 는 확정된 필지 **안의** 주소점(`road_at_parcel`)을 1순위 출처로
+    올리고 KNN 을 폴백으로 내린다. 폴백은 부가기능이 아니라 정확성 요건이다 — 전국 필지의
+    16.28% 가 도(道)이고 도로 필지에는 주소점이 없어(도 필지 실측 0/29) 폴백 없는 순수
+    키조인 전환은 도로 위 좌표에서 응답이 사라지는 명백한 회귀가 된다.
 
     시도·시군구·읍면동을 **지번과 한 덩어리로** 옮기는 것이 요점이다. 지번 문자열만 갈아끼우면
     최근접 포인트가 옆 동이었을 때 '덕양구 도내동 825-42' 같은 잡종이 나온다(825-42 는 화전동).
     같은 이유로 b_code 도 PIP 출처여야 한다 — 안 그러면 코드와 이름이 서로 다른 동을 가리킨다.
-    h_code(행정동)는 parcel 에 없으니 KNN 값을 유지한다. b_code 와 h_code 가 어긋날 수 있으나
-    이는 안 A 의 기존 잔여 불일치와 같은 성격이다(addr 경로 주석 L282 부근 참조).
-    **road(도로명 문자열)도 같은 이유로 KNN 출처다** — 지번계열만 PIP 로 갈아끼우므로 road 는
-    최근접 포인트가 속한 도로명이고, PIP 가 옆 동을 가리키면 road 와 지번의 행정구역이 어긋날
-    수 있다(D-5). 도로명 문자열에는 동(洞) 토큰이 없어 시도·시군구 수준까지만 교차검증이
-    가능하며, 벤치 실측에서는 road 593행 중 시군구 불일치 0·시도 불일치 0 으로 미발현이다.
+    h_code(행정동)는 parcel 에 **없다** — 그래서 조인행이나 KNN 에서 온다. 어느 쪽이든 출처는
+    address 테이블이지 parcel 이 아니다. b_code 와 h_code 가 어긋날 수 있으나 이는 안 A 의
+    기존 잔여 불일치와 같은 성격이다(addr 경로 주석 L282 부근 참조).
+    T019 가 기록한 D-5 우려 — "road 는 최근접 포인트가 속한 도로명이라 PIP 가 옆 동을 가리키면
+    road 와 지번의 행정구역이 어긋날 수 있다" — 는 **조인이 성공한 경로에서 구조적으로 해소된다**.
+    조인행은 정의상 같은 필지 안에 있기 때문이다. 조인 0행이라 KNN 으로 폴백한 경로에서는 그
+    우려가 그대로 남으며, 벤치 실측에서는 road 593행 중 시군구 불일치 0·시도 불일치 0 으로
+    미발현이다.
 
     address 가 None 이어도 p 만 있으면 주소를 만든다 — 최근접 포인트가 2.5km 안에 없어
     지금까지 address=null 이던 좌표의 순증분이다. 이때도 키 집합은 ADDR_STRUCT_KEYS 로 동일하다.
     """
     jb = pip_jibun(p) if p else None
     if jb is None:
-        return address                       # PIP 0행·번지 미상 → 현행 KNN 유지(무회귀)
+        return address, "knn"                # PIP 0행·번지 미상 → 현행 KNN 유지(무회귀)
     if _pip_polygon_missing(p, knn):
-        return address                       # 산번지 폴리곤 결측 → PIP 는 옆 필지다. KNN 유지
+        return address, "knn"                # 산번지 폴리곤 결측 → PIP 는 옆 필지다. KNN 유지
     ri = _s(p.get("ri_nm")) or _s(p.get("ri"))
     _bc = parcel_bcode(p)
     _note_ri_unresolved(_bc, ri, "reverse_pip")        # A-5: 치환 전 원값으로 관측
@@ -1010,9 +1029,20 @@ def apply_parcel_pip(address, p, knn=None):
     if address is None:
         st = dict.fromkeys(ADDR_STRUCT_KEYS)           # 없는 값은 전부 None
         st.update(pip_st)
-        return {"road": "", "parcel": parcel, "zipcode": "", "bld": "", "structure": st}
-    return {**address, "parcel": parcel,
-            "structure": {**address["structure"], **pip_st}}
+        out = {"road": "", "parcel": parcel, "zipcode": "", "bld": "", "structure": st}
+    else:
+        out = {**address, "parcel": parcel,
+               "structure": {**address["structure"], **pip_st}}
+    # ── T029: 여기부터가 도로명축이다. 위에서 필지가 확정됐으므로 그 안의 주소점을 집어 온다.
+    #    address 가 None 이어도 조인은 그대로 시도한다 — 필지는 확정됐고, KNN 이 없다는 사실은
+    #    조인을 막을 이유가 되지 않는다(오히려 그 좌표야말로 도로명이 비어 있는 구간이다).
+    j = road_at_parcel(cur, p.get("pnu"), lon, lat) if p.get("pnu") else None
+    if j is None:
+        return out, "knn"                    # 0행은 오류가 아니다 — 도로·하천 필지의 정상 경로
+    jo = addr_obj(j)
+    return {**out, "road": jo["road"], "zipcode": jo["zipcode"], "bld": jo["bld"],
+            "structure": {**out["structure"],
+                          **{k: jo["structure"][k] for k in ROAD_SIDE_STRUCT_KEYS}}}, "pip_key"
 
 
 def geocode(cur, q, limit):
@@ -1335,11 +1365,14 @@ def geocode(cur, q, limit):
 
 def reverse(cur, lon, lat, limit):
     # T019: 지번은 필지 폴리곤 포함관계(PIP)에서, 도로명·우편번호·건물명은 종전 KNN 에서.
+    # T029: 도로명축도 PIP 로 확정한 **필지 안의** 주소점(합성PNU 키조인)을 1순위로 쓰고,
+    #       조인이 0행일 때만 KNN 으로 내려간다. 그 판정은 apply_parcel_pip 안에 모여 있다.
     # 두 질의를 모두 던진다 — PIP 는 정상상태 ~6ms 라 p95 에 유의미하지 않다.
     # nearest[]/areas[] 에는 적용하지 않는다(그쪽은 '주변 무엇'이지 '이 점의 주소'가 아니다).
     # knn_meta(거리·산 여부)는 D-1 교차검증 가드 전용이다 — 응답에는 실리지 않는다.
     address, knn_meta = addr_at(cur, lon, lat, with_meta=True)
-    address = apply_parcel_pip(address, parcel_at(cur, lon, lat), knn_meta)
+    address, address_source = apply_parcel_pip(
+        cur, lon, lat, address, parcel_at(cur, lon, lat), knn_meta)
     pt = "ST_SetSRID(ST_MakePoint(%s,%s),4326)"
     # addr_at 과 동일한 이유로 bbox 선행(0.25° > 20km 의 경도 상한 0.2299°).
     cur.execute(
