@@ -92,7 +92,7 @@ def read_csv(path):
         try:
             with open(path, encoding=enc, newline="", errors="strict") as fp:
                 return list(csv.DictReader(fp)), enc
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, LookupError):
             continue
     sys.exit(f"CSV 인코딩 판별 실패: {path}")
 

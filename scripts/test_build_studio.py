@@ -84,9 +84,9 @@ _REPOINT_ATTRS = (
     "ARTIFACTS",        # 27   — _snapshot_artifact 797 unlink
     "BUILD_STATE",      # 673  — save_build_state 687 이 Path.replace 로 덮어씀
     "DIST",             # 26
-    "SRC_JUSO",         # 574  (str)
-    "SRC_LOCALDATA",    # 575  (str)
-    "SRC_GIS",          # 576  (str)
+    "SRC_JUSO",         # 575  (str)
+    "SRC_LOCALDATA",    # 576  (str)
+    "SRC_GIS",          # 577  (str)
     "COMPOSE_FILE",     # 20   (str)
 )
 
