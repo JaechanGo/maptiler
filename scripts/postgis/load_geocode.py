@@ -69,6 +69,11 @@ DROP INDEX IF EXISTS address_road_addr_idx;
 DROP INDEX IF EXISTS address_addr_geom_gix;
 DROP INDEX IF EXISTS address_region_idx;
 DROP INDEX IF EXISTS address_synth_pnu_idx;
+-- 위 인덱스와 같은 표현식에 묶인 확장통계도 반드시 함께 DROP 한다. 아래 재생성이
+-- CREATE STATISTICS IF NOT EXISTS 라, 남겨 두면 표현식을 바꿔도 통계만 옛 정의에 묶인 채
+-- 살아남는다 — 인덱스는 새 정의로 갱신되므로 결과는 맞는데 선택도 추정만 DEFAULT_EQ_SEL
+-- 로 되돌아가 조용히 병렬 스캔이 부활한다. 둘을 한 블록에 두어 동시 재생성을 보장한다.
+DROP STATISTICS IF EXISTS address_synth_pnu_stat;
 DROP INDEX IF EXISTS poi_geom_gix;
 DROP INDEX IF EXISTS poi_kind_idx;
 DROP INDEX IF EXISTS poi_primary_idx;

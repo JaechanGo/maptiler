@@ -44,9 +44,12 @@ CREATE INDEX IF NOT EXISTS address_postal_idx   ON address (postal) WHERE kind =
 -- 부분 인덱스인 이유: addr(1069만행)만 bd_mgt_sn·bcode 가 100% 충전돼 있다. biz(491만)는 bcode
 --   가 전부 NULL, poi/road/facility/place/station(~68만)은 둘 다 NULL 이라 애초에 키가 없다.
 --   이 술어가 질의쪽 kind='addr' 강제를 인덱스 층에서 한 번 더 거는 이중 장치를 겸한다.
--- ※ 이 인덱스를 실제로 태우려면 질의가 WITH cand AS MATERIALIZED (…) 형태여야 한다.
---   평문이나 MATERIALIZED 없는 CTE 는 ORDER BY geom <-> pt 때문에 플래너가
---   address_addr_geom_gix 를 골라 버리고 합성키를 Filter 로 강등시킨다(실측).
+-- ※ 질의쪽 WITH cand AS MATERIALIZED (…) 는 이 인덱스를 태우기 위한 최적화 울타리다.
+--   근거가 된 실측 — 「MATERIALIZED 없는 CTE 는 ORDER BY geom <-> pt 때문에 플래너가
+--   address_addr_geom_gix 를 골라 합성키를 Filter 로 강등시킨다」 — 은 아래 확장통계를
+--   만들기 **이전** 시점의 관찰이다. 통계가 있는 현 상태에서는 MATERIALIZED 를 떼도
+--   Index Cond 로 처리된다(검수 재확인). 그럼에도 울타리는 유지한다 — 통계 객체가 유실되면
+--   선택도 추정이 되돌아가 강등이 재발하므로, 둘은 서로를 대체하지 않는 다중방어다.
 CREATE INDEX IF NOT EXISTS address_synth_pnu_idx
     ON address ((bcode || substr(bd_mgt_sn, 11, 9))) WHERE kind = 'addr';
 
@@ -59,6 +62,11 @@ CREATE INDEX IF NOT EXISTS address_synth_pnu_idx
 --   35~40ms 를 쓴다(실측). 필지당 1행 집는 질의에 워커 2개가 붙는 셈이다.
 -- CREATE STATISTICS(PG14+ 단일 표현식 지원)는 인덱스와 무관한 독립 객체라 위 배제를 받지 않는다.
 --   적용 후 추정 rows=1 → 비병렬 Index Scan → 실행 75ms → 0.12ms(실측, 동일 좌표·동일 PNU).
+-- 원복은 DROP STATISTICS IF EXISTS address_synth_pnu_stat 이다. 인덱스만 DROP 하면
+--   통계 객체는 남는다(별개 객체다). 특히 재적재 스크립트(scripts/postgis/load_geocode.py)는
+--   인덱스를 DROP 후 재생성하는데 통계는 CREATE ... IF NOT EXISTS 라, 함께 DROP 하지 않으면
+--   표현식을 바꿨을 때 인덱스만 새 정의로 갱신되고 통계는 옛 정의에 묶인 채 살아남아
+--   선택도 추정이 DEFAULT_EQ_SEL 로 되돌아간다. 두 객체는 항상 같이 만들고 같이 지운다.
 CREATE STATISTICS IF NOT EXISTS address_synth_pnu_stat
     ON (bcode || substr(bd_mgt_sn, 11, 9)) FROM address;
 
