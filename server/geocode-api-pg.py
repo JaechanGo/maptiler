@@ -1419,7 +1419,17 @@ def reverse(cur, lon, lat, limit):
     areas = [{"name": a["name"], "type": a["type"],
               "code": remap_bcode(a["code"]) if a["type"] == "emd" else a["code"]}
              for a in cur.fetchall()]
-    return {"address": address, "nearest": nearest, "areas": areas}
+    # T029: 도로명축의 출처를 응답에 명시한다. §5 검증이 "도로 필지에서 폴백이 실제로
+    # 발화했는가"를 응답만 보고 세는 근거이고, 배포 후 조인이 통째로 죽어도 값은 그대로
+    # KNN 이라 겉보기엔 정상인 고장을 이 필드 하나로 드러낸다.
+    #   · address 안이 아니라 **최상위**에 둔다 — address 의 키 집합은 정확 일치로 동결돼
+    #     있어(TestReverseSchemaStable) 안에 넣으면 기존 계약이 깨진다. 최상위 키 집합을
+    #     정확 비교하는 테스트는 한 건도 없다(실측).
+    #   · "none" 판정은 여기 이 한 줄뿐이다. apply_parcel_pip 은 "pip_key"/"knn" 만 정한다.
+    #     판정점을 흩으면 "조인 성공인데 address 는 None" 같은 모순 조합이 응답에 나온다.
+    return {"address": address,
+            "address_source": address_source if address is not None else "none",
+            "nearest": nearest, "areas": areas}
 
 
 class Handler(BaseHTTPRequestHandler):

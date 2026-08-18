@@ -1262,6 +1262,14 @@ class TestReverseSchemaStable(unittest.TestCase):
     def test_9e_san_stays_null_on_fallback(self):
         self.assertIsNone(_reverse(parcel=None)[0]["address"]["structure"]["san"])
 
+    def test_9f_join_path_keeps_same_shape(self):
+        # 9a~9c 는 전부 조인 0행(SeqCursor 기본값 join=None) 경로다. 조인이 성공하면
+        # 도로명계열 9필드를 조인행에서 덮어쓰는 새 코드가 도는데, 그 경로의 형상은
+        # 아무도 안 보고 있었다. 병합을 dict 통째 교체로 짜면 addr_obj 의 키가 그대로
+        # 들어와 structure 집합이 조용히 벌어진다 — 여기서 잡는다.
+        self._assert_shape(_reverse(join=dict(JOIN_ROW))[0]["address"])
+        self._assert_shape(_reverse(addr=None, join=dict(JOIN_ROW))[0]["address"])
+
 
 # ── TDD 10: b_code 도 PIP 출처로 (pnu 앞 10자리) ─────────────────
 class TestReverseBcode(unittest.TestCase):
@@ -1508,6 +1516,77 @@ class TestJoinSqlContract(unittest.TestCase):
         sql = self._sql()
         self.assertIn("::geography", sql)
         self.assertIn("join_dist_m", sql)
+
+
+# ── T029: address_source — 도로명축을 어느 경로로 얻었는지 (§4.4) ─
+class TestAddressSource(unittest.TestCase):
+    """값은 **입력이 아니라 최종 출력**을 기준으로 정의한다.
+
+    입력 address 가 None 이어도 PIP 가 성공하면 주소 객체가 새로 만들어진다(6f 계약).
+    'none' 을 "입력 address 가 없음"으로 읽으면 그 경우가 'none' 과 'pip_key' 양쪽에
+    걸쳐 6f 가 흔들린다 — 그래서 'none' 판정은 반환 직전의 address is None 하나뿐이다.
+
+    이 필드는 장식이 아니다. §5 검증이 "도로 필지에서 폴백이 실제로 발화했는가"를
+    응답만 보고 세는 데 쓴다. 침묵은 실패다.
+    """
+
+    def test_12a_pip_key_when_join_hits(self):
+        self.assertEqual(_reverse(join=dict(JOIN_ROW))[0]["address_source"], "pip_key")
+
+    def test_12b_knn_when_join_empty(self):
+        # 도로·하천 필지 — 전국 필지의 16.28%. 이쪽이 예외가 아니라 상시 경로다.
+        self.assertEqual(_reverse(join=None)[0]["address_source"], "knn")
+
+    def test_12c_knn_when_pip_missing(self):
+        # PIP 가 실패하면 조인은 시도조차 하지 않는다. 필지가 확정되지 않았는데 키로 긁으면
+        # 엉뚱한 필지를 집는다 — join 행을 쥐여 줘도 'knn' 이어야 그 규칙이 지켜진 것이다.
+        self.assertEqual(_reverse(parcel=None, join=dict(JOIN_ROW))[0]["address_source"], "knn")
+
+    def test_12d_knn_when_pip_raises(self):
+        out, _ = _reverse(parcel_exc=psycopg.errors.QueryCanceled("statement timeout"),
+                          join=dict(JOIN_ROW))
+        self.assertEqual(out["address_source"], "knn")
+
+    def test_12e_knn_when_join_raises(self):
+        out, _ = _reverse(join_exc=psycopg.errors.QueryCanceled("statement timeout"))
+        self.assertEqual(out["address_source"], "knn")
+
+    def test_12f_none_only_when_address_is_null(self):
+        out, _ = _reverse(addr=None, parcel=None)
+        self.assertIsNone(out["address"])
+        self.assertEqual(out["address_source"], "none")
+
+    def test_12g_pip_key_even_when_knn_absent(self):
+        # 최근접점이 2.5km 안에 없어 종전엔 address=null 이던 좌표. 도로명축이 빈 문자열에서
+        # 값으로 새로 채워지는 순증분이라 개선폭이 가장 크다. 입력 기준으로 판정하면
+        # 여기가 'none' 이 되어 6f 계약과 정면으로 충돌한다.
+        out, _ = _reverse(addr=None, join=dict(JOIN_ROW))
+        self.assertIsNotNone(out["address"])
+        self.assertEqual(out["address_source"], "pip_key")
+        self.assertEqual(out["address"]["road"], M.addr_obj(dict(JOIN_ROW))["road"])
+
+    def test_12h_knn_when_addr_none_and_join_empty(self):
+        # KNN 도 조인도 없으면 도로명축은 빈 채로 남는다. 그래도 address 는 존재하므로
+        # 'none' 이 아니다 — 'none' 은 오로지 address 자체가 없을 때다.
+        out, _ = _reverse(addr=None, join=None)
+        self.assertIsNotNone(out["address"])
+        self.assertEqual(out["address_source"], "knn")
+        self.assertEqual(out["address"]["road"], "")
+
+    def test_12i_field_is_sibling_of_address_not_inside(self):
+        # address 안쪽은 최상위·structure 양쪽이 정확 집합 일치로 동결돼 있다
+        # (TestReverseSchemaStable). 키를 하나만 더해도 기존 계약 3개가 깨진다.
+        # 최상위는 열려 있으므로 거기 얹는다 — 모르는 키를 무시하는 소비자에게 무해하다.
+        out, _ = _reverse(join=dict(JOIN_ROW))
+        self.assertIn("address_source", out)
+        self.assertNotIn("address_source", out["address"])
+        self.assertNotIn("address_source", out["address"]["structure"])
+
+    def test_12j_exposed_over_http(self):
+        cur = SeqCursor(addr=dict(KNN_ROW), parcel=dict(PIP_ROW), join=dict(JOIN_ROW))
+        rec = _run_do_get("/reverse?lon=126.8713101&lat=37.6192808&limit=1", cur=cur)
+        self.assertEqual(rec.code, 200)
+        self.assertEqual(rec.obj["address_source"], "pip_key")
 
 
 if __name__ == "__main__":
