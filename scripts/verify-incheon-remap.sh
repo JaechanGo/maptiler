@@ -35,12 +35,19 @@
 #       **미산출 지표(L2-9·L2-10)는 통과로 집계하지 않는다** — 별도 줄로 보고한다.
 #
 # 의존: psql, python3(표준 라이브러리만). 폐쇄망 일관.
+#   호스트에 psql 이 없고 DB 가 컨테이너에만 있으면 PSQL 로 우회한다 (다중 단어 커맨드 가능):
+#     PSQL="docker exec -i server-postgis-1 psql -U cuvia -d cuvia" \
+#       OURS=http://127.0.0.1:8093 bash scripts/verify-incheon-remap.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 
 PSQL="${PSQL:-psql}"
+# PSQL 은 `docker exec -i server-postgis-1 psql -U cuvia -d cuvia` 같은 **다중 단어**도 받는다.
+# "$PSQL" 로 인용 확장하면 전체가 하나의 실행파일명으로 취급돼 command not found 가 되므로
+# 여기서 한 번만 배열로 쪼개 두고, 호출부는 "${PSQL_CMD[@]}" 를 쓴다.
+read -r -a PSQL_CMD <<<"$PSQL"
 PYTHON="${PYTHON:-python3}"
 OURS="${OURS:-http://127.0.0.1:8093}"
 BEFORE="${BEFORE:-http://127.0.0.1:8092}"
@@ -116,7 +123,7 @@ run_l1() {
   echo "     (address 16M 행 전수 집계가 포함되어 수십 초 걸린다)"
 
   # 한 번의 psql 왕복으로 전 지표를 뽑는다 — 지표 간 스냅샷이 어긋나지 않게 하기 위해서다.
-  "$PSQL" -X -q -A -t -F $'\t' -v ON_ERROR_STOP=1 > "$L1OUT" 2> "$TMP/l1.err" <<'SQL'
+  "${PSQL_CMD[@]}" -X -q -A -t -F $'\t' -v ON_ERROR_STOP=1 > "$L1OUT" 2> "$TMP/l1.err" <<'SQL'
 SELECT k, v FROM (
   SELECT 1 ord, 'L1-1' k, count(*)::text v FROM lawd_code_v2
 
@@ -221,7 +228,13 @@ L2OUT="$TMP/l2.txt"
 # 테스트 1건의 판정을 unittest -v 출력에서 읽는다. "test_x (…) … ok|FAIL|ERROR|skipped"
 _t() {
   /usr/bin/awk -v t="$1" '
-    index($0, t "(") == 1 || index($0, t " ") == 1 {
+    index($0, t "(") == 1 || index($0, t " ") == 1 { hit = NR }
+    # docstring 이 있는 테스트는 unittest -v 가 판정을 **두 번째 줄**에 낸다:
+    #   test_x (__main__.C.test_x)
+    #   <docstring 첫 줄> ... ok
+    # 이름 줄만 보면 "... ok" 가 없어 매칭이 깨지고 실제 통과가 "?" 로 집계된다.
+    # 그래서 이름 줄과 그 다음 줄까지를 판정 대상으로 삼는다.
+    hit && NR <= hit + 1 {
       if ($0 ~ /\.\.\. ok$/)          { print "PASS"; f=1; exit }
       if ($0 ~ /\.\.\. skipped/)      { print "SKIP"; f=1; exit }
       if ($0 ~ /\.\.\. (FAIL|ERROR)/) { print "FAIL"; f=1; exit }

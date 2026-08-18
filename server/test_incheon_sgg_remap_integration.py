@@ -292,7 +292,7 @@ class TestI10Full595(_Base):
 
 
 class TestI11NoOldSggAnywhere(_Base):
-    """I11 — 인천 응답 JSON 전문에 옛 구명 문자열이 0곳 (C-1 완료 판정).
+    """I11 — 인천 응답 JSON 전문(`query` 제외)에 옛 구명 문자열이 0곳 (C-1 완료 판정).
 
     필드를 열거하지 않는다. §4-4 ④ 대응표가 한 지점이라도 빠지면 자동으로 실패한다.
     오탐 방지: `structure.sido == "인천광역시"` 인 응답에 대해서만 단언한다."""
@@ -300,7 +300,13 @@ class TestI11NoOldSggAnywhere(_Base):
     def _assert_clean(self, d, ctx):
         sidos = {s.get("sido") for s in _structures(d)}
         self.assertIn("인천광역시", sidos, f"{ctx}: 인천 응답이 아님 (sido={sidos})")
-        body = json.dumps(d, ensure_ascii=False)
+        # `query` 는 사용자 입력 **에코**라 치환 대상이 아니다. 계획서 §4-4 ④ 가 열거한
+        # 치환 8지점에 query 는 포함되지 않는다 — 치환하면 사용자가 무엇을 물었는지의
+        # 기록이 왜곡된다. 그러므로 잔존 검사는 query 를 제외한 나머지 전문을 대상으로 한다.
+        # ※ 필드 화이트리스트로 좁히지 말 것 — 새 응답 필드가 늘었을 때 검사에서 새는 것을
+        #    막기 위해 '전문에서 query 만 제외' 형태를 유지한다.
+        scanned = {k: v for k, v in d.items() if k != "query"}
+        body = json.dumps(scanned, ensure_ascii=False)
         hits = []
         for old in OLD_SGG:
             n = body.count(f'"{old}"') + body.count(f"{old} ")
