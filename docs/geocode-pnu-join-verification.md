@@ -171,7 +171,7 @@ A 서울특별시 종로구 새문안로 43-12 (I6)
 
 | 항목 | 값 |
 |---|---|
-| 좌표원 | `ST_PointOnSurface(parcel.geom)` — 서울(`sido='11'`) 필지 무작위 1,000 |
+| 좌표원 | `ST_PointOnSurface(parcel.geom)` — 서울(`sido_cd='11'`) 필지 무작위 1,000 |
 | 추출 | `ORDER BY md5(pnu)` (결정적) · 지목 층화 **없음**(모집단 그대로) |
 | before | baseline `1782bf4` 의 `server/geocode-api-pg.py` |
 | after | 현행 워크트리 코드 |
