@@ -800,15 +800,21 @@ class TestAreaPip(unittest.TestCase):
     def test_area_pip_returns_emd(self):
         # T-12: emd 레벨 경계가 적재돼 있으면 out["emd"] 가 채워진다
         #       (nonaddr_structure 가 이미 pip.get("emd") 를 읽으므로 POI structure 가 살아난다).
+        # 목 행은 실제 질의(SELECT level, name, code)와 같은 컬럼 집합을 가져야 한다.
+        #   T026(31d3bd5)이 area_pip() 에 out["bcode"] = a["code"] 를 추가했는데 이 목이
+        #   T014 시절 형태(code 없음)로 남아 KeyError 로 죽었다. code 값은 로컬 PostGIS 실측
+        #   (admin_boundary emd '청평면' = 41820325; emd code 는 5,067/5,370 이 8자리).
         cur = FakeCursor(fetchall_result=[
-            {"level": "sido", "name": "경기도"},
-            {"level": "sigungu", "name": "가평군"},
-            {"level": "emd", "name": "청평면"},
+            {"level": "sido", "name": "경기도", "code": "41000"},
+            {"level": "sigungu", "name": "가평군", "code": "41820"},
+            {"level": "emd", "name": "청평면", "code": "41820325"},
         ])
         out = M.area_pip(cur, 127.419845, 37.737815)
         self.assertEqual(out.get("emd"), "청평면")
         self.assertEqual(out.get("sido"), "경기도")
         self.assertEqual(out.get("sigungu"), "가평군")
+        # T026 의도 고정 — emd 폴리곤의 법정동코드를 bcode 로 싣는다(비-addr 경로 판정키).
+        self.assertEqual(out.get("bcode"), "41820325")
         # 질의에 emd 레벨이 포함돼야 admin_boundary 가 emd 행을 돌려줄 수 있다.
         sql = cur.executed[0][0]
         self.assertIn("emd", sql)
