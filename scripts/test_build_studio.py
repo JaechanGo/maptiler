@@ -1596,10 +1596,26 @@ class TestBoundaryRiSource(IsolatedBuildHome):
         super().setUp()
         self.srcs = {s["key"]: s for s in M.load_sources()}
 
-    def test_registered_and_key_count(self):
-        """§8-V6 — 13키 + boundary_ri = 14키."""
+    def test_registered_and_predecessors_intact(self):
+        """§8-V6 — boundary_ri 가 등록되고, **기존 원천은 하나도 잃지 않았다**.
+
+        원래 `len(self.srcs) == 14` 였으나 rebase 로 T026 의 `lawd_code_v2`
+        (VWorld dsId=30505)가 기준선에 편입되며 `15 != 14` 로 깨졌다. 두 원천은
+        `data-sources.json` 의 같은 배열 위치를 점유해 텍스트 충돌까지 났다.
+        총수 단언은 원천이 늘 때마다 깨지면서 정작 **유실**은 못 잡는다(줄어든
+        만큼 늘면 통과한다). 아래 이름 집합이 같은 방어를 하되 사라진 키를
+        지목하고, 새 원천 추가에는 침묵한다. **총수 단언으로 되돌리지 마라.**
+        """
         self.assertIn(self.RI, self.srcs, "boundary_ri 가 등록되지 않았다")
-        self.assertEqual(len(self.srcs), 14, f"키 14개여야 한다: {sorted(self.srcs)}")
+        # boundary_ri 등록(커밋 10) 직전에 존재하던 원천 전량.
+        prior = {
+            "aed", "boundary_admin", "boundary_legal", "building_db", "facility",
+            "fire_station", "juso_navi", "lawd_code_v2", "localdata", "osm",
+            "parcel", "police", "sangga", "style",
+        }
+        missing = prior - set(self.srcs)
+        self.assertEqual(missing, set(),
+                         f"기존 원천이 사라졌다 — 등록 중 덮어썼을 가능성: {sorted(missing)}")
 
     def test_shape_matches_boundary_legal(self):
         """복제 원본과 필드 구성이 같아야 한다 — 차이는 default_collect 하나뿐.
