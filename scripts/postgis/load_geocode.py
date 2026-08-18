@@ -68,6 +68,7 @@ DROP INDEX IF EXISTS address_bld_trgm;
 DROP INDEX IF EXISTS address_road_addr_idx;
 DROP INDEX IF EXISTS address_addr_geom_gix;
 DROP INDEX IF EXISTS address_region_idx;
+DROP INDEX IF EXISTS address_synth_pnu_idx;
 DROP INDEX IF EXISTS poi_geom_gix;
 DROP INDEX IF EXISTS poi_kind_idx;
 DROP INDEX IF EXISTS poi_primary_idx;
@@ -101,6 +102,11 @@ CREATE INDEX IF NOT EXISTS address_bld_trgm      ON address USING gin (bld gin_t
 CREATE INDEX IF NOT EXISTS address_road_addr_idx ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
 CREATE INDEX IF NOT EXISTS address_addr_geom_gix ON address USING gist (geom) WHERE kind = 'addr';
 CREATE INDEX IF NOT EXISTS address_region_idx    ON address (sigungu, emd);
+-- 합성 PNU 키조인(역지오 도로명축). 표현식+부분 인덱스 — 근거는 11-address-search.sql 주석 참조.
+CREATE INDEX IF NOT EXISTS address_synth_pnu_idx ON address ((bcode || substr(bd_mgt_sn, 11, 9))) WHERE kind = 'addr';
+-- 위 인덱스는 '부분'이라 플래너가 그 표현식 통계를 안 쓴다(선택도 0.005 고정 → 불필요한 병렬 스캔).
+-- 독립 통계 객체로 보정한다. 아래 ANALYZE address 가 채워 준다. 근거는 11-address-search.sql 주석 참조.
+CREATE STATISTICS IF NOT EXISTS address_synth_pnu_stat ON (bcode || substr(bd_mgt_sn, 11, 9)) FROM address;
 CREATE INDEX IF NOT EXISTS poi_geom_gix          ON poi USING gist (geom);
 CREATE INDEX IF NOT EXISTS poi_kind_idx          ON poi (kind);
 CREATE INDEX IF NOT EXISTS poi_primary_idx       ON poi (is_primary);
