@@ -72,8 +72,12 @@ def addr_str(r):                            # 표시용 풀 도로명(법정동 
     return s
 
 
-def road_str(r):                            # 표준 도로명주소(법정동 제외)
-    s = f'{r["sido"]} {r["sigungu"]} {r["road"]} {r["main_no"]}'
+def road_str(r):                            # 표준 도로명주소(읍·면 포함, 동 제외)
+    # 도로명주소법 시행령 §3① 3호: 행정구·읍·면은 주소 본문에 쓴다. 동(洞)은 7호 참고항목이라 뺀다.
+    # emd 한 칸에 읍/면/동이 섞여 들어오므로 접미사로 가른다. 표시용 addr_str 은 항상 넣으므로 계약이 다르다.
+    emd = _g(r, 'emd')
+    em = f'{emd} ' if (emd and str(emd).endswith(('읍', '면'))) else ''
+    s = f'{r["sido"]} {r["sigungu"]} {em}{r["road"]} {r["main_no"]}'
     if r["sub_no"]: s += f'-{r["sub_no"]}'
     if r["bld"]: s += f' ({r["bld"]})'
     return s
