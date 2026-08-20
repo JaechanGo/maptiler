@@ -35,3 +35,20 @@ style/style.json
 .claude/
 .idea/
 *.bak
+
+# 원천 202607 (행안부 주소DB·내비게이션용DB) — T039 판정 B: 리포 미커밋
+# 사유는 개인정보가 아니라 재배포 제한 미해소. 보존은 ~/maptiler-rescue/source-202607/
+# 상세: docs/원천-202607-취급방침.md
+# 경고: 아래 패턴은 이름만 보고 막는다. 향후 같은 명명규칙을 따르는 정상 산출물
+#      (예: 파이프라인이 만든 주소_*.txt)이 조용히 무시될 수 있다. 새 파일이
+#      커밋에 안 잡히면 `git check-ignore -v <파일>` 로 여기 걸린 건지 먼저 확인하라.
+202607_*.7z
+202607_*.zip
+match_build_*.txt
+match_jibun_*.txt
+match_rs_entrc*.txt
+주소_*.txt
+지번_*.txt
+부가정보_*.txt
+개선_도로명코드_*.txt
+\[자료건수\]주소DB*.txt
