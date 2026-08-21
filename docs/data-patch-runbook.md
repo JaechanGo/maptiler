@@ -43,14 +43,63 @@
 
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
-- **지오코딩 적재**: 17개 CSV 를 한 폴더에 모은 뒤 `python3 scripts/09-gen-geocode.py --poi-csv-dir <상가CSV폴더>` (kind=biz). 좌표 이미 4326 → 변환 불필요.
+- **지오코딩 적재**: 17개 CSV 를 한 폴더에 모은다 (kind=biz). 좌표 이미 4326 → 변환 불필요.
+
+  ```
+  # (구) 09-gen-geocode.py --poi-csv-dir <폴더>            ← 폐지. 주소 0행 DB 로 정본을 대체함
+  # (신) 상가/POI 만 갱신하는 경로는 없다. 전체 빌드로 갱신한다:
+  python3 scripts/09-gen-geocode.py \
+      --src   <202607 원천 폴더> \
+      --poi-csv-dir <폴더> \
+      --osm   <osm.sqlite> \
+      --out   <산출 경로> --dedup er
+  ```
+
+  > **주의(T043) — 위 명령은 지금 그대로는 서지 않는다.** 범위가 전국이거나 `--out` 이
+  > `~/geocode-build` 아래를 겨누면 게이트 G0(전국 재빌드 차단)가 `exit 2` 로 멈춘다.
+  > 고장이 아니라 T018 리(里) 백필 처분이 끝날 때까지의 **의도된 정지**다.
+  > 그러므로 **T018 처분 전에는 정본 `geocode.sqlite` 의 분기 POI 갱신이 불가능하다** —
+  > 이것은 우회로가 없는 정지이고, 아래 (a)(b)(c) 가 그 안에서 실제로 할 수 있는 전부다.
+
+  **(a) T018 처분 전 — 검증용 산출물까지만 (정본 교체 불가)**
+
+  ```
+  # 정본 밖 경로에 시도 단위로 만든다. G0 는 두 조건(전국 범위 / 정본 조준) 모두 아닐 때만 통과한다
+  python3 scripts/09-gen-geocode.py \
+      --src <202607 원천 폴더> --only chungbuk \
+      --poi-csv-dir <폴더> --out /tmp/geocode-poi-check.sqlite --dedup er \
+      --taxonomy-out /tmp/poi-taxonomy.json
+  ```
+  `--only` 로 범위를 좁히고 `--out` 을 정본 밖으로 두면 G1~G10 은 그대로 돌아 CSV 적재
+  결과(kind=biz 행수·좌표 범위·무결성)를 확인할 수 있다. **정본은 건드리지 않는다.**
+  `--taxonomy-out` 을 주지 않으면 `style/poi-taxonomy.json` 은 **쓰이지 않는다**(T043 M-1) —
+  부분 빌드의 빈약한 분류로 저장소 파일을 덮어쓰지 않기 위해서다.
+
+  **(b) T018 처분 후 — 정본 전국 재빌드**
+
+  T018 처분(리 백필 완료 + 검증)이 끝난 뒤에야 `--t018-disposed` 를 붙일 수 있다.
+  해제에 필요한 5개 조건은 G0 실패 메시지가 그대로 출력한다. 그 5개를 모두 마친 다음:
+
+  ```
+  python3 scripts/09-gen-geocode.py \
+      --src <202607 원천 폴더> --poi-csv-dir <폴더> --osm <osm.sqlite> \
+      --out ~/geocode-build/geocode.sqlite --dedup er --t018-disposed
+  ```
+  이때 `--taxonomy-out` 없이도 `style/poi-taxonomy.json` 이 갱신된다(정본 빌드이므로).
+
+  **(c) 분류 트리(`style/poi-taxonomy.json`)만 다시 뽑기**
+
+  이미 POI 가 든 DB 가 있으면 빌드를 다시 돌리지 않고 그 DB 에서 트리만 뽑아도 된다.
+  `write_taxonomy()` 는 `--out` DB 를 `mode=ro` 로 읽어 쓰므로, (a)의 산출물이나 정본을
+  읽기전용으로 열어 쓰는 짧은 스크립트로 충분하다. **정본을 읽을 때도 쓰기는 금지**다.
 - **지도 라벨 타일**: `ogr2ogr`(경도/위도→점) → `tippecanoe`(z12–16, `--drop-densest-as-needed --cluster-distance`) → `tiles/poi.mbtiles`.
 - **반영**: `geocode.sqlite` 교체 → `docker compose restart geocode`; `poi.mbtiles` 등록 → restart tileserver.
 
 ### (5)(6) 지오코딩 — `geocode.sqlite`  ★ 월/분기
 - **주소(5)**: 내비게이션용DB(business.juso.go.kr, 심사) `match_build_*.txt`(EPSG:5179, CP949). `.7z`는 `bsdtar -xf …7z match_build_*.txt`로 17개 시도 확인.
 - **이름(6)**: `python3 ~/geocode-build/osm-from-mbtiles.py` → `osm.sqlite`(korea.mbtiles에서 역/지명/POI 재추출).
-- **통합 빌드**: `python3 ~/geocode-build/09-gen-geocode.py --src <내비DB폴더> --osm ~/geocode-build/osm.sqlite [--poi-csv 상가.csv]` → `~/geocode-build/geocode.sqlite`.
+- **통합 빌드**: `python3 scripts/09-gen-geocode.py --src <내비DB폴더> --osm ~/geocode-build/osm.sqlite [--poi-csv-dir <상가CSV폴더>] --source-label 2026.07` → `~/geocode-build/geocode.sqlite`.
+  `--src` 는 **필수**다(T043). 정본을 겨누는 실행은 게이트 G0 가 막으며, 해제는 `--t018-disposed` 로만 가능하다.
   - 5179→4326 순수파이썬 변환 내장(무의존). 본번/부번 정밀 + 폴백.
 - **반영**: `docker compose restart geocode`.
 
@@ -123,7 +172,9 @@ maptiler/ (iCloud repo)               # 소스 코드 본체
 - 핵심: **휴게음식점**(스벅/카페/맥도/패스트푸드)·일반음식점·제과점·대규모점포·병원·의원·약국·미용·숙박·주유(석유판매)·PC방·노래방 등 **물리 시설**.
 - 빌드: `python3 build-localdata.py <인허가정보_DIR> localdata/localdata_clean.csv`
   → 비물리(통신판매·제조·도매·농축·공사·대행) 카테고리 제외 + 영업중 + 5174→4326(gdaltransform) + **NFC 정규화** + 상가포맷 변환.
-- 적재: 상가 CSV들과 함께 한 폴더에 두고 `09-gen-geocode.py --poi-csv-dir <폴더>` → kind=biz.
+- 적재: 상가 CSV들과 함께 한 폴더에 둔다 → kind=biz. **`--poi-csv-dir` 단독 실행은 폐지됐다**
+  (주소 0행 DB 로 정본을 대체하던 경로). 위 (7) '지오코딩 적재' 의 (a)(b)(c) 를 쓰라 —
+  **T018 처분 전에는 (a) 검증까지만 가능하고 정본 교체는 되지 않는다.**
 
 ⚠️ **한글 NFC/NFD 정규화 필수**: 정부 데이터/파일명이 NFD(자모분리)일 수 있어, 키워드 매칭(EXCLUDE)·FTS 검색이 조용히 실패한다. build-localdata·검색 모두 NFC로 통일.
 ⚠️ **중복**: 상가정보 ↔ LOCALDATA 겹침(같은 가게 중복). 검색은 되지만 중복제거·랭킹은 개선 과제.

@@ -1,3 +1,9 @@
+-- [T043] 주의: 변경 B 이후 address.bcode 의 끝 2자리는 '00' 이 아닐 수 있다.
+--        이 술어/사전검사는 T018 시절 전제(전 행 '00')에 기대고 있으므로
+--        아래 진단 메시지는 실제 원인과 다를 수 있다. T018 처분 태스크(F1)에서 정리한다.
+--        근거: scripts/09-gen-geocode.py 가 bcode 를 지번측 법정동코드(리 2자리 포함)로
+--        싣도록 바뀌었다. 3개 시도 A/B 실측에서 addr 968,745행 중 620,346행(64.04%)의
+--        끝 2자리가 '00' 이 아니다. 앞 8자리는 620,346행 전부 불변이다.
 -- ri_backfill_verify_post.sql — T018 Phase 1 검증 (S5 **이후**).
 --   실행: psql -v ON_ERROR_STOP=1 -v sample=1000000 -f scripts/postgis/ri_backfill_verify_post.sql
 --
@@ -46,6 +52,9 @@ WITH agg AS (
   SELECT left(a.bcode,8) AS emd8, a.ri, count(*) AS n
     FROM address a
    WHERE a.kind='addr' AND a.ri IS NOT NULL AND a.ri <> ''
+     -- [T043] 이 판정은 변경 B 이후 **거짓 0** 을 낸다. 백필이 실패한 행을 찾으려던
+     --        술어인데, 빌더가 이미 리 자리를 채워 넣으므로 조건에 걸리는 행이 사라진다.
+     --        '실패 0건'으로 읽지 마라 — '검사 불능'이다. F1 에서 술어를 재정의한다.
      AND right(a.bcode,2) = '00'
    GROUP BY 1,2
 )

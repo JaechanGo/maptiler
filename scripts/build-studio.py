@@ -626,7 +626,15 @@ def TARGETS():
             cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
                  "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
                  "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082", "--pg"]),
-        "package": dict(label="폐쇄망 번들 패키징", dep=None,
+        # [T043 검수 M-3] dep=None → dep="geocode".
+        #   package.sh:240 은 `cp -c "$BUILD_HOME/geocode.sqlite"` 로 지오코딩 DB 를 번들에 담는다.
+        #   dep 이 없으면 geocode 가 G0(전국 재빌드 차단)로 정지해도 package 는 그대로 돌아
+        #   **직전 세대 7GB DB** 를 최신 번들인 양 반출한다. 폐쇄망으로 나가면 되돌릴 수 없다.
+        #   dep="qc" 가 아니라 dep="geocode" 인 이유: qc 는 PostGIS 기동을 전제하므로
+        #   그것을 걸면 DB 가 없는 환경에서 번들 생성 자체가 막힌다(과잉 차단). geocode 라면
+        #   fresh 일 때 큐에서 자동으로 빠져 현행 동작이 그대로 유지되고(build-studio.py:914-920),
+        #   실제로 실행됐다가 실패/스킵된 경우에만 package 가 선다 — 정확히 막아야 할 경우다.
+        "package": dict(label="폐쇄망 번들 패키징", dep="geocode",
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 

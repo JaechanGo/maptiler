@@ -10,24 +10,86 @@
   place_rtree, areas, area_rtree, meta
 ※ 산출물(GB급)은 iCloud 밖 로컬에 둔다.
 """
-import argparse, collections, io, json, math, os, pathlib, re, sqlite3, sys, time
+import argparse, collections, io, json, math, os, pathlib, pwd, re, sqlite3, sys, time, unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
 from _common.textnorm import biznrm_nfc as biznrm, norm, rnorm        # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SIDO = ["seoul","busan","daegu","incheon","gwangju","daejeon","ulsan","sejong","gyunggi",
-        "gangwon","chungbuk","chungnam","jeonbuk","jeonnam","gyeongbuk","gyeongnam","jeju"]
+# 202607 원천 기준 16종. 원천에서 광주광역시·전라남도는 `jeonnamgwangju` 한 파일로 통합돼 있다.
+# 202605 유물(17종: gwangju·jeonnam 분리)을 그대로 두면 match_*_jeonnamgwangju.txt 를 아무도
+# 열지 않아 전국 건물의 12.4%(1,327,372행)가 **무증상으로** 빠진다. 목록을 바꿀 때는
+# `command ls ~/geocode-build/staged/navi/match_build_*.txt` 로 실물과 대조하라.
+SIDO = ["seoul","busan","daegu","incheon","daejeon","ulsan","sejong","gyunggi",
+        "gangwon","chungbuk","chungnam","jeonbuk","jeonnamgwangju","gyeongbuk","gyeongnam","jeju"]
 CW_LD, CW_OSM = {}, {}   # cat-crosswalk.json (canonical 카테고리 매핑) — main()에서 로드, add_biz/add_osm 이 사용
 
-# ---- 리(里) 키 충돌 관측 (T018 A-4) ----------------------------------------
-# load_jibun 의 rd(법정동코드10 → 리) 는 한 키에 서로 다른 리가 몰리는 것을 **조용히** 삼켜 왔다.
-# (구현은 load_jibun 참조 — 값 선택 규칙은 불변, 여기서는 세기만 한다.)
-# 이 수치가 0 이 아니면 다음 적재본의 address.ri 는 그만큼 부정확하다는 뜻이고,
-# 그 오염이 lawd_ri 사전 → 지오코딩 리 표기로 전파된다.
-RI_KEY_COLLISIONS = collections.defaultdict(set)   # 붕괴 키 → 무시된 리 이름 집합
-RI_COLLISION_ROWS = {}          # 시도 → 충돌 행수
-RI_COLLISION_SAMPLE = 5         # 시도당 stderr 로 뽑아 보여줄 표본 개수(로그 폭주 방지)
+# ---- 원천 설계 PK (T043 / 근거 T042 `docs/원천PK-조인-전국검증.md`) -----------
+# 도로명주소 원천이 match_build ↔ match_jibun 을 잇도록 **설계해 둔** 복합키다.
+#   PK1 도로명코드 · PK2 지하여부 · PK3 건물본번 · PK4 건물부번 · PK6 주소관할읍면동코드
+# PK5(지번일련번호, jibun c[12])는 키가 아니라 대표지번 선별 술어로만 쓴다(c[12]=="0").
+# [T042 전국 실측] 적중 10,722,641 / 10,722,641 = 100.00%, 미적중 0, 16/16 시도.
+#   같은 표본에서 구 건물관리번호 조인은 59.89% — 원천이 지번을 주소 단위로 싣기 때문에
+#   생기는 **구조적 상한**이며 버그가 아니다. PK4 까지만 쓰면 전국 10키가 충돌하고, PK6 을
+#   더하면 충돌 0 이 된다(§A-2).
+PK6_JIBUN = (8, 9, 10, 11, 19)
+PK6_BUILD = (4, 6,  7,  8,  0)
+
+# ---- 빌드 안전 게이트 (T043) --------------------------------------------------
+# 산출물 교체(tmp.replace(out)) 앞에 서는 관문. 0행/부분 산출이 7GB 정본을 덮는 사고를 막는다.
+CANONICAL_HOMES = ("~/geocode-build",)   # 정본 후보 디렉터리. 확장할 때는 여기에만 추가한다.
+
+# ---- G3·G4 기준선 (202605 정본 실측) ------------------------------------------
+# 뽑은 방법 — `sqlite3` 로 정본을 **읽기전용**으로 열고 시도별로 센 값이다:
+#   con = sqlite3.connect("file:" + os.path.expanduser("~/geocode-build/geocode.sqlite")
+#                         + "?mode=ro", uri=True)
+#   con.execute("SELECT sido, count(*) FROM places WHERE kind='addr' GROUP BY sido")
+# 정본의 `sido` 는 17종(202605 당시 광주·전남 분리)이고 slug 는 16종이므로,
+# **jeonnamgwangju 만** 두 시도의 합으로 유도한다 — 나머지 15종은 단일 시도 실측이다.
+#   전라남도 1,159,723 + 광주광역시 163,664 = 1,323,387
+# 이 유도가 옳다는 방증: 원천 `match_build_jeonnamgwangju.txt` 는 1,327,372 행이고
+# 유도값과의 비 0.99700 은 다른 15종의 (정본 실측 ÷ 원천 행수) 비 0.992~1.000 대와 같은 대역이다.
+#
+# [T043 재검수] 직전 판(15종)의 값 12종은 정본 실측이 **아니었다**(출처 불명).
+#   예: seoul 621,255 ↔ 실측 592,882 / gyunggi 2,443,510 ↔ 실측 1,650,227 /
+#       jeju 174,120 ↔ 실측 261,557. `--only gyunggi` 나 `--only jeju` 같은 정상
+#   부분 빌드가 창 밖으로 떨어져 **오탐**을 냈고, 전국 합계는 우연히 창 안에 들어
+#   게이트가 무력했다. 16종 전부를 위 한 가지 방법으로 다시 뽑아 동질화했다.
+BASELINE_ADDR = {
+    "seoul": 592882, "busan": 379669, "daegu": 291230, "incheon": 248953,
+    "daejeon": 139244, "ulsan": 162517, "sejong": 55846, "gyunggi": 1650227,
+    "gangwon": 593703, "chungbuk": 621383, "chungnam": 886180, "jeonbuk": 801085,
+    "jeonnamgwangju": 1323387,      # ← 유일한 유도값(전남+광주 합). 위 주석 참조
+    "gyeongbuk": 1409925, "gyeongnam": 1268759, "jeju": 261557,
+}                                   # 16종 합 10,686,547 = 정본 kind='addr' 전체와 일치
+BASELINE_OSM = 594704     # 정본 실측: OSM 유래 kind 합(poi 406,064 + road 165,601 + place 21,668 + station 1,371)
+BASELINE_POI = 5000876    # 정본 실측: --poi-csv-dir 유래 kind 합(biz 4,914,112 + facility 86,764)
+
+# 행수 게이트는 **세 층**이고 층마다 무너지는 조건이 다르다. 하나가 뚫려도 다음이 선다.
+#   1층 비례 창   GATE_LO~GATE_HI — `--min-rows-ratio/--max-rows-ratio` 로 넓힐 수 있다(운영 판단)
+#   2층 비례 바닥 GATE_FLOOR      — **명령줄로 조절 불가**. 창을 아무리 넓혀도 남는 바닥
+#   3층 절대 바닥 GATE_MIN_PER_SIDO — 기준선이 아예 없어도 서는 유일한 층
+GATE_LO, GATE_HI = 0.98, 1.10      # 행수 허용 창 기본값(-2% ~ +10%)
+GATE_FLOOR = 0.93                  # 2층 — 창을 넓히더라도 남는 비례 바닥(조절 불가)
+# 3층 — 시도 1종당 최소 addr 행수. 기준선 유무·창 설정과 **무관**하게 항상 적용한다.
+#   가장 작은 시도(sejong)가 55,846 행이므로 10,000 은 정상 빌드를 절대 건드리지 않는다.
+#   이 층이 있어야 "기준선 없는 시도가 섞여 G3·G4 가 SKIP → 0행 산출이 통과" 가 막힌다.
+GATE_MIN_PER_SIDO = 10000
+LON_LO, LON_HI, LAT_LO, LAT_HI = 124.0, 132.0, 33.0, 39.0
+
+# 판정 4값: PASS / FAIL / SKIP / N/A.
+#   SKIP 은 "판정할 수 없었다"이고 이는 **실패로 계수한다**(--allow-gate-skip 으로만 해제).
+#   N/A 는 "판정 대상이 아니다"이고 실패가 아니다(현재 G6 만 해당).
+GateResult = collections.namedtuple("GateResult", "name verdict actual expected note")
+
+# ---- 리(里) 키 충돌 관측 (T018 A-4) — **폐지됨** ---------------------------
+# 여기에는 RI_KEY_COLLISIONS / RI_COLLISION_ROWS / RI_COLLISION_SAMPLE 세 상수가 있었다.
+# mgt[:10] 파생키가 한 키에 서로 다른 리를 몰아넣는 것(붕괴 키 2,699개)을 세려던 계수기다.
+# T043 에서 조인키를 원천 설계 PK6 으로 바꾸면서 그 붕괴가 구조적으로 사라졌고(중복은 G9 가
+# 0 을 강제한다), 세 상수는 아무도 읽지 않는 채로 남아 있었다.
+# **선언만 남은 계수기는 "세고 있다"는 거짓 인상을 준다**(T043 검수 Minor-5). 그래서 지웠다.
+# 지금 이 자리의 역할은 state["pk_dup"] → 게이트 G9 가 대신한다 — 계수기를 없애지 말라는
+# T042 §B-1 주의는 계수 자체가 아니라 "붕괴를 침묵하지 말라"는 뜻이므로 그대로 지켜진다.
 
 # ---- EPSG:5179(UTM-K) → WGS84 (Snyder inverse TM, 무의존) ----
 _a=6378137.0; _f=1/298.257222101; _e2=2*_f-_f*_f; _ep2=_e2/(1-_e2)
@@ -160,21 +222,33 @@ SCHEMA = """
   CREATE VIRTUAL TABLE area_rtree USING rtree(id,minlon,maxlon,minlat,maxlat);
 """
 
-def _derive_jibun(namemap, mgt):
-    # 대표지번 없는 건물 → 건물관리번호로 지번 파생. mgt[:10]=법정동코드→법정동명, [11:15]=본번, [15:19]=부번.
-    nm = namemap.get(mgt[:10])
-    if not nm or len(mgt) < 19: return None
-    try: b = int(mgt[11:15]); s = int(mgt[15:19])
-    except ValueError: return None
-    if not b: return None
-    return f"{nm} {b}" + (f"-{s}" if s else "")
+def pk6_jibun(c):
+    """match_jibun 한 행에서 설계 PK6 튜플을 뽑는다."""
+    return tuple(c[i] for i in PK6_JIBUN)
 
 
-def load_jibun(src, sido):
-    # match_jibun_<시도>.txt → (mgt→대표지번 dict, 법정동코드(앞10)→"법정동 [리]" 이름 dict, 법정동코드(앞10)→리(里) dict).
-    # c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값), c[5]=산, c[6]=본번, c[7]=부번, c[18]=건물관리번호.
-    # 이름 dict 는 대표지번 없는 건물의 지번을 _derive_jibun 으로 채우는 데 쓴다(빠짐없이).
-    # ri dict(rd)는 navi addr 의 ri 컬럼(X5) 산출용.
+def pk6_build(c):
+    """match_build 한 행에서 설계 PK6 튜플을 뽑는다."""
+    return tuple(c[i] for i in PK6_BUILD)
+
+
+def assemble_jibun(c, ri):
+    """지번 표기 조립. **구 :218-219 와 바이트 단위로 동일한 문자열**을 낸다. 규칙을 바꾸지 마라.
+
+    조인 키만 바꾸는 것이 이번 변경의 범위다. 여기서 표기까지 손대면 A/B 대조에서
+    '조인 교체의 효과'와 '표기 변경의 효과'가 섞여 어느 쪽도 측정할 수 없게 된다.
+    """
+    dong = f"{c[3]} {ri}" if ri else c[3]
+    san = "산 " if c[5] == "1" else ""
+    bu = c[7]
+    return f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
+
+
+def load_jibun(src, sido, state):
+    # match_jibun_<시도>.txt → (PK6→대표지번, PK6→리(里), PK6→법정동코드) 세 dict.
+    # c[0]=법정동코드(시군구5+읍면동3+리2), c[3]=법정동(면), c[4]=리(시골만; 동지역 빈값),
+    # c[5]=산, c[6]=본번, c[7]=부번, c[12]=지번일련번호(PK5), c[18]=건물관리번호, c[19]=PK6.
+    # ri dict 는 navi addr 의 ri 컬럼(X5) 산출용, 법정동코드 dict 는 bcode 컬럼용(변경 B).
     # ★ 정정(T018, 2026-08-10) — 구 주석의 "법정동코드(mgt[:10]) 단위 리 1:1(면지역만 존재)"은 **거짓**이다.
     #   mgt 는 건물관리번호이고 앞 10자리는 **건물 등록 시점의 법정동코드로 동결**돼 이후 개편을
     #   반영하지 않으며, 끝 2자리(리 자리)도 이 파일에서는 사실상 구분자 역할을 못 한다.
@@ -194,61 +268,66 @@ def load_jibun(src, sido):
     # ※ 이번 수정의 범위는 **관측뿐**이다 — 값 선택 규칙(첫 값 유지)은 그대로 두어 산출물이 바뀌지
     #   않게 한다. 키를 무엇으로 바꿀지(예: mgt[:10]+리명, 지번 기반)는 원천 재적재를 수반하므로
     #   후속 태스크에서 결정한다. 지금은 "조용히 뭉개던 것"을 "세어서 알리는 것"으로만 바꾼다.
-    p = src / f"match_jibun_{sido}.txt"; d = {}; nm = {}; rd = {}
-    if not p.exists(): return d, nm, rd
-    coll = 0                                    # 이 시도에서 발생한 리 충돌(다른 값 덮어쓰기 시도) 건수
-    for line in io.open(p, encoding="cp949", errors="replace"):
-        c = line.rstrip("\n").split("|")
-        if len(c) < 19: continue
-        mgt = c[18]
-        ri = c[4].strip()                       # 리(里) — 면 단위 지번에 보존(없으면 동/법정동만)
-        dong = f"{c[3]} {ri}" if ri else c[3]
-        nm.setdefault(mgt[:10], dong)
-        if ri:                                  # 리 분리 컬럼(X5) — emd 문자열 합성과 별개로 보존
-            k = mgt[:10]; prev = rd.get(k)
-            if prev is None:
-                rd[k] = ri                      # 첫 값 채택 — setdefault 와 동일(동작 불변)
-            elif prev != ri:                    # 같은 키에 **다른** 리 → 구 코드가 조용히 삼키던 충돌
-                coll += 1
-                RI_KEY_COLLISIONS[k].add(ri)
-                if coll <= RI_COLLISION_SAMPLE:
-                    print(f"    [리 충돌] {sido} bcode10={k} 채택='{prev}' 무시='{ri}' "
-                          f"(지번='{c[3]} {ri}')", file=sys.stderr)
-        if mgt in d: continue
-        san = "산 " if c[5] == "1" else ""; bu = c[7]
-        d[mgt] = f"{dong} {san}{c[6]}" + (f"-{bu}" if bu and bu != "0" else "")
-    if coll:
-        RI_COLLISION_ROWS[sido] = coll
-        print(f"    [리 충돌] {sido}: 행 {coll:,}건 / 붕괴 키 "
-              f"{sum(1 for v in RI_KEY_COLLISIONS.values() if v):,}건(누적)", file=sys.stderr)
-    return d, nm, rd
+    # ★ 후속 처분(T043, 2026-08-21) — 위 A-4 가 남긴 "키를 무엇으로 바꿀지"에 답이 나왔다.
+    #   원천이 **설계해 둔** 복합키(PK6)가 있었다. mgt[:10] 파생키를 버리고 PK6 으로 바꾼다.
+    #   · mgt[:10] 붕괴 키 2,699개 → PK6 에서는 **0**(중복은 게이트 G9 가 0 을 강제).
+    #   · 조인 적중 59.89% → **100.00%**(T042 전국 실측, 미적중 0).
+    #   · 대표지번 없는 건물이 사라지므로 `_derive_jibun` 파생 경로는 호출수 0 이 되어 삭제했다.
+    #   A-4 의 관측 상수 3종은 사문이 되어 삭제했다(:85 주석에 계보를 남겼다).
+    #   실제 계수는 state["pk_dup"](→ G9)가 대신한다. 계수기를 없애지 말라는 T042 §B-1 주의 이행.
+    jd, rid, bcd = {}, {}, {}
+    p = src / f"match_jibun_{sido}.txt"
+    if not p.exists():
+        return jd, rid, bcd                     # 침묵 — 이 침묵은 게이트 G2 가 실패로 승격시킨다
+    with io.open(p, encoding="cp949", errors="replace") as fh:   # (Minor-6) ResourceWarning 제거
+        for line in fh:
+            c = line.rstrip("\n").split("|")
+            if len(c) < 20: continue            # c[19]=PK6 을 읽으므로 19 가 아니라 20 이다
+            if c[12] != "0": continue           # 대표지번(PK5=지번일련번호 0)만 — T042 §A-6
+            k = pk6_jibun(c)
+            if k in jd:
+                state["pk_dup"] += 1            # G9 가 0 을 요구한다. 첫 값을 유지한다.
+                continue
+            ri = c[4].strip() or None           # 리(里) — 면 단위 지번에만 존재(동지역은 빈값→None)
+            jd[k] = assemble_jibun(c, ri)
+            rid[k] = ri
+            bcd[k] = c[0]                       # 변경 B: 리 2자리를 포함한 지번측 법정동코드
+    return jd, rid, bcd
 
 def add_juso(db, src, only, state):
     pid = state["pid"]; seen = state["seen"]
-    for s in [x for x in SIDO if (not only or x in only)]:
+    for s in effective_sido(only):
         path = src / f"match_build_{s}.txt"
         if not path.exists():
-            print(f"  (건너뜀) {path.name} 없음", file=sys.stderr); continue
-        jdict, jname, jridict = load_jibun(src, s)
+            print(f"  (건너뜀) {path.name} 없음", file=sys.stderr); continue   # 게이트 G2 가 잡는다
+        jd, rid, bcd = load_jibun(src, s, state)
         st=time.time(); n0=pid; pb=[]; fb=[]; rb=[]
-        for line in io.open(path, encoding="cp949", errors="replace"):
-            c=line.rstrip("\n").split("|")
-            if len(c)<27: continue
-            try: E=float(c[25]); N=float(c[26])
-            except ValueError: continue
-            mgt=c[10]
-            if mgt in seen: continue
-            seen.add(mgt)
-            lon,lat=utmk_to_wgs84(E,N)
-            if not (124<=lon<=132 and 33<=lat<=39): continue
-            pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
-            bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
-            jb=jdict.get(mgt) or _derive_jibun(jname, mgt)       # 대표지번 없으면 건물관리번호로 파생(빠짐없이)
-            pb.append((pid,'addr',None,None,c[1],c[2],c[3],jridict.get(mgt[:10]),road,rn,mno,sno,bld,c[9],c[14],mgt,c[0],c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=c[0]·hcode=c[13]·ri=리(X5,mgt[:10]키)
-            fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
-            rb.append((pid,lon,lon,lat,lat))
-            if len(pb)>=50000:
-                _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
+        with io.open(path, encoding="cp949", errors="replace") as fh:   # (Minor-6) ResourceWarning 제거
+            for line in fh:
+                c=line.rstrip("\n").split("|")
+                if len(c)<27: continue
+                try: E=float(c[25]); N=float(c[26])
+                except ValueError: continue
+                mgt=c[10]
+                if mgt in seen: continue
+                seen.add(mgt)
+                lon,lat=utmk_to_wgs84(E,N)
+                if not (LON_LO<=lon<=LON_HI and LAT_LO<=lat<=LAT_HI): continue
+                k=pk6_build(c)                                       # 원천 설계 PK6 조인(T042: 전국 적중 100.00%)
+                jb=jd.get(k)
+                if jb is None:
+                    state["pk_miss"]+=1                              # G8 이 0 을 요구한다
+                    continue
+                ri_v=rid.get(k)
+                bv=bcd.get(k)
+                bcode_v=c[0] if bv is None else bv                   # 빈 문자열에는 폴백하지 않는다(도달불가 방어분기)
+                pid+=1; road=c[5]; rn=rnorm(road); mno=int(c[7] or 0); sno=int(c[8] or 0)
+                bld=" ".join(dict.fromkeys([x for x in (c[11],c[19]) if x.strip()]))
+                pb.append((pid,'addr',None,None,c[1],c[2],c[3],ri_v,road,rn,mno,sno,bld,c[9],c[14],mgt,bcode_v,c[13],None,None,jb,None,None,'navi',1,lon,lat))  # bcode=지번측 법정동코드(변경 B)·hcode=c[13]·ri=리(X5, PK6키)
+                fb.append((pid,'',f"{c[1]} {c[2]} {c[3]} {c[14]}",f"{road} {rn}",bld))
+                rb.append((pid,lon,lon,lat,lat))
+                if len(pb)>=50000:
+                    _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
         _flush(db,pb,fb,rb)
         print(f"  addr:{s:10s} +{pid-n0:>8,}  ({time.time()-st:.1f}s)", file=sys.stderr)
     state["pid"]=pid
@@ -407,29 +486,485 @@ def write_taxonomy(db, out_path):
                         encoding="utf-8")
 
 
+# ==== 빌드 안전 게이트 (T043) =================================================
+# 규약: 모든 게이트는 `tmp.replace(out)` **앞에서** 판정한다. DB 를 읽을 때는 커밋·종료 후
+#       `file:{tmp}?mode=ro` 로 **다시 열고** 읽자마자 닫는다. 게이트는 절대 쓰지 않는다.
+#       하나라도 실패하면 tmp 를 남기고 out 은 건드리지 않은 채 exit 2.
+
+def effective_sido(only):
+    """이번 실행이 실제로 훑을 시도 목록. add_juso 와 게이트가 **같은 식**을 써야 한다.
+    두 곳에서 따로 계산하면 G0 가 실제 처리 범위와 어긋난다."""
+    return [x for x in SIDO if (not only or x in only)]
+
+
+def _home_dirs():
+    """정본 후보 디렉터리 경로 집합.
+
+    `expanduser()` 는 `$HOME` 을 **그대로 믿는다**. cron·systemd·`sudo -H`·
+    `docker run -e HOME=...` 이 전부 `$HOME` 을 바꿔 놓을 수 있고, 그때 `~/geocode-build`
+    는 엉뚱한 곳을 가리켜 정본이 정본으로 인식되지 않는다(T043 검수 C-1: 전 게이트 PASS
+    · exit 0 · 정본 교체까지 관통). 그래서 환경변수와 무관한
+    `pwd.getpwuid(os.getuid()).pw_dir` 를 **항상** 후보에 더한다.
+
+    BUILD_HOME 은 '추가'이지 '대체'가 아니다 — 환경변수는 후보를 늘릴 수만 있고
+    정본 경로를 후보에서 **뺄 수는 없다**.
+    """
+    prefixes = []
+    h = os.environ.get("HOME")
+    if h:
+        prefixes.append(h)
+    try:
+        prefixes.append(pwd.getpwuid(os.getuid()).pw_dir)   # $HOME 과 무관한 진짜 홈
+    except (KeyError, OSError):
+        pass
+    homes = set()
+    for c in CANONICAL_HOMES:
+        if c == "~" or c.startswith("~/"):
+            tail = c[2:]
+            for p in prefixes:
+                homes.add(pathlib.Path(p) / tail if tail else pathlib.Path(p))
+        else:
+            homes.add(pathlib.Path(c))
+    bh = os.environ.get("BUILD_HOME")
+    if bh:
+        homes.add(pathlib.Path(bh).expanduser())
+    return homes
+
+
+def _abspath(p):
+    """존재하지 않아도 죽지 않는 절대경로화."""
+    try:
+        return pathlib.Path(p).expanduser().resolve()
+    except OSError:
+        return pathlib.Path(os.path.abspath(os.path.expanduser(str(p))))
+
+
+def _dir_id(p):
+    """디렉터리의 (st_dev, st_ino). 없으면 None."""
+    try:
+        st = os.stat(str(p))
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def normalize_arg_paths(args):
+    """경로 인자를 **한 지점에서 1회** 정규화한다 (T043 2차 검수 N-1).
+
+    같은 경로 문자열을 두고 소비 지점마다 술어가 갈렸다 —
+    `gate_inputs` 는 `Path(x).expanduser().exists()`, `gate_rowcounts` 와
+    `add_osm` 은 `Path(x).exists()` 를 썼다. `--osm ~/geocode-build/osm.sqlite`
+    처럼 셸이 확장하지 않은 **리터럴 틸데**를 주면(Docker `-e`, systemd
+    `Environment=`, JSON/YAML 설정에서 흔하다) G2 는 "있다", 나머지 둘은
+    "없다"로 판정이 쪼개진다. 그 결과 osm 594,704 행이 통째로 빠진 산출물이
+    11개 게이트를 전부 통과한다.
+
+    술어를 지점마다 고치지 않는 이유: 앞으로 늘어날 **네 번째 소비 지점**을
+    못 덮는다. 입력을 정규화하면 그 지점이 어떤 술어를 쓰든 같은 답을 본다.
+
+    `--out` 도 같은 구조다. 정규화하지 않으면 `targets_canonical()` 이 판정한
+    경로와 `tmp.replace(out)` 이 실제로 쓰는 경로가 갈라진다. `BUILD_HOME` 이
+    리터럴 틸데면 기본 `--out` 이 상대경로 `~/geocode-build/geocode.sqlite` 가
+    되어 작업 디렉터리 아래 `./~/geocode-build` 를 만든다.
+
+    **G0 는 이 정규화로 바뀌지 않는다.** `targets_canonical()` 은 내부에서
+    `_abspath()` → `.expanduser().resolve()` 를 이미 거치므로 정규화 전후의
+    판정이 동일하다 — 약화도, 정당한 부분 빌드에 대한 과잉차단도 아니다.
+    바뀌는 것은 **실제로 쓰는 경로가 게이트가 판정한 경로와 일치**한다는 점뿐이다.
+
+    빈 문자열은 건드리지 않는다(`Path("").expanduser()` 는 `.` 이 되어 없던
+    경로를 있는 것으로 만든다).
+    """
+    if args.osm:
+        args.osm = str(pathlib.Path(args.osm).expanduser())
+    if args.out:
+        args.out = str(pathlib.Path(args.out).expanduser())
+    return args
+
+
+def targets_canonical(out_path):
+    """산출 경로가 정본 디렉터리(또는 그 하위)를 겨누는가.
+
+    두 판정의 **합집합**이다. 뒤엣것이 앞엣것을 좁히지 않으므로 폴백이 새 구멍이 되지 않는다.
+      (a) 아이노드 판정 — `$HOME` 변조·심볼릭링크·상대경로·`..` 를 한꺼번에 무력화한다.
+          같은 디렉터리를 어떤 경로로 부르든 (st_dev, st_ino) 는 같기 때문이다.
+      (b) 경로 문자열 판정 — 정본 디렉터리가 아직 없는 **첫 빌드**용 폴백.
+          디렉터리가 없으면 stat 이 실패해 (a)가 아무것도 못 하므로 반드시 필요하다.
+    """
+    homes = _home_dirs()
+    hids = {i for i in (_dir_id(h) for h in homes) if i is not None}
+    out = _abspath(out_path)
+    chain = [out.parent, *out.parent.parents]
+    for d in chain:                                   # (a) 아이노드
+        if _dir_id(d) in hids:
+            return True
+    hstr = {_abspath(h) for h in homes}
+    return any(d in hstr for d in chain)              # (b) 경로 문자열
+
+
+def is_full_rebuild(args, eff):
+    """전국 재빌드인가. 인자의 겉모습(--only 유무)이 아니라 **의미**로 판정한다."""
+    covers_all = set(eff) >= set(SIDO)                     # (a) 범위가 전국을 덮는가
+    return covers_all or targets_canonical(args.out)       # (b) 정본을 겨누는가
+
+
+def _fail(name, actual, expected, note=""):
+    return GateResult(name, "FAIL", actual, expected, note)
+
+
+def _ok(name, actual, expected, note=""):
+    return GateResult(name, "PASS", actual, expected, note)
+
+
+def gate_full_rebuild(args, eff):
+    """G0 — 전국 재빌드 차단. T018 리 백필 처분(F1) 전까지 정본 갱신을 막는다."""
+    n = "G0 전국재빌드차단"
+    a = f"범위={len(eff)}/{len(SIDO)} 시도, out={args.out}"
+    if not is_full_rebuild(args, eff):
+        return _ok(n, a, "부분빌드")
+    if getattr(args, "t018_disposed", False):
+        return _ok(n, a, "-", "전국빌드 — --t018-disposed 로 해제됨")
+    return _fail(n, a, "부분빌드", "전국 재빌드 차단")
+
+
+def gate_args(args, only):
+    """G1 — 인자 정합. `--only` 슬러그가 전부 SIDO 에 있는가.
+
+    `--src` 누락은 argparse(required=True)가 exit 2 로 먼저 잡으므로 여기서 다시 보지 않는다.
+    `--src` 경로의 실재 여부는 G2 가 파일 단위로 판정한다.
+    """
+    n = "G1 인자정합"
+    bad = sorted(set(only) - set(SIDO)) if only else []
+    if bad:
+        return _fail(n, f"미상 슬러그 {bad}", "SIDO 소속", f"허용: {','.join(SIDO)}")
+    cnt = f"--only 슬러그 {len(only)}종 유효" if only else "--only 미지정(전국)"
+    return _ok(n, f"--src 지정, {cnt}", "-")
+
+
+def gate_inputs(src, eff, args=None):
+    """G2 — 입력 존재. 선택된 모든 시도에 build/jibun 이 **둘 다** 있어야 한다.
+    add_juso/load_jibun 의 조용한 건너뜀·빈 dict 반환을 실패로 승격시키는 것이 이 게이트의 일이다.
+
+    [T043 검수 Minor-2] `--osm` 도 여기서 함께 본다. add_osm 은 경로가 없으면
+    "(건너뜀) OSM ... 없음" 한 줄만 남기고 지나가고, gate_rowcounts 는 그때 G3 기준선에서
+    BASELINE_OSM(594,704)을 **빼 버린다**. 그래서 `--osm` 경로에 오타가 나면 osm 유래 행이
+    통째로 사라진 산출물이 낮아진 기준선에 맞춰 G3 를 통과한다 — 기준선을 공격자(또는 오타)가
+    고를 수 있다는 뜻이다.
+
+    다만 **모든 osm 부재를 실패로 삼으면 과잉 차단**이 된다. `--osm` 은 미지정 시
+    $BUILD_HOME/osm.sqlite 를 관례적으로 집는데, 그 파일이 없는 환경(첫 빌드·배포서버·CI)에서
+    주소전용 빌드는 정당한 실행이다. 그래서 두 경우에만 실패로 승격시킨다.
+
+      · `--osm` 을 **명시했는데** 그 경로가 없다 — 오타이거나 기준선 낮추기 시도다.
+      · **정본을 겨누는 빌드**인데 osm 이 없다 — 정본은 osm 유래 594,704 행을 담아야 하는
+        산출물이므로, 그것이 통째로 빠진 채 낮아진 기준선으로 G3 를 통과해서는 안 된다.
+
+    명시 여부는 main() 이 parse_args 직후에 세우는 args.osm_explicit 로 판별한다. argparse
+    기본값을 그대로 두면 "지정했는가"를 사후에 알 수 없어 이 구분 자체가 불가능하다."""
+    n = "G2 입력존재"
+    nb = [s for s in eff if not (src / f"match_build_{s}.txt").exists()]
+    nj = [s for s in eff if not (src / f"match_jibun_{s}.txt").exists()]
+    have = f"build {len(eff)-len(nb)}/{len(eff)}, jibun {len(eff)-len(nj)}/{len(eff)}"
+    osm = getattr(args, "osm", None) if args is not None else None
+    gone = bool(osm) and not pathlib.Path(osm).expanduser().exists()
+    explicit = bool(getattr(args, "osm_explicit", False)) if args is not None else False
+    out = getattr(args, "out", None) if args is not None else None
+    canon = bool(out) and targets_canonical(out)
+    osm_missing = gone and (explicit or canon)
+    if gone:
+        have += ", osm 0/1" + ("" if osm_missing else "(주소전용 — 정본 아님·미지정)")
+    if nb or nj or osm_missing:
+        why = []
+        if nb or nj:
+            why.append(f"없음 build={nb} jibun={nj}")
+        if osm_missing:
+            why.append(("--osm 을 지정했으나 " if explicit else "정본을 겨눈 빌드인데 ")
+                       + f"{osm} 이 없다 — G3 기준선이 조용히 낮아진다")
+        return _fail(n, have, "전부 존재", " · ".join(why))
+    return _ok(n, have, "전부 존재")
+
+
+def gate_ratios(args):
+    """게이트 임계 3종을 인자 우선으로 확정한다. (창하한, 창상한, 시도당 절대하한)"""
+    lo = getattr(args, "min_rows_ratio", None)
+    hi = getattr(args, "max_rows_ratio", None)
+    mp = getattr(args, "min_rows_per_sido", None)
+    lo = GATE_LO if lo is None else float(lo)
+    hi = GATE_HI if hi is None else float(hi)
+    # 3층은 **올릴 수만 있다**. 명령줄로 바닥을 낮출 수 있으면 바닥이 아니기 때문이다.
+    mp = GATE_MIN_PER_SIDO if mp is None else max(GATE_MIN_PER_SIDO, int(mp))
+    return lo, hi, mp
+
+
+def gate_rowcounts(n_places, n_addr, eff, args):
+    """G3·G4 — 행수. 세 층이 **각각 독립으로** 반증한다.
+
+      1층 비례 창    [lo·base, hi·base]   — `--min/max-rows-ratio` 로 조절 가능
+      2층 비례 바닥  GATE_FLOOR·base      — 조절 불가. 창을 넓혀도 남는다
+      3층 절대 바닥  min_per_sido·시도수  — 기준선이 없어도, 창과 무관하게 항상 선다
+
+    기본값에서는 1층 하한(0.98)이 2층(0.93)보다 높아 2층이 가려진다. 그것이 정상이다 —
+    2층은 `--min-rows-ratio 0.10` 처럼 창을 넓혔을 때 비로소 일하는 최후 방벽이기 때문이다.
+    (T043 검수 Minor-1 이 "GATE_FLOOR 는 사문"이라 지적했으나, 창이 인자화된 지금
+     사문이 아니다. 다만 주석의 "-2%~+10%" 고정 서술은 거짓이었으므로 바로잡았다.)
+
+    기준선 없는 시도가 섞이면 1·2층은 계산할 수 없어 SKIP 이지만, **3층은 그대로 판정한다** —
+    검수 C-2 가 실증한 "0행 전국 산출이 SKIP 을 타고 통과" 는 여기서 FAIL 로 끊긴다.
+    SKIP 은 `--allow-gate-skip` 으로 넘길 수 있어도 FAIL 은 넘길 수 없다.
+    """
+    lo, hi, min_per = gate_ratios(args)
+    abs_min = min_per * len(eff)          # 3층 — 기준선과 무관
+    miss = [s for s in eff if s not in BASELINE_ADDR]
+
+    if miss:
+        why = f"기준선 없는 시도 {miss} — 비례 판정 불가"
+        g3 = GateResult("G3 places 행수", "SKIP", f"{n_places:,}", "?", why)
+        if n_addr < abs_min:
+            g4 = _fail("G4 addr 행수", f"{n_addr:,}", f">={abs_min:,}",
+                       f"{why} · **절대하한 미달**({min_per:,}/시도 × {len(eff)}종)")
+        else:
+            g4 = GateResult("G4 addr 행수", "SKIP", f"{n_addr:,}", "?",
+                            f"{why} · 절대하한 {abs_min:,} 은 통과")
+        return g3, g4
+
+    base_addr = sum(BASELINE_ADDR[s] for s in eff)
+    comp = [f"addr {base_addr:,}"]
+    base_places = base_addr
+    if args.osm and pathlib.Path(args.osm).exists():
+        base_places += BASELINE_OSM; comp.append(f"osm {BASELINE_OSM:,}")
+    if getattr(args, "poi_csv_dir", None):
+        base_places += BASELINE_POI; comp.append(f"poi/biz {BASELINE_POI:,}")
+    win = lambda b: (int(b * lo), int(b * hi))
+    plo, phi = win(base_places); alo, ahi = win(base_addr)
+    floor = int(base_addr * GATE_FLOOR)
+    pct = f"{(lo-1)*100:+.0f}%~{(hi-1)*100:+.0f}%"
+
+    g3n = f"{n_places:,}  (기준 {base_places:,} = {' + '.join(comp)}, {pct})"
+    g3 = (_ok if plo <= n_places <= phi else _fail)(
+        "G3 places 행수", g3n, f"{plo:,}~{phi:,}")
+
+    # 세 층을 따로 세워, 어느 층이 무너졌는지 판정문에 남긴다.
+    #   이렇게 해야 각 임계 상수를 **단독으로** 반증하는 시험을 쓸 수 있다(검수 M-2).
+    broke = []
+    if not (alo <= n_addr <= ahi):
+        broke.append(f"창({alo:,}~{ahi:,})")
+    if n_addr < floor:
+        broke.append(f"비례바닥({floor:,}=×{GATE_FLOOR})")
+    if n_addr < abs_min:
+        broke.append(f"절대바닥({abs_min:,}={min_per:,}×{len(eff)})")
+    g4n = f"{n_addr:,}  (기준 {base_addr:,}, 비례바닥 {floor:,}, 절대바닥 {abs_min:,})"
+    g4 = (_ok(  "G4 addr 행수", g4n, f"{alo:,}~{ahi:,}") if not broke
+          else _fail("G4 addr 행수", g4n, f"{alo:,}~{ahi:,}", "미달/초과: " + " · ".join(broke)))
+    return g3, g4
+
+
+def gate_coords(con):
+    """G5 — 좌표 범위. 검사 범위는 kind 무관 **전 행**(addr·osm·biz·facility 모두)."""
+    n = "G5 좌표범위"
+    q = con.execute(f"""SELECT count(*) FROM places
+        WHERE lon IS NULL OR lat IS NULL
+           OR lon NOT BETWEEN {LON_LO} AND {LON_HI}
+           OR lat NOT BETWEEN {LAT_LO} AND {LAT_HI}""").fetchone()[0]
+    return (_ok(n, "이탈 0", 0, "(전 kind 대상)") if q == 0
+            else _fail(n, f"이탈 {q:,}행", 0, "(전 kind 대상)"))
+
+
+def gate_areas(con, args):
+    """G6 — areas 적재. `--areas` 를 요구하지 않은 실행에서는 N/A(=판정 대상 아님)."""
+    n = "G6 areas"
+    if getattr(args, "no_areas", False):
+        return GateResult(n, "N/A", "--no-areas", "-", "")
+    if not args.areas:
+        return GateResult(n, "N/A", "--areas 미지정", "-", "")
+    q = con.execute("SELECT count(*) FROM areas").fetchone()[0]
+    return _ok(n, f"{q:,}행", ">0") if q > 0 else _fail(n, 0, ">0", args.areas)
+
+
+def gate_integrity(con):
+    """G7 — 무결성."""
+    n = "G7 무결성"
+    v = con.execute("PRAGMA integrity_check").fetchone()[0]
+    return _ok(n, v, "ok") if v == "ok" else _fail(n, v, "ok")
+
+
+def gate_pk_miss(state):
+    """G8 — PK6 미적중. **조정 불가**: T042 전국 실측이 미적중 0 이었다. 0 이 아니면 원천 해석이 틀린 것이다."""
+    q = state.get("pk_miss", 0)
+    n = "G8 PK6 미적중"
+    return (_ok(n, f"pk_miss={q}", 0, "[조정불가]") if q == 0
+            else _fail(n, f"pk_miss={q:,}", 0, "[조정불가]"))
+
+
+def gate_pk_dup(state):
+    """G9 — PK6 키 중복. **조정 불가**: PK6 은 대표지번 안에서 유일해야 한다(T042 §A-2 충돌 0)."""
+    q = state.get("pk_dup", 0)
+    n = "G9 PK6 키중복"
+    return (_ok(n, f"dup={q}", 0, "[조정불가]") if q == 0
+            else _fail(n, f"dup={q:,}", 0, "[조정불가]"))
+
+
+def gate_ri_bcode(con):
+    """G10 — ri ⟺ bcode 리자리 정합. **조정 불가**.
+
+    검사 대상은 kind='addr' 뿐이다. biz·facility 는 ri 를 가지면서 bcode 가 비어 있고
+    (정본 실측 998,671행), NULL 3값 논리 때문에 전 행을 대상으로 삼으면 판정이 뒤집힌다.
+    SQLite 에는 right() 가 없으므로 substr(bcode,-2) 를 쓴다(SQLite 3.53.4 실측).
+
+    [T043 검수 Minor-4] 술어를 **대칭**으로 고쳤다. 직전 판은 ri 쪽만 `IS NOT NULL` 로
+    NULL 을 흡수하고 bcode 쪽은 `COALESCE` 로 흡수해, bcode 가 NULL·짧은 문자열일 때
+    좌우의 처리 방식이 달랐다. 이제 양쪽 모두 "값이 있고 비어 있지 않은가"로 통일한다:
+      좌 = ri 가 NULL 도 '' 도 아닌가
+      우 = bcode 끝 두 자리가 두 자리로 존재하고 '00' 이 아닌가
+    `length(bcode)>=2` 를 명시해 한 자리 bcode 가 우변에서 조용히 참이 되는 길을 막는다.
+    """
+    n = "G10 ri↔리자리 정합"
+    q = con.execute("""SELECT count(*) FROM places
+        WHERE kind='addr'
+          AND (ri IS NOT NULL AND ri <> '')
+           <> (bcode IS NOT NULL AND length(bcode) >= 2 AND substr(bcode,-2) <> '00')
+        """).fetchone()[0]
+    return (_ok(n, "위반 0행", 0, "[조정불가]") if q == 0
+            else _fail(n, f"위반 {q:,}행", 0, "[조정불가]"))
+
+
+def run_gates(tmp, args, state, eff, src):
+    """G2~G10 판정. tmp 는 **커밋·종료된 뒤** 읽기전용으로 다시 열린다."""
+    res = [gate_inputs(src, eff, args)]
+    con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+    try:
+        n_places = con.execute("SELECT count(*) FROM places").fetchone()[0]
+        n_addr = con.execute("SELECT count(*) FROM places WHERE kind='addr'").fetchone()[0]
+        res.extend(gate_rowcounts(n_places, n_addr, eff, args))
+        res.append(gate_coords(con))
+        res.append(gate_areas(con, args))
+        res.append(gate_integrity(con))
+    finally:
+        con.close()
+    res.append(gate_pk_miss(state))
+    res.append(gate_pk_dup(state))
+    con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+    try:
+        res.append(gate_ri_bcode(con))
+    finally:
+        con.close()
+    return res
+
+
+def gates_failed(results, allow_skip):
+    """SKIP 은 실패다 — '판정하지 못했다'를 통과로 읽으면 게이트를 두는 의미가 없다.
+    --allow-gate-skip 을 준 실행에서만 실패에서 빠진다. N/A 는 애초에 판정 대상이 아니다."""
+    return any(r.verdict == "FAIL" or (r.verdict == "SKIP" and not allow_skip) for r in results)
+
+
+def _w(s):
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def _pad(s, n):
+    return s + " " * max(1, n - _w(s))
+
+
+def print_gates(results, allow_skip, halted=False, elapsed=None):
+    lead = "[게이트]  "
+    ind = " " * _w(lead)
+    for i, r in enumerate(results):
+        d = str(r.actual)
+        print((lead if i == 0 else ind) + _pad(r.name, 22) + _pad(r.verdict, 7)
+              + (_pad(d, 38) + r.note if r.note else d), file=sys.stderr)
+    c = collections.Counter(r.verdict for r in results)
+    tail = "판정 중단" if halted else (
+        "산출물 교체 중단" if gates_failed(results, allow_skip) else "산출물 교체 진행")
+    el = f" · {elapsed:.1f}s" if elapsed is not None else ""
+    print(f"[결과]    {len(results)} 게이트: PASS {c['PASS']} / N/A {c['N/A']} / "
+          f"FAIL {c['FAIL']} / SKIP {c['SKIP']}{el}  →  {tail}", file=sys.stderr)
+
+
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--src", default="/Users/jaechango_cudo/Downloads/지도정보/202605_내비게이션용DB_전체분")
-    ap.add_argument("--osm", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "osm.sqlite"))
+    # --src 기본값 폐지(T043). 구 기본값은 202605 원천을 가리켰고 그 폴더는 이미 없다. 인자를 빠뜨린
+    # 실행이 "주소 0행" DB 를 조용히 만들어 7GB 정본을 덮어쓰는 사고 경로였다. 이제 argparse 가 exit 2 로 막는다.
+    ap.add_argument("--src", required=True, help="내비게이션용DB match_*.txt 폴더(필수)")
+    # --osm 은 sentinel(None) 로 받는다. 기본값을 argparse 에 박아 두면 "사용자가 지정했는가"를
+    # 사후에 알 수 없고, 그러면 G2 가 기본 경로 부재를 전부 오타로 오인해 주소전용 빌드를
+    # 통째로 막는다(과잉 차단). 아래 parse_args 직후에 osm_explicit 을 세우고 기본값을 채운다.
+    ap.add_argument("--osm", default=None,
+                    help="OSM 보조 DB. 미지정이면 $BUILD_HOME(또는 ~/geocode-build)/osm.sqlite 를 "
+                         "쓰되, 없으면 주소전용 빌드로 조용히 진행한다(G2 는 그 경우를 실패로 세지 않는다)")
     ap.add_argument("--out", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
     ap.add_argument("--only")
     ap.add_argument("--poi-csv-dir", help="소상공인 상가(상권)정보 CSV 폴더(시도별)")
+    ap.add_argument("--no-areas", action="store_true",
+                    help="행정경계 자동 적재를 끈다(게이트 G6 는 N/A). 주의: --osm 이 실재하면 add_osm 이 "
+                         "OSM 쪽 areas 를 무조건 복사하므로 이 옵션만으로 areas 가 빈다고 보장되지 않는다")
+    ap.add_argument("--allow-gate-skip", action="store_true",
+                    help="판정 불가(SKIP) 게이트를 실패로 세지 않는다. FAIL 은 해제하지 못한다")
+    # ---- 게이트 임계 (T043 검수 Minor-3 / 원 태스크 §'하한값은 명령줄 인자로 조절 가능하게')
+    #      기본은 엄격하게 두고, 인자는 **느슨하게 여는 쪽으로만** 쓰이게 설계한다.
+    #      · 창(1층)은 자유롭게 조절 가능 — 원천 세대가 바뀌면 정당하게 넓혀야 하기 때문이다.
+    #      · 비례바닥 GATE_FLOOR(2층)는 **인자가 없다**. 창을 넓혀도 남는 것이 존재 이유다.
+    #      · 절대바닥(3층)은 인자가 있으나 **올리는 방향만** 반영한다(gate_ratios 참조).
+    ap.add_argument("--min-rows-ratio", type=float, default=None, metavar="R",
+                    help=f"G3·G4 행수 창의 하한 계수(기본 {GATE_LO}). 넓히면 비례바닥 "
+                         f"{GATE_FLOOR}(조절 불가)가 대신 선다")
+    ap.add_argument("--max-rows-ratio", type=float, default=None, metavar="R",
+                    help=f"G3·G4 행수 창의 상한 계수(기본 {GATE_HI})")
+    ap.add_argument("--min-rows-per-sido", type=int, default=None, metavar="N",
+                    help=f"G4 절대 하한: 시도 1종당 최소 addr 행수(기본 {GATE_MIN_PER_SIDO:,}). "
+                         f"기준선 유무와 무관하게 항상 적용된다. 기본값보다 낮추는 값은 무시한다")
+    ap.add_argument("--taxonomy-out", default=None, metavar="PATH",
+                    help="POI 분류 트리 산출 경로. 미지정이면 **정본을 갱신한 빌드에서만** "
+                         "style/poi-taxonomy.json 을 재생성한다(검수 M-1)")
+    ap.add_argument("--t018-disposed", action="store_true",
+                    help="T018 리(里) 백필 처분 완료 선언 — 게이트 G0(전국 재빌드 차단)를 해제한다")
+    ap.add_argument("--source-label", default="unknown",
+                    help="meta.source 에 적을 원천 세대(예: 2026.07). 미지정이면 unknown")
     ap.add_argument("--dedup", choices=["legacy","er"], default="legacy",
                     help="biz 표시용 중복제거: legacy=정규화상호+좌표3자리 1패스(기본), er=엔티티해상도(dedup_er.py: 셀이웃 블로킹+등급가중점수+union-find)")
     ap.add_argument("--areas", help="행정경계 areas.sqlite(06-gen-areas 산출) — 역지오코딩 동 폴리곤 적재")
     args=ap.parse_args()
+    # --osm 명시 여부를 여기서 고정한다(G2 가 읽는다). 기본 경로는 그 뒤에 채운다.
+    args.osm_explicit = args.osm is not None
+    if args.osm is None:
+        args.osm = os.path.join(os.environ.get("BUILD_HOME")
+                                or os.path.expanduser("~/geocode-build"), "osm.sqlite")
+    # 경로 인자 1회 정규화(검수 N-1). 게이트·적재·교체가 **같은 경로**를 보게 만드는 유일한 지점이다.
+    # 이 줄을 지우면 리터럴 틸데 입력에서 G2 와 add_osm 의 판정이 갈린다.
+    normalize_arg_paths(args)
     only=set(args.only.split(",")) if args.only else None
+    eff=effective_sido(only)
+    # ---- 사전 게이트 (T043) — tmp 를 만들기도 전에 판정한다.
+    #      G1 이 먼저다: --only 오타로 eff 가 비면 G0 의 covers_all 이 False 가 되어 전국빌드를
+    #      부분빌드로 오판할 수 있다. 인자가 성립한 뒤라야 범위 판정이 의미를 갖는다.
+    g1=gate_args(args, only)
+    if g1.verdict!="PASS":
+        print_gates([g1], args.allow_gate_skip, halted=True)
+        print(f"  {g1.name}: {g1.actual} (기대 {g1.expected}) — {g1.note}", file=sys.stderr)
+        sys.exit(1)
+    g0=gate_full_rebuild(args, eff)
+    if g0.verdict!="PASS":
+        print_gates([g0,g1], args.allow_gate_skip, halted=True)
+        print("\n  G0 — 전국 재빌드는 차단돼 있다. T018 리(里) 백필 처분이 끝나지 않았다.\n"
+              "  해제 조건(전부 충족해야 --t018-disposed 를 붙일 수 있다):\n"
+              "    1. T018 리 백필 처분 후속 태스크 완료 — scripts/postgis/ri_backfill_* 5종의\n"
+              "       `right(bcode,2)='00'` 전제 정리(변경 B 이후 이 전제는 거짓이다)\n"
+              "    2. ri_backfill_s3_todo.sql 하드 게이트(6,743,655 ± 34,000) 재산정 또는 폐기\n"
+              "    3. scripts/postgis/load_geocode.py 의 ri/bcode 수용 확인\n"
+              "    4. backfill-admin-codes.py 와의 bcode 의미 충돌 정리(후속 F3)\n"
+              "    5. 위 4항 완료 후 build-studio.py 의 TARGETS()['geocode'] cmd 에\n"
+              "       --t018-disposed 추가 (현행 :598-601. 라인은 밀릴 수 있으니 키로 찾을 것)\n"
+              f"  (판정 근거: {g0.note})", file=sys.stderr)
+        sys.exit(2)
     cwp=pathlib.Path(__file__).resolve().parent/"cat-crosswalk.json"   # 카테고리 표준화 매핑(localdata/osm→canonical)
     if cwp.exists():
         _cw=json.load(open(cwp,encoding="utf-8")); CW_LD.update(_cw.get("localdata",{})); CW_OSM.update(_cw.get("osm",{}))
         print(f"  cat-crosswalk: localdata {len(CW_LD)} · osm {len(CW_OSM)}", file=sys.stderr)
     out=pathlib.Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
-    if not args.areas:                                   # 관례 경로의 행정경계 자동 적재(06-gen-areas 산출 areas.sqlite)
+    if not args.areas and not args.no_areas:             # 관례 경로의 행정경계 자동 적재(06-gen-areas 산출 areas.sqlite)
         cand = out.parent / "areas.sqlite"
         if cand.exists(): args.areas = str(cand)
     tmp=out.with_suffix(".sqlite.tmp"); tmp.unlink(missing_ok=True)
     db=sqlite3.connect(tmp); db.executescript(SCHEMA)
-    t0=time.time(); state={"pid":0,"seen":set()}
+    t0=time.time(); state={"pid":0,"seen":set(),"pk_miss":0,"pk_dup":0}
     print(f"[통합 지오코드 빌드] juso={args.src}\n  osm={args.osm}", file=sys.stderr)
     add_juso(db, pathlib.Path(args.src), only, state)
     build_gazetteer(db)   # navi 도로명 사전 — 시설 주소(더러운 입력) 견고 파싱용(parse_doro_gaz)
@@ -484,29 +1019,57 @@ def main():
           AND nrm(b.name)=nrm(places.name) AND round(b.lon,3)=round(places.lon,3) AND round(b.lat,3)=round(places.lat,3))""")
     db.execute("CREATE TABLE meta(k TEXT,v TEXT)")
     db.executemany("INSERT INTO meta VALUES(?,?)", [("places",str(state["pid"])),("srid","4326"),
-        ("source","내비게이션용DB 2026.05 + OSM"),("built_s",f"{time.time()-t0:.0f}")])
+        ("source",f"내비게이션용DB {args.source_label} + OSM"),("source_label",args.source_label),
+        ("built_s",f"{time.time()-t0:.0f}")])
     db.execute("INSERT INTO places_fts(places_fts) VALUES('optimize')")
-    db.commit(); db.close(); tmp.replace(out)
+    # ---- 산출물 교체 직전 게이트 (T043) ----------------------------------------
+    # 순서를 바꾸지 마라. commit → close → 게이트 → (실패면 exit) → replace.
+    # close 를 게이트보다 먼저 하는 이유: 게이트는 tmp 를 읽기전용으로 **다시 열어** 읽는다.
+    # 열린 쓰기 핸들이 남아 있으면 미커밋 페이지를 읽거나 잠금에 걸린다.
+    # replace 를 try 밖에 두는 이유: 게이트가 예외로 죽었을 때 그 예외가 정본 교체로
+    # 흘러가면 안 된다. 판정하지 못한 빌드는 통과가 아니다.
+    db.commit(); db.close()
+    gt=time.time()
+    try:
+        results=run_gates(tmp, args, state, eff, pathlib.Path(args.src))
+    except Exception as e:
+        print(f"[게이트]  판정 중 예외 — {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[결과]    판정 실패  →  산출물 교체 중단. tmp 를 남긴다: {tmp}", file=sys.stderr)
+        sys.exit(2)
+    results=[g0,g1]+results
+    print_gates(results, args.allow_gate_skip, elapsed=time.time()-gt)
+    if gates_failed(results, args.allow_gate_skip):
+        for r in results:
+            if r.verdict=="FAIL" or (r.verdict=="SKIP" and not args.allow_gate_skip):
+                print(f"  {r.name}: {r.actual} (기대 {r.expected}) {r.note}", file=sys.stderr)
+        print(f"  정본은 건드리지 않았다. 조사용 산출물: {tmp}", file=sys.stderr)
+        sys.exit(2)
+    tmp.replace(out)
     sz=out.stat().st_size/1048576
     print("="*56); print(f"OK: {out}  총 {state['pid']:,}건 · {sz:.0f}MB · {time.time()-t0:.0f}s")
-    # ---- 리(里) 키 충돌 총계 (T018 A-4) — 산출물 품질 경고. 빌드는 실패시키지 않는다.
-    _nk = len(RI_KEY_COLLISIONS); _nr = sum(RI_COLLISION_ROWS.values())
-    if _nk:
-        _top = sorted(RI_KEY_COLLISIONS.items(), key=lambda kv: -len(kv[1]))[:5]
-        print(f"  [경고] 리 키 충돌: 붕괴 키 {_nk:,}개 / 충돌 행 {_nr:,}건 "
-              f"— 이만큼의 places.ri 가 부정확할 수 있음(첫 값 채택).", file=sys.stderr)
-        print("         상위: " + ", ".join(f"{k}({len(v)+1}종)" for k, v in _top), file=sys.stderr)
-        print("         원인·후속: load_jibun 주석 및 T018 §A-2 참조(키 설계 변경은 원천 재적재 동반).",
-              file=sys.stderr)
+    # (T043) 구 '리 키 충돌' 경고 블록 삭제 — mgt[:10] 키에서만 나던 현상이고, PK6 조인에서는
+    #        중복이 게이트 G9(조정불가, 0 강제)로 승격됐다. 경고로 흘려보내던 것을 실패로 바꾼 것이다.
+    # ---- 카테고리 분류 트리(스튜디오 티어/아이콘 목록용)
+    # [T043 검수 M-1] 직전 판은 **모든** 빌드에서 저장소 추적 파일 style/poi-taxonomy.json 을
+    # 덮어썼다. `--only sejong` 같은 임시 빌드 한 번이면 POI 가 없어 파일이
+    # {"cat1_order": [], "tree": {}} 로 비워지고, 그대로 커밋되면 스튜디오 아이콘 목록이 사라진다.
+    # 이제 저장소 파일은 **정본을 갱신한 빌드**에서만 건드린다. 임시 빌드가 이 파일을 쓰려면
+    # --taxonomy-out 으로 자기 경로를 **명시**해야 한다.
+    tax_out = pathlib.Path(args.taxonomy_out).expanduser() if args.taxonomy_out else None
+    if tax_out is None and targets_canonical(out):
+        tax_out = ROOT / "style" / "poi-taxonomy.json"
+    if tax_out is None:
+        print("  (taxonomy 생략: 정본 빌드가 아니다 — 쓰려면 --taxonomy-out 을 지정하라)")
     else:
-        print("  리 키 충돌: 0건", file=sys.stderr)
-    # 카테고리 분류 트리(스튜디오 티어/아이콘 목록용) — 빌드마다 최신 카테고리로 재생성
-    try:
-        rdb = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
-        write_taxonomy(rdb, ROOT / "style" / "poi-taxonomy.json"); rdb.close()
-        print(f"  taxonomy → {ROOT / 'style' / 'poi-taxonomy.json'}")
-    except Exception as e:
-        print(f"  (taxonomy 재생성 스킵: {e})", file=sys.stderr)
+        try:
+            rdb = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
+            try:
+                write_taxonomy(rdb, tax_out)
+            finally:
+                rdb.close()
+            print(f"  taxonomy → {tax_out}")
+        except Exception as e:
+            print(f"  (taxonomy 재생성 스킵: {e})", file=sys.stderr)
 
 if __name__=="__main__":
     main()
