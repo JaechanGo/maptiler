@@ -27,7 +27,7 @@ import classify                                   # noqa: E402
 import pgprobe                                    # noqa: E402
 from oracle import Oracle, split_pnu, _lit, sido_legacy_candidates  # noqa: E402
 
-HEAD_REF = os.environ.get("T046_HEAD_REF", "9e26fdd")
+HEAD_REF = os.environ.get("T046_HEAD_REF", "8f87b9c")
 
 
 def load_head_module():

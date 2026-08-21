@@ -8,7 +8,7 @@
 
 ## 세 상태를 누적으로 잰다
 
-    S0  HEAD(9e26fdd) 코드 그대로            = 보고서에 실린 값 (절단, 보정 없음)
+    S0  HEAD(8f87b9c, 구 9e26fdd) 코드 그대로 = 보고서에 실린 값 (절단, 보정 없음)
     S1  현행 코드, `legacy=False`            = 리 수정만
     S2  현행 코드, `legacy=True`             = 리 수정 + F2 구 시도코드 보정
 
@@ -52,7 +52,7 @@ OUR = "http://127.0.0.1:8092"
 OUT = os.path.join(BUILD, "out", "ri_reclass.json")
 
 
-HEAD_REF = os.environ.get("T046_HEAD_REF", "9e26fdd")
+HEAD_REF = os.environ.get("T046_HEAD_REF", "8f87b9c")
 
 
 def load_head_module():
@@ -60,7 +60,8 @@ def load_head_module():
 
     S0 은 **재구성이 아니라 커밋된 파일 자체**여야 한다. 지금 코드로 옛 동작을
     흉내내면 그 흉내가 맞는지를 다시 증명해야 한다. 참조는 `T046_HEAD_REF`
-    환경변수로 바꿀 수 있다(기본 `9e26fdd` — 보고서 게재값을 낸 커밋).
+    환경변수로 바꿀 수 있다(기본 `8f87b9c` — 보고서 게재값을 낸 커밋. 리베이스
+    전 SHA 는 `9e26fdd` 였고 `scripts/t046`·`tests/t046` 전 파일이 동일하다).
     """
     import subprocess
     import tempfile
@@ -326,7 +327,7 @@ def run(tag, vname, sname):
 def main():
     t0 = time.time()
     out = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-           "states": {"S0": "HEAD 9e26fdd — 절단 조인, 보정 없음(보고서 게재값)",
+           "states": {"S0": "HEAD 8f87b9c(구 9e26fdd) — 절단 조인, 보정 없음(보고서 게재값)",
                       "S1": "현행 — 리 수정, legacy=False",
                       "S2": "현행 — 리 수정 + F2 구 시도코드 보정"},
            "runs": {}}
