@@ -578,18 +578,28 @@ class Fetcher(object):
         out["rev_dist_m"] = None
         out["rev_v_level4lc"] = None
         out["rev_v_level5"] = None
+        out["rev_v_ri"] = None
+        out["rev_ours_bcode"] = None
+        out["rev_ours_ri"] = None
+        out["rev_ours_source"] = None
         if self.reverse and v_pt is not None:
             rv = self._vworld(vworld_reverse_url(self.key, v_pt[0], v_pt[1]), "rev")
             out["rev_v_status"] = rv.status
             if rv.ok:
-                lc, lv5, _txt = parse_vworld_reverse(rv.body)
+                lc, lv5, txt = parse_vworld_reverse(rv.body)
                 out["rev_v_level4lc"] = lc
                 out["rev_v_level5"] = lv5
+                # `level4L` 은 `parse_vworld_reverse` 반환값에 없어 여기서만 꺼낸다.
+                _res = ((rv.body or {}).get("response") or {}).get("result") or []
+                _l4l = ((_res[0] or {}).get("structure") or {}).get("level4L") if _res else None
+                out["rev_v_ri"] = _vw_reverse_ri(txt, _l4l)
             ro = self._ours(ours_reverse_url(v_pt[0], v_pt[1], 2), "rev")
             out["rev_ours_ok"] = bool(ro.ok)
             if ro.ok:
                 out["rev_dist_m"] = _nearest_dist(ro.body)
                 out["rev_ours_bcode"] = _reverse_bcode(ro.body)
+                out["rev_ours_ri"] = _reverse_ri(ro.body)
+                out["rev_ours_source"] = _reverse_source(ro.body)
 
         out["bcode_vw"] = _pick_bcode_vw(v_lc, out["rev_v_level4lc"])
         out["norm_applied"] = _norm_applied(out, rec)
@@ -606,11 +616,48 @@ def _nearest_dist(body):
         return None
 
 
+def _reverse_structure(body):
+    """우리 `/reverse` 의 `address.structure`(§4.2 가 지정한 비교 대상).
+
+    스키마 v2 수선. v1 은 `body["results"][0]` 를 읽었으나 `/reverse` 응답에
+    `results` 키가 없어 전건 `None` 이었다 — 순방향 `/geocode` 의 응답 형태를
+    역방향에 그대로 적용한 오독이다. 실측 최상위 키는
+    `address / address_source / areas / contract_version / lat / lon / nearest`.
+    """
+    return ((body or {}).get("address") or {}).get("structure") or {}
+
+
 def _reverse_bcode(body):
-    res = (body or {}).get("results") or []
-    if not res:
+    return _reverse_structure(body).get("b_code")
+
+
+def _reverse_ri(body):
+    """우리 역방향 리 **문자열**. 비어 있으면 `None`(부재는 성공이 아니다)."""
+    v = _reverse_structure(body).get("ri")
+    v = ("" if v is None else str(v)).strip()
+    return v or None
+
+
+def _reverse_source(body):
+    """`address_source` — 합성(`knn`) 과 실주소(`pip_key`) 를 가르는 축(M8)."""
+    v = (body or {}).get("address_source")
+    return str(v) if v else None
+
+
+# VWorld 역방향 `structure` 에는 리 명칭 필드가 없다(실측: `level4L` 은 읍면동,
+# `level5` 는 지번). 리 명칭은 `text` 에만 실리므로 계획 §4.2 대로 파싱한다.
+# 규칙: 마지막 토큰은 지번이고, 그 앞 토큰이 `리` 로 끝나면서 `level4L`(읍면동)
+# 과 다르면 리다. 도시 지점은 앞 토큰이 `…로/…동` 이라 자연히 `None` 이 된다.
+def _vw_reverse_ri(text, level4l):
+    toks = (text or "").split()
+    if len(toks) < 2:
         return None
-    return cand_structure(res[0]).get("b_code")
+    cand = toks[-2]
+    if not cand.endswith("리"):
+        return None
+    if level4l and cand == str(level4l).strip():
+        return None
+    return cand
 
 
 def _pick_bcode_vw(fwd_lc, rev_lc):
@@ -739,7 +786,13 @@ def load_sample(path, limit=None):
 
 
 # ── 판정 기록(§3.2 의 5~6 단계) ──────────────────────────────────────
+# 판정 레코드 스키마 판. v1 = A 단계 원본, v2 = 역방향 주소축 수선(§4.2).
+# v2 에서 **추가만** 했다 — v1 필드의 이름·의미·산출식은 하나도 바꾸지 않았으므로
+# 두 판을 같은 분모로 합산해도 되는 지표와 v2 구간에서만 낼 수 있는 지표가 갈린다.
+VERDICT_SCHEMA = 2
+
 VERDICT_FIELDS = (
+    "schema",
     "sid", "layer", "stratum", "cls", "flags", "gate",
     "cls_relaxed", "flags_relaxed",
     "v_status", "our_addr_count", "nonaddr_count",
@@ -747,6 +800,13 @@ VERDICT_FIELDS = (
     "oracle", "o_apx", "r_v", "r_m", "T",
     "bcode_eq", "bcode_eq_relaxed", "san_eq", "source",
     "rev_v_status", "rev_ours_ok", "rev_dist_m", "rev_bcode_eq",
+    # ── v2 추가: 역방향 주소축(§4.2) ──────────────────────────────
+    "rev_bcode_eq_relaxed",
+    "rev_eq_sido", "rev_eq_sido_relaxed", "rev_eq_sgg", "rev_eq_emd",
+    "rev_ri_code_eq", "rev_ri_code_ours", "rev_ri_code_vw",
+    "rev_ri_filled_ours", "rev_ri_filled_vw", "rev_ri_str_eq",
+    "rev_ri_conflict_ours", "rev_ri_conflict_vw",
+    "rev_address_source",
     "norm_applied", "relax12_used", "t",
 )
 
@@ -757,10 +817,30 @@ def to_verdict(obs, verdict, verdict_relaxed):
     좌표와 `text`·`structure` 원문은 여기서 떨어져 나간다. `stratum` 은 층
     이름이지 주소가 아니므로 집계를 위해 싣는다.
     """
-    from normalize import bcode_match
+    from normalize import bcode_match, sido_code_match, strip_spaces
 
     a, b = obs.get("bcode_ours"), obs.get("bcode_vw")
     rev_ours = obs.get("rev_ours_bcode")
+    rev_vw = obs.get("rev_v_level4lc")
+
+    # ── v2 역방향 주소축(§4.2). 양쪽 코드가 10 자리로 있을 때만 판정한다.
+    # 한쪽이라도 없으면 `None`(판정 불가)이다 — 부재를 일치로 세지 않는다.
+    _ro, _rv = strip_spaces(rev_ours), strip_spaces(rev_vw)
+    _pair = len(_ro) == 10 and len(_rv) == 10
+
+    def _pfx_eq(n):
+        return (_ro[:n] == _rv[:n]) if _pair else None
+
+    _ri_ours = obs.get("rev_ours_ri")
+    _ri_vw = obs.get("rev_v_ri")
+    # 리 코드 = 법정동코드 끝 2 자리. `00` 은 리 없음이다.
+    _lo = _ro[8:10] if _pair else None
+    _lv = _rv[8:10] if _pair else None
+    _code_ri_ours = (_lo != "00") if _lo is not None else None
+    _code_ri_vw = (_lv != "00") if _lv is not None else None
+    # 역방향 호출이 성공한 건에서만 채움 여부를 묻는다.
+    _fill_ours = bool(_ri_ours) if obs.get("rev_ours_ok") else None
+    _fill_vw = bool(_ri_vw) if (obs.get("rev_v_status") == "OK") else None
     rec = {
         "sid": obs["sid"], "layer": obs["layer"], "stratum": obs["stratum"],
         "cls": verdict.cls, "flags": list(verdict.flags), "gate": verdict.gate,
@@ -780,8 +860,33 @@ def to_verdict(obs, verdict, verdict_relaxed):
         "rev_v_status": obs.get("rev_v_status"),
         "rev_ours_ok": obs.get("rev_ours_ok"),
         "rev_dist_m": obs.get("rev_dist_m"),
-        "rev_bcode_eq": (bcode_match(rev_ours, obs.get("rev_v_level4lc"))
-                         if (rev_ours and obs.get("rev_v_level4lc")) else None),
+        "rev_bcode_eq": (bcode_match(rev_ours, rev_vw)
+                         if (rev_ours and rev_vw) else None),
+        "schema": VERDICT_SCHEMA,
+        "rev_bcode_eq_relaxed": (bcode_match(rev_ours, rev_vw, relax12=True)
+                                 if (rev_ours and rev_vw) else None),
+        "rev_eq_sido": (sido_code_match(_ro[:2], _rv[:2]) if _pair else None),
+        "rev_eq_sido_relaxed": (sido_code_match(_ro[:2], _rv[:2], relax12=True)
+                                if _pair else None),
+        "rev_eq_sgg": _pfx_eq(5),
+        "rev_eq_emd": _pfx_eq(8),
+        "rev_ri_code_eq": ((_lo == _lv) if _pair else None),
+        "rev_ri_code_ours": _code_ri_ours,
+        "rev_ri_code_vw": _code_ri_vw,
+        "rev_ri_filled_ours": _fill_ours,
+        "rev_ri_filled_vw": _fill_vw,
+        # 리 문자열 일치는 양쪽이 모두 채워졌을 때만 묻는다. 둘 다 비어 있는 것을
+        # "일치"로 세면 §4.2 의 '채움률이 아니라 정확도' 요구를 정면으로 어긴다.
+        "rev_ri_str_eq": ((strip_spaces(_ri_ours) == strip_spaces(_ri_vw))
+                          if (_ri_ours and _ri_vw) else None),
+        # 코드-문자열 상호 불일치(T029 결함의 표본 내 재현율).
+        "rev_ri_conflict_ours": ((_code_ri_ours != _fill_ours)
+                                 if (_code_ri_ours is not None
+                                     and _fill_ours is not None) else None),
+        "rev_ri_conflict_vw": ((_code_ri_vw != _fill_vw)
+                               if (_code_ri_vw is not None
+                                   and _fill_vw is not None) else None),
+        "rev_address_source": obs.get("rev_ours_source"),
         "norm_applied": bool(obs.get("norm_applied")),
         "relax12_used": bool(obs.get("relax12_used")),
         "t": round(obs["t"], 3),

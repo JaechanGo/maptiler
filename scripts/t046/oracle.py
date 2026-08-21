@@ -46,7 +46,7 @@ from normalize import SIDO12, SIDO12_PARENTS
 
 __all__ = [
     "Oracle", "build_pnu", "pnu_from_bm25", "resolve_pnu",
-    "split_pnu", "sido_relax_candidates",
+    "split_pnu", "sido_relax_candidates", "sido_legacy_candidates", "SIDO_LEGACY",
     "sql_addr_batch", "sql_parcel_batch", "sql_apx_batch",
     "sql_referee_parcel_batch", "sql_road_bm25_batch",
 ]
@@ -113,6 +113,29 @@ def sido_relax_candidates(pnu):
     if len(p) != PNU_LEN or p[:2] != SIDO12:
         return []
     return [parent + p[2:] for parent in SIDO12_PARENTS]
+
+
+# 조건 1-b — 원천 구 시도코드 대 DB 현행 시도코드의 어긋남.
+#
+# 실측: 원천 202607 은 강원을 `42`, 전북을 `45`(구 코드)로 싣는데 우리 `parcel`
+# 은 `51`·`52`(현행)로 적재돼 있다. `pg_inherits` 확인 결과 `parcel_42`·
+# `parcel_45` 파티션은 **존재하지 않고** `parcel_51`(2,757,489 행)·
+# `parcel_52`(3,887,040 행)만 있다. 보정하지 않으면 해당 건이 전부 `O=N` 이 되어
+# "우리 DB 에 없다"로 오판되고, 분류 3·4(= 우리 결함 아님, 회수율 0)로 흘러
+# **우리 결함이 면책된다.** 계획 C3 가 막으려 한 자기유리 편향과 같은 계열이다.
+#
+# 조건 1(시도코드 12)과 **방향이 반대**라는 점에 주의. 전남광주는 원천도 DB 도
+# 구 코드(46/29)라 일관되어 relax12 가 발동하지 않는 것이 정상이다. 강원·전북만
+# 빌드 파이프라인이 재매핑했다. 그래서 relax12 와 **별도 계수기**로 집계한다.
+SIDO_LEGACY = {"42": ("51",), "45": ("52",)}
+
+
+def sido_legacy_candidates(pnu):
+    """구 시도코드 → 현행 코드. 나머지 17 자리는 보존한다."""
+    p = str(pnu)
+    if len(p) != PNU_LEN:
+        return []
+    return [new + p[2:] for new in SIDO_LEGACY.get(p[:2], ())]
 
 
 # ── SQL 생성 ──────────────────────────────────────────────────────────
@@ -216,6 +239,11 @@ class Oracle:
         # 완화로 건진 **키**. 집계층이 "완화가 없었다면" 수치를 건별로 재구성한다
         # (§8-10 엄격/완화 병기). 총계만으로는 어느 건이 완화 산물인지 알 수 없다.
         self.relax12_keys = set()
+        # 조건 1-b — 구 시도코드 보정. relax12 와 **섞지 않는다**. 원인이 다르고
+        # (원천-DB 코드 세대 불일치 대 행정구역 통합) 수선 주체도 다르다.
+        self.legacy_hits = 0
+        self.legacy_attempts = 0
+        self.legacy_keys = set()
         self.queries = 0
 
     # -- 내부 --------------------------------------------------------
@@ -300,7 +328,7 @@ class Oracle:
         return self._hit_keys(sql_road_bm25_batch(len(rows)), rows, keymap)
 
     # -- 공개 API ----------------------------------------------------
-    def jibun_batch(self, keys, relax12=True):
+    def jibun_batch(self, keys, relax12=True, legacy=True):
         """§4.3-b — 지번 3 분기. `{키: 'A'|'P'|'N'}`.
 
         미적중 키도 `'N'` 으로 남긴다. 조용히 빠지면 분모가 틀어진다.
@@ -319,7 +347,50 @@ class Oracle:
 
         if relax12:
             self._apply_relax12(keys, out)
+        if legacy:
+            self._apply_legacy(keys, out)
         return out
+
+    def _apply_legacy(self, keys, out, road=False):
+        """조건 1-b — 미적중 + 구 시도코드(42·45)인 키만 현행 코드로 재조회한다.
+
+        `road=True` 면 BM25 25 자리도 함께 치환해 A25 분기를 살린다 —
+        BM25 앞 19 자리가 PNU 이므로 접두 2 자리 치환이 그대로 성립한다.
+        """
+        targets = []
+        for k in keys:
+            if out[k] != "N":
+                continue
+            pnu = keys[k][1] if road else keys[k]
+            cands = sido_legacy_candidates(pnu)
+            if cands:
+                targets.append((k, cands[0]))
+        if not targets:
+            return
+        self.legacy_attempts += len(targets)
+
+        if road:
+            bm = {k: str(keys[k][0]) for k, _ in targets}
+            triples = [(k, p, SIDO_LEGACY[str(keys[k][1])[:2]][0] + bm[k][2:])
+                       for k, p in targets if bm[k]]
+            for k in self._bm25_hits(triples):
+                out[k] = "A25"
+            rest = [(k, p) for k, p in targets if out[k] == "N"]
+            for k in self._addr_hits(rest):
+                out[k] = "A19"
+        else:
+            rest = targets
+            for k in self._addr_hits(rest):
+                out[k] = "A"
+
+        rest = [(k, p) for k, p in targets if out[k] == "N"]
+        for k in self._parcel_hits(rest):
+            out[k] = "P"
+
+        for k, _ in targets:
+            if out[k] != "N":
+                self.legacy_hits += 1
+                self.legacy_keys.add(k)
 
     def _apply_relax12(self, keys, out):
         """조건 1 — 미적중 + 접두 12 인 키만 46 → 29 순으로 재조회한다."""
@@ -347,7 +418,7 @@ class Oracle:
             if not remaining:
                 break
 
-    def road_batch(self, keys):
+    def road_batch(self, keys, legacy=True):
         """§4.3-c — 도로명 4 분기. `keys` = `{키: (bm25, pnu)}` → `{키: 'A25'|'A19'|'P'|'N'}`."""
         out = {k: "N" for k in keys}
         if not keys:
@@ -364,6 +435,9 @@ class Oracle:
         rest = [(k, pnu) for k, pnu in rest if out[k] == "N"]
         for k in self._parcel_hits(rest):
             out[k] = "P"
+
+        if legacy:
+            self._apply_legacy(keys, out, road=True)
         return out
 
     def apx_batch(self, keys):
