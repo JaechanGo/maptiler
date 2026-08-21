@@ -94,19 +94,40 @@ def resolve_pnu(bcode, san, ji_main, ji_sub, bm25):
 
 
 def split_pnu(pnu):
-    """PNU → 조회 컬럼. **SQL 이 아니라 여기서** 자른다(파티션 pruning)."""
+    """PNU → 조회 컬럼. **SQL 이 아니라 여기서** 자른다(파티션 pruning).
+
+    `emd_cd` 는 **8 자리**다 — `parcel.emd_cd` 가 char(8) 이라 그 컬럼과 맞추려면
+    그래야 한다. 그런데 PNU 의 법정동코드는 **10 자리**(시도2+시군구3+읍면동3+
+    **리2**)이므로 이 키만으로 조인하면 **리가 사라진다.** 그래서 `bcode`(10)와
+    원본 `pnu`(19)를 함께 내놓는다. 8 자리는 색인용, 10·19 자리는 식별용이다.
+    """
     p = str(pnu)
     if len(p) != PNU_LEN:
         raise ValueError("PNU 가 19 자리가 아니다: %r" % (pnu,))
     return {
+        "pnu": p,
         "sido_cd": p[:2],
-        "emd_cd": p[:8],
+        "emd_cd": p[:8],              # 색인 `parcel_jibun_lookup` 의 선두 컬럼
+        "bcode": p[:10],              # 리 2 자리를 포함한 법정동코드
         "san": int(p[10]) - 1,        # '1'→0, '2'→1 (parcel.san 은 smallint 0/1)
         "ji_main": int(p[11:15]),
         "ji_sub": int(p[15:19]),
     }
 
 
+# 설계 결정 — 완화·보정을 **"PNU 조립 직후"가 아니라 "미적중 건 사후 재조회"**로
+# 건다. 계획 조건 1 원문은 전자를 지시했다. 후자를 택한 근거는 세 가지다.
+#
+#   1. 계수 분리. 사후 재조회는 "엄격 조회로는 못 찾았는데 완화로 찾았다"를
+#      키 단위로 남긴다(`relax12_keys`·`legacy_keys`). 조립 시점에 후보를 늘리면
+#      어느 건이 완화의 산물인지 사후에 복원할 수 없고, §8-10 이 요구한
+#      엄격/완화 병기가 불가능해진다.
+#   2. 엄격 수치의 보존. 사전 확장은 엄격 분모 자체를 바꾼다. 그러면 "완화가
+#      없었다면" 수치를 만들 수 없다.
+#   3. 비용. 발동 건은 표본의 13% 뿐이라 재조회 배치가 훨씬 작다.
+#
+# 기능적으로는 동등하다 — 두 방식이 같은 적중 집합을 낸다(`legacy=False` 대조군
+# 테스트가 이를 고정한다). 순서 의존이 없으므로 결과는 경로와 무관하다.
 def sido_relax_candidates(pnu):
     """조건 1 — 접두 12 를 46 → 29 순으로 확장한다. 나머지 17 자리는 보존."""
     p = str(pnu)
@@ -149,27 +170,40 @@ def _values(n):
 
 
 def sql_parcel_batch(n):
-    """지적 필지 존재(O=P). 파싱된 5 컬럼을 그대로 대조한다."""
+    """지적 필지 존재(O=P). **정확 PNU 19 자리**로 대조한다.
+
+    F-ri — 이전 판은 `(sido_cd, emd_cd8, san, ji_main, ji_sub)` 로 조인했다.
+    `emd_cd` 가 8 자리라 **리 2 자리가 빠져** 같은 읍면동의 다른 리에 있는
+    동일번지 필지를 존재 근거로 셌다. `parcel_sido_cd_pnu_key (sido_cd, pnu)` 는
+    UNIQUE 이므로 이 조인이 **더 옳으면서 더 싸다.** `sido_cd` 리터럴이 앞에
+    있어 파티션 pruning 도 그대로다.
+    """
     return (
         "/* t046:parcel */\n"
-        "WITH k(i, sido_cd, emd_cd, san, ji_main, ji_sub) AS (VALUES %s)\n"
+        "WITH k(i, sido_cd, pnu) AS (VALUES %s)\n"
         "SELECT DISTINCT k.i FROM k WHERE EXISTS (\n"
         "  SELECT 1 FROM parcel p\n"
-        "  WHERE p.sido_cd = k.sido_cd AND p.emd_cd = k.emd_cd\n"
-        "    AND p.san = k.san AND p.ji_main = k.ji_main AND p.ji_sub = k.ji_sub)"
+        "  WHERE p.sido_cd = k.sido_cd AND p.pnu = k.pnu)"
         % _values(n)
     )
 
 
 def sql_apx_batch(n):
-    """본번 근사(`O_apx`) — 부번을 보지 않는다. '본번은 있는데 부번이 없다'를 가른다."""
+    """본번 근사(`O_apx`) — 부번을 보지 않는다. '본번은 있는데 부번이 없다'를 가른다.
+
+    F-ri — 무시하는 것은 **부번뿐**이어야 한다. 리까지 무시하면 이웃 리의 같은
+    본번을 근사 적중으로 세게 된다. 정확 PNU 로는 조인할 수 없으므로(부번을
+    일부러 버린다) 색인 `parcel_jibun_lookup (emd_cd, ji_main, ji_sub)` 경로는
+    유지한 채 `substr(p.pnu, 1, 10)` 로 **리를 되건다.**
+    """
     return (
         "/* t046:apx */\n"
-        "WITH k(i, sido_cd, emd_cd, san, ji_main) AS (VALUES %s)\n"
+        "WITH k(i, sido_cd, emd_cd, bcode, san, ji_main) AS (VALUES %s)\n"
         "SELECT DISTINCT k.i FROM k WHERE EXISTS (\n"
         "  SELECT 1 FROM parcel p\n"
         "  WHERE p.sido_cd = k.sido_cd AND p.emd_cd = k.emd_cd\n"
-        "    AND p.san = k.san AND p.ji_main = k.ji_main)"
+        "    AND p.san = k.san AND p.ji_main = k.ji_main\n"
+        "    AND substr(p.pnu, 1, 10) = k.bcode)"
         % _values(n)
     )
 
@@ -211,16 +245,46 @@ def sql_referee_parcel_batch(n):
     `parcel.geom` 은 SRID 4326 이다(§1.8 실측) — 변환하지 않는다.
     `geom_pt` 는 전량 NULL 이라 쓸 수 없다.
     행이 없는 키는 결과에서 빠지고, 호출자는 그것을 **자료 부재(None)** 로 읽는다.
+
+    F-ri — 이전 판은 8 자리 `emd_cd` 로 조인해 리를 버렸고, 그래서 `bool_or`
+    가 "같은 읍면동 안 **아무** 동일번지 필지에 들어가는가"를 답했다. 심판이
+    답해야 할 질문이 아니다. UNIQUE 색인 `(sido_cd, pnu)` 로 **질의 필지 한
+    행만** 문다. 그러면 `bool_or` 는 사실상 그 한 필지의 판정이 된다.
     """
     return (
         "/* t046:referee */\n"
-        "WITH k(i, sido_cd, emd_cd, san, ji_main, ji_sub, lon, lat) AS (VALUES %s)\n"
+        "WITH k(i, sido_cd, pnu, lon, lat) AS (VALUES %s)\n"
         "SELECT k.i, bool_or(ST_Contains(p.geom,\n"
         "         ST_SetSRID(ST_MakePoint(k.lon, k.lat), 4326)))\n"
         "FROM k JOIN parcel p\n"
-        "  ON p.sido_cd = k.sido_cd AND p.emd_cd = k.emd_cd\n"
-        " AND p.san = k.san AND p.ji_main = k.ji_main AND p.ji_sub = k.ji_sub\n"
+        "  ON p.sido_cd = k.sido_cd AND p.pnu = k.pnu\n"
         "GROUP BY k.i"
+        % _values(n)
+    )
+
+
+def sql_repr_point_batch(n):
+    """필지 **대표점** — 역방향 재측정의 질의 좌표(지번 층).
+
+    왜 필요한가. 원본 판정에 쓴 VWorld 순방향 좌표는 판정 레코드에 남지 않았고
+    (§3.3 이 좌표를 의도적으로 버린다) `--diag` 도 쓰이지 않아 진단 파일 자체가
+    없다. 순방향 재호출은 예산 보호로 금지다. 그래서 태스크가 허용한 "표본에서
+    재유도"를 택한다 — **표본 PNU 의 필지 폴리곤 대표점**이다.
+
+    `geom_pt` 는 전량 NULL 이다(§1.8 실측). `ST_Centroid` 는 오목한 필지에서
+    폴리곤 밖으로 나갈 수 있으므로 `ST_PointOnSurface` 를 쓴다 — 반드시 안이다.
+    `geom` 은 SRID 4326 이라 변환하지 않는다.
+
+    조인은 심판 축과 같은 `(sido_cd, pnu)` UNIQUE 경로다. 리를 버리는 8 자리
+    키로 조인하면 이웃 리의 대표점을 질의 좌표로 삼게 된다(F-ri 와 같은 결함).
+    """
+    return (
+        "/* t046:reprpt */\n"
+        "WITH k(i, sido_cd, pnu) AS (VALUES %s)\n"
+        "SELECT k.i, ST_X(ST_PointOnSurface(p.geom)),\n"
+        "            ST_Y(ST_PointOnSurface(p.geom))\n"
+        "FROM k JOIN parcel p\n"
+        "  ON p.sido_cd = k.sido_cd AND p.pnu = k.pnu"
         % _values(n)
     )
 
@@ -244,6 +308,20 @@ class Oracle:
         self.legacy_hits = 0
         self.legacy_attempts = 0
         self.legacy_keys = set()
+        # F2 — 심판·`O_apx` 축의 같은 보정. **지번 축과 합산하지 않는다**:
+        # §7.6 이 이미 보고한 1,560 시도 / 1,546 적중은 지번·도로 축만의 수치라
+        # 여기에 섞으면 이미 발표한 숫자의 의미가 사후에 바뀐다.
+        self.legacy_apx_hits = 0
+        self.legacy_apx_attempts = 0
+        self.legacy_apx_keys = set()
+        self.legacy_referee_hits = 0
+        self.legacy_referee_attempts = 0
+        self.legacy_referee_keys = set()
+        # F1 — 대표점 축. 이 축도 **같은 보정을 통과해야 한다.** 보정 없는
+        # 제 3 의 축을 새로 만드는 것이 F2 가 지적한 결함 그 자체다.
+        self.legacy_reprpt_hits = 0
+        self.legacy_reprpt_attempts = 0
+        self.legacy_reprpt_keys = set()
         self.queries = 0
 
     # -- 내부 --------------------------------------------------------
@@ -267,23 +345,28 @@ class Oracle:
 
     @staticmethod
     def _row_parcel(i, pnu, first):
+        """`split_pnu` 로 형식을 **검증한 뒤** 정확 PNU 로 묶는다.
+
+        `parcel.pnu` 는 text 다(실측) — char 로 캐스트하면 공백 채움 규칙이
+        끼어들 수 있으므로 `::text` 로 맞춘다.
+        """
         p = split_pnu(pnu)
         if first:
-            return "(%s::text,%s::char(2),%s::char(8),%d::smallint,%d::int,%d::int)" % (
-                _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]),
-                p["san"], p["ji_main"], p["ji_sub"])
-        return "(%s,%s,%s,%d,%d,%d)" % (
-            _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]),
-            p["san"], p["ji_main"], p["ji_sub"])
+            return "(%s::text,%s::char(2),%s::text)" % (
+                _lit(i), _lit(p["sido_cd"]), _lit(p["pnu"]))
+        return "(%s,%s,%s)" % (_lit(i), _lit(p["sido_cd"]), _lit(p["pnu"]))
 
     @staticmethod
     def _row_apx(i, pnu, first):
         p = split_pnu(pnu)
         if first:
-            return "(%s::text,%s::char(2),%s::char(8),%d::smallint,%d::int)" % (
-                _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]), p["san"], p["ji_main"])
-        return "(%s,%s,%s,%d,%d)" % (
-            _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]), p["san"], p["ji_main"])
+            return ("(%s::text,%s::char(2),%s::char(8),%s::text,"
+                    "%d::smallint,%d::int)" % (
+                        _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]),
+                        _lit(p["bcode"]), p["san"], p["ji_main"]))
+        return "(%s,%s,%s,%s,%d,%d)" % (
+            _lit(i), _lit(p["sido_cd"]), _lit(p["emd_cd"]), _lit(p["bcode"]),
+            p["san"], p["ji_main"])
 
     def _hit_keys(self, sql_template, rows, keymap):
         """첫 셀을 키로 읽어 적중 집합을 만든다."""
@@ -440,19 +523,79 @@ class Oracle:
             self._apply_legacy(keys, out, road=True)
         return out
 
-    def apx_batch(self, keys):
+    def _apx_hits(self, items):
+        """`items` = [(키, pnu), …] → 적중 키 집합."""
+        if not items:
+            return set()
+        keymap = self._keymap(k for k, _ in items)
+        rows = [self._row_apx(k, pnu, n == 0) for n, (k, pnu) in enumerate(items)]
+        return self._hit_keys(sql_apx_batch(len(rows)), rows, keymap)
+
+    def apx_batch(self, keys, legacy=True):
         """본번 근사 — `{키: bool}`. 미적중 키도 False 로 남긴다."""
         out = {k: False for k in keys}
         if not keys:
             return out
-        items = list(keys.items())
-        keymap = self._keymap(k for k, _ in items)
-        rows = [self._row_apx(k, pnu, n == 0) for n, (k, pnu) in enumerate(items)]
-        for k in self._hit_keys(sql_apx_batch(len(rows)), rows, keymap):
+        for k in self._apx_hits(list(keys.items())):
             out[k] = True
+        if legacy:
+            self._apply_legacy_apx(keys, out)
         return out
 
-    def referee_parcel_batch(self, keys):
+    def _apply_legacy_apx(self, keys, out):
+        """F2 — `O_apx` 축의 구 시도코드 보정.
+
+        B 단계는 지번·도로 축에만 보정을 걸어 이 축을 빠뜨렸다. 무보정이면
+        강원·전북 구코드 건이 근사조차 미적중(False)이 되어 **분류가 우리에게
+        불리한 쪽으로** 흐른다. 방향이 보수적이라 해도 사실이 아닌 것은 같다.
+        """
+        targets = []
+        for k in keys:
+            if out[k]:
+                continue
+            cands = sido_legacy_candidates(keys[k])
+            if cands:
+                targets.append((k, cands[0]))
+        if not targets:
+            return
+        self.legacy_apx_attempts += len(targets)
+        for k in self._apx_hits(targets):
+            out[k] = True
+            self.legacy_apx_hits += 1
+            self.legacy_apx_keys.add(k)
+
+    def _referee_rows(self, items):
+        """`items` = [(키, (pnu, lon, lat)), …] → `{키: True|False}`.
+
+        **자료 부재 키는 아예 담기지 않는다.** 호출자가 `None` 을 유지하도록
+        빈자리로 돌려주는 편이, 여기서 `None` 을 채워 넣는 것보다 안전하다.
+        """
+        got = {}
+        if not items:
+            return got
+        keymap = self._keymap(k for k, _ in items)
+        rows = []
+        for n, (k, (pnu, lon, lat)) in enumerate(items):
+            p = split_pnu(pnu)
+            if n == 0:
+                rows.append(
+                    "(%s::text,%s::char(2),%s::text,"
+                    "%.7f::double precision,%.7f::double precision)"
+                    % (_lit(k), _lit(p["sido_cd"]), _lit(p["pnu"]),
+                       float(lon), float(lat)))
+            else:
+                rows.append(
+                    "(%s,%s,%s,%.7f,%.7f)"
+                    % (_lit(k), _lit(p["sido_cd"]), _lit(p["pnu"]),
+                       float(lon), float(lat)))
+
+        for row in self._exec(sql_referee_parcel_batch(len(rows)), rows):
+            s = row[0]
+            if s in keymap and row[1] is not None:
+                got[keymap[s]] = (row[1] == "t")
+        return got
+
+    def referee_parcel_batch(self, keys, legacy=True):
         """§4.3-d 심판 — `keys` = `{키: (pnu, lon, lat)}` → `{키: True|False|None}`.
 
         `None` 은 **심판 자료 부재**다. False(밖에 있다)와 전혀 다른 사실이며,
@@ -461,26 +604,84 @@ class Oracle:
         out = {k: None for k in keys}
         if not keys:
             return out
-
-        items = list(keys.items())
-        keymap = self._keymap(k for k, _ in items)
-        rows = []
-        for n, (k, (pnu, lon, lat)) in enumerate(items):
-            p = split_pnu(pnu)
-            if n == 0:
-                rows.append(
-                    "(%s::text,%s::char(2),%s::char(8),%d::smallint,%d::int,%d::int,"
-                    "%.7f::double precision,%.7f::double precision)"
-                    % (_lit(k), _lit(p["sido_cd"]), _lit(p["emd_cd"]), p["san"],
-                       p["ji_main"], p["ji_sub"], float(lon), float(lat)))
-            else:
-                rows.append(
-                    "(%s,%s,%s,%d,%d,%d,%.7f,%.7f)"
-                    % (_lit(k), _lit(p["sido_cd"]), _lit(p["emd_cd"]), p["san"],
-                       p["ji_main"], p["ji_sub"], float(lon), float(lat)))
-
-        for row in self._exec(sql_referee_parcel_batch(len(rows)), rows):
-            s = row[0]
-            if s in keymap:
-                out[keymap[s]] = (row[1] == "t") if row[1] is not None else None
+        out.update(self._referee_rows(list(keys.items())))
+        if legacy:
+            self._apply_legacy_referee(keys, out)
         return out
+
+    # -- 대표점(F1) --------------------------------------------------
+    def _repr_point_rows(self, items):
+        """`items` = [(키, pnu), …] → `{키: (lon, lat)}`.
+
+        **psql 은 모든 열을 문자열로 돌려준다**(실측). 여기서 float 로 바꾸지
+        않으면 좌표가 문자열인 채 URL 포맷에 들어가 조용히 깨진다. 숫자로
+        읽히지 않는 행은 **버린다** — 0.0 으로 뭉개면 좌표가 기니만으로 간다.
+        """
+        got = {}
+        if not items:
+            return got
+        keymap = self._keymap(k for k, _ in items)
+        rows = [self._row_parcel(k, pnu, n == 0)
+                for n, (k, pnu) in enumerate(items)]
+        for row in self._exec(sql_repr_point_batch(len(rows)), rows):
+            s = row[0]
+            if s not in keymap or row[1] is None or row[2] is None:
+                continue
+            try:
+                got[keymap[s]] = (float(row[1]), float(row[2]))
+            except (TypeError, ValueError):
+                continue
+        return got
+
+    def repr_point_batch(self, keys, legacy=True):
+        """`keys` = `{키: pnu}` → `{키: (lon, lat)}`. **부재 키는 담기지 않는다.**
+
+        호출자는 빠진 키를 '기준 좌표 없음'으로 읽고 그 층의 커버리지에
+        기록해야 한다. 조용히 채우면 측정 대상이 아닌 지점을 재는 셈이 된다.
+        """
+        if not keys:
+            return {}
+        out = self._repr_point_rows(list(keys.items()))
+        if legacy:
+            self._apply_legacy_reprpt(keys, out)
+        return out
+
+    def _apply_legacy_reprpt(self, keys, out):
+        """F1·F2 — 대표점 축의 구 시도코드 보정. 심판 축과 같은 규칙이다."""
+        targets = []
+        for k in keys:
+            if k in out:
+                continue
+            cands = sido_legacy_candidates(keys[k])
+            if cands:
+                targets.append((k, cands[0]))
+        if not targets:
+            return
+        self.legacy_reprpt_attempts += len(targets)
+        for k, v in self._repr_point_rows(targets).items():
+            out[k] = v
+            self.legacy_reprpt_hits += 1
+            self.legacy_reprpt_keys.add(k)
+
+    def _apply_legacy_referee(self, keys, out):
+        """F2 — 심판 축의 구 시도코드 보정.
+
+        **`False` 를 `True` 로 부풀리지 않는다.** 보정으로 폴리곤을 찾았는데
+        점이 그 밖이면 그것이 사실이다. 여기서 말하는 "적중"은 *자료를 찾았다*
+        이지 *안에 있다*가 아니다 — 둘을 뭉개면 심판이 심판이 아니게 된다.
+        """
+        targets = []
+        for k in keys:
+            if out[k] is not None:
+                continue
+            pnu, lon, lat = keys[k]
+            cands = sido_legacy_candidates(pnu)
+            if cands:
+                targets.append((k, (cands[0], lon, lat)))
+        if not targets:
+            return
+        self.legacy_referee_attempts += len(targets)
+        for k, v in self._referee_rows(targets).items():
+            out[k] = v
+            self.legacy_referee_hits += 1
+            self.legacy_referee_keys.add(k)

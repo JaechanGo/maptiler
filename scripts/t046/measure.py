@@ -207,9 +207,15 @@ class Counters(object):
         return vals[max(rank, 1) - 1]
 
     def gate_e1(self):
-        """VWorld 가 `status != "OK"` 인 건. 외부기준이 없으면 비교가 성립 안 한다."""
-        return sum(v for (svc, _d, st), v in self.status.items()
-                   if svc == "vworld" and st != "OK")
+        """VWorld **순방향**이 `status != "OK"` 인 건. 외부기준이 없으면 비교 불가.
+
+        F8 정정 — 이전 판은 방향을 가리지 않아 **역방향** 실패까지 더했다.
+        본 측정에서 계수기가 19, 실제 E1 은 18 이었고 차이 1 은 역방향
+        `NOT_FOUND` 였다. E1 은 순방향 게이트이므로 방향을 좁힌다.
+        (보고 수치는 판정 레코드에서 도출했으므로 발표된 87 은 영향 없다.)
+        """
+        return sum(v for (svc, d, st), v in self.status.items()
+                   if svc == "vworld" and d == "fwd" and st != "OK")
 
     def gate_e2(self):
         """우리 8092 가 5xx/타임아웃으로 끝난 건. 커버리지 결손과 구분한다."""
@@ -424,11 +430,18 @@ def vworld_forward_url(key, query, atype):
     ])
 
 
-def vworld_reverse_url(key, lon, lat):
+def vworld_reverse_url(key, lon, lat, atype="both"):
+    """역방향 `getAddress`. **`type=both`** 이 기본이다.
+
+    A 단계는 `type=PARCEL` 로 고정돼 있어 도로명 축을 아예 받지 못했다 —
+    §4.2 의 도로명·건물번호 지표가 비어 있던 직접 원인이다. `both` 는 한 번의
+    호출로 `result[]` 에 `parcel` 과 `road` 를 함께 실어 준다(실측). 역방향은
+    호출 한도가 없으므로(§1.1) 순방향 예산을 한 건도 쓰지 않는다.
+    """
     return VWORLD_BASE + "?" + urllib.parse.urlencode([
         ("service", "address"), ("request", "getAddress"), ("version", "2.0"),
         ("crs", "EPSG:4326"), ("point", "%.7f,%.7f" % (lon, lat)),
-        ("type", "PARCEL"), ("format", "json"), ("key", key),
+        ("type", atype), ("format", "json"), ("key", key),
     ])
 
 
@@ -461,13 +474,19 @@ def parse_vworld_refined(body):
 
 
 def parse_vworld_reverse(body):
-    """역방향 첫 결과의 `(level4LC, level5, text)`. `level4LC` 는 10 자리다(§1.3)."""
-    res = ((body or {}).get("response") or {}).get("result") or []
-    if not isinstance(res, list) or not res:
+    """역방향 **지번 항목**의 `(level4LC, level5, text)`. `level4LC` 는 10 자리다.
+
+    `result[0]` 을 쓰지 않는다. `type=both` 에서는 항목 순서가 계약이 아니고,
+    도로명만 오는 지점도 있다 — 첫 항목을 지번으로 가정하면 도로명코드
+    7 자리를 법정동코드로 읽는다. 선택은 `revmetrics` 가 `type` 으로 한다.
+    """
+    from revmetrics import split_reverse_entries
+
+    entry = split_reverse_entries(body)["parcel"]
+    if entry is None:
         return None, None, None
-    first = res[0] or {}
-    st = first.get("structure") or {}
-    return st.get("level4LC"), st.get("level5"), first.get("text")
+    st = entry.get("structure") or {}
+    return st.get("level4LC"), st.get("level5"), entry.get("text")
 
 
 def parse_ours(body):
@@ -586,12 +605,16 @@ class Fetcher(object):
             rv = self._vworld(vworld_reverse_url(self.key, v_pt[0], v_pt[1]), "rev")
             out["rev_v_status"] = rv.status
             if rv.ok:
+                from revmetrics import split_reverse_entries
+
                 lc, lv5, txt = parse_vworld_reverse(rv.body)
                 out["rev_v_level4lc"] = lc
                 out["rev_v_level5"] = lv5
-                # `level4L` 은 `parse_vworld_reverse` 반환값에 없어 여기서만 꺼낸다.
-                _res = ((rv.body or {}).get("response") or {}).get("result") or []
-                _l4l = ((_res[0] or {}).get("structure") or {}).get("level4L") if _res else None
+                # `level4L` 은 `parse_vworld_reverse` 반환값에 없어 여기서만
+                # 꺼낸다. **지번 항목에서** 꺼내야 한다 — `result[0]` 은
+                # `type=both` 에서 도로명일 수 있고, 그 `level4L` 은 도로명이다.
+                _p = split_reverse_entries(rv.body)["parcel"] or {}
+                _l4l = (_p.get("structure") or {}).get("level4L")
                 out["rev_v_ri"] = _vw_reverse_ri(txt, _l4l)
             ro = self._ours(ours_reverse_url(v_pt[0], v_pt[1], 2), "rev")
             out["rev_ours_ok"] = bool(ro.ok)
@@ -957,6 +980,200 @@ def probe_window():
     return win
 
 
+# ── 역방향 재측정(F1) ────────────────────────────────────────────────
+# 질의 좌표 기준. **원본 판정에 쓴 좌표는 재현할 수 없다.**
+#
+#   원본 기준 = VWorld 순방향이 돌려준 좌표. 그 좌표는 판정 레코드에 남지
+#   않았고(§3.3 이 좌표를 의도적으로 버린다) `--diag` 도 쓰이지 않아 진단
+#   파일 자체가 없다. 순방향 재호출은 예산 보호로 금지다. 그래서 태스크가
+#   허용한 "표본에서 재유도"를 택하되, **어느 기준도 중립이 아니라는 사실을
+#   숨기지 않는다.** 두 기준을 모두 돌려 참값을 사이에 가둔다.
+#
+#   src  표본 자체에서 유도. 도로명은 원천의 출입구 좌표(없으면 건물중심),
+#        지번은 필지 폴리곤 대표점(`ST_PointOnSurface`).
+#        · 도로명: **가장 중립적**이다. 점을 만든 것은 원천이지 어느
+#          지오코더도 아니다. 원본 기준(VWorld 순방향 출력)보다 낫다 —
+#          그 기준은 VWorld 자기 출력이라 VWorld 쪽에 자기참조였다.
+#        · 지번: **우리 쪽에 자기참조다.** 우리 `/reverse` 의 `pip_key` 경로가
+#          바로 그 필지 폴리곤을 다시 무므로 사실상 항진명제다. 상한으로만
+#          읽어야 한다.
+#   fwd  우리 8092 순방향 top-1. 위 항진명제는 없다. 다만 **보수적 기준이라고
+#        부르지 않는다** — 순방향이 틀리면 점이 옮겨갈 뿐 양쪽이 여전히 같은
+#        점을 설명하므로, 순방향 오차가 역방향 불일치로 자동 전이되지 않는다.
+#        이 기준이 재는 것은 **왕복 일관성**이고 편향 방향은 미확인이다.
+#
+# 두 기준 모두 원본과 다르다. 따라서 여기 수치는 이미 발표한 `rev_*` 수치와
+# **직접 비교할 수 없다.** 보고서에 그렇게 적는다.
+REV2_BASES = ("src", "fwd")
+REV2_SCHEMA = 1
+
+REV2_FIELDS = (
+    "rev_schema", "sid", "layer", "stratum", "urban", "basis",
+    "basis_ok", "skip",
+    "rev_v_status", "vw_has_parcel", "vw_has_road",
+    "ours_ok", "address_source", "rev_dist_m",
+    "axes", "ri", "t",
+)
+
+
+class Rev2Fetcher(object):
+    """역방향 전용 호출기. **VWorld 순방향은 한 번도 부르지 않는다**(예산 보호).
+
+    역방향은 한도가 없지만 8 req/s 와 백오프는 그대로 지킨다 — 한도가 없다는
+    것이 마구 불러도 된다는 뜻은 아니다.
+    """
+
+    def __init__(self, key, counters, bucket, timeout=TIMEOUT_S):
+        self.key = key
+        self.counters = counters
+        self.bucket = bucket
+        self.timeout = timeout
+
+    def _vworld(self, url, direction):
+        self.bucket.acquire()
+        return call_with_retry(_http_responder(url, self.timeout),
+                               service="vworld", direction=direction,
+                               counters=self.counters)
+
+    def _ours(self, url, direction):
+        return call_with_retry(_http_responder(url, self.timeout),
+                               service="ours", direction=direction,
+                               counters=self.counters)
+
+    def forward_point(self, rec):
+        """기준 `fwd` — 우리 8092 순방향 top-1 좌표. VWorld 는 부르지 않는다."""
+        r = self._ours(ours_geocode_url(rec["query"], 5), "fwd")
+        if not r.ok:
+            return None
+        addrs, _nonaddr = parse_ours(r.body or {})
+        return cand_lonlat(addrs[0]) if addrs else None
+
+    def reverse(self, item):
+        """`(rec, 좌표)` → `(rec, VWorld 결과, 우리 결과)`. 좌표가 없으면 안 부른다."""
+        rec, pt = item
+        if pt is None:
+            return rec, None, None
+        rv = self._vworld(vworld_reverse_url(self.key, pt[0], pt[1]), "rev")
+        ro = self._ours(ours_reverse_url(pt[0], pt[1], 2), "rev")
+        return rec, rv, ro
+
+
+def chunk_points(chunk, basis, orc, fetcher, pool):
+    """청크의 질의 좌표. → `({sid: (lon, lat)}, {sid: 사유})`.
+
+    좌표를 못 만든 건은 **사유와 함께 남긴다.** 조용히 빼면 분모가 줄어들어
+    커버리지 결손이 정확도로 둔갑한다.
+    """
+    pts, skip = {}, {}
+    if basis == "fwd":
+        for rec, pt in zip(chunk, pool.map(fetcher.forward_point, chunk)):
+            if pt is None:
+                skip[rec["sid"]] = "우리 순방향이 주소 후보를 내지 않음"
+            else:
+                pts[rec["sid"]] = pt
+        return pts, skip
+
+    jibun = {rec["sid"]: rec["pnu"] for rec in chunk
+             if rec["layer"] == "jibun" and rec.get("pnu")}
+    got = orc.repr_point_batch(jibun) if jibun else {}
+    for rec in chunk:
+        sid = rec["sid"]
+        if rec["layer"] == "jibun":
+            if sid in got:
+                pts[sid] = got[sid]
+            elif sid not in jibun:
+                skip[sid] = "표본에 PNU 없음"
+            else:
+                skip[sid] = "필지 대표점 부재(우리 DB 에 그 PNU 가 없다)"
+        else:
+            anchors = rec.get("anchors") or []
+            if anchors:
+                pts[sid] = anchors[0]          # 출입구 우선, 없으면 건물중심
+            else:
+                skip[sid] = "원천 좌표 없음(출입구·건물중심 모두 부재)"
+    return pts, skip
+
+
+def rev2_row(rec, basis, rv, ro, skip=None):
+    """§4.2 축 판정 1 행. **좌표도 주소 문자열도 남기지 않는다**(§3.3).
+
+    `status != "OK"` 는 HTTP 200 이어도 실패다 — 그 건의 축은 전부 판정불가로
+    남고 부재가 일치로 새지 않는다.
+    """
+    from revmetrics import (compare_axes, ours_axes, ri_cells,
+                            split_reverse_entries, vw_parcel_axes,
+                            vw_road_axes, vw_status)
+
+    v_ok = bool(rv is not None and rv.ok)
+    o_ok = bool(ro is not None and ro.ok)
+    entries = split_reverse_entries(rv.body) if v_ok else {"parcel": None,
+                                                           "road": None}
+    vwp = vw_parcel_axes(entries["parcel"])
+    vwr = vw_road_axes(entries["road"])
+    ours = ours_axes(ro.body if o_ok else None)
+
+    row = {
+        "rev_schema": REV2_SCHEMA,
+        "sid": rec["sid"], "layer": rec["layer"], "stratum": rec["stratum"],
+        "urban": rec.get("urban"), "basis": basis,
+        "basis_ok": skip is None, "skip": skip,
+        "rev_v_status": (rv.status if rv is not None else None),
+        "vw_has_parcel": entries["parcel"] is not None,
+        "vw_has_road": entries["road"] is not None,
+        "ours_ok": o_ok,
+        "address_source": ours["address_source"],
+        "rev_dist_m": _nearest_dist(ro.body) if o_ok else None,
+        "axes": compare_axes(vwp, vwr, ours),
+        "ri": ri_cells(vwp, ours),
+        "t": round(time.time(), 3),
+    }
+    # `vw_status` 는 재시도 회계를 거친 `rv.status` 와 어긋날 수 있다. 어긋나면
+    # 응답 원문 쪽을 믿는다 — 그것이 VWorld 가 실제로 말한 바다.
+    if v_ok:
+        row["rev_v_status"] = vw_status(rv.body) or row["rev_v_status"]
+    return {k: row[k] for k in REV2_FIELDS}
+
+
+def run_rev2(records, key, basis, out_path, progress_path, counters,
+             start=0, log=None):
+    """역방향만 재실행한다(F1). 순방향 VWorld 는 호출하지 않는다."""
+    from concurrent.futures import ThreadPoolExecutor
+    from oracle import Oracle
+
+    log = log or (lambda msg: None)
+    bucket = TokenBucket(RATE_LIMIT_RPS, BUCKET_CAPACITY)
+    fetcher = Rev2Fetcher(key, counters, bucket, TIMEOUT_S)
+    orc = Oracle()
+    done = start
+    n_skip = 0
+
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+        for base in range(start, len(records), CHUNK_SIZE):
+            chunk = records[base:base + CHUNK_SIZE]
+            t0 = time.time()
+            pts, skip = chunk_points(chunk, basis, orc, fetcher, pool)
+            n_skip += len(skip)
+            items = [(rec, pts.get(rec["sid"])) for rec in chunk]
+            lines = []
+            for rec, rv, ro in pool.map(fetcher.reverse, items):
+                lines.append(json.dumps(
+                    rev2_row(rec, basis, rv, ro, skip.get(rec["sid"])),
+                    ensure_ascii=False, sort_keys=True))
+            with open(out_path, "a") as fh:
+                fh.write("\n".join(lines) + "\n")
+            done = base + len(chunk)
+            with open(progress_path, "w") as fh:
+                json.dump({"done": done, "total": len(records)}, fh)
+            log("청크 %d~%d  %d 건  기준없음 %d  %.1f s  (오라클 SQL %d 회)"
+                % (base, done - 1, len(chunk), len(skip),
+                   time.time() - t0, orc.queries))
+            del pts, skip, items, lines
+    return {"done": done, "basis": basis, "no_basis": n_skip,
+            "oracle_queries": orc.queries,
+            "legacy_reprpt_hits": orc.legacy_reprpt_hits,
+            "legacy_reprpt_attempts": orc.legacy_reprpt_attempts}
+
+
 # ── 루프 ─────────────────────────────────────────────────────────────
 def _truncate_lines(path, keep):
     """resume 시 청크 경계 뒤의 판정을 잘라낸다. 조용히 이어붙이지 않는다(§3.5)."""
@@ -1030,6 +1247,10 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--diag", type=int, default=0,
                     help="진단 보존 상한(§3.3). 0 이면 쓰지 않는다")
+    ap.add_argument("--reverse-only", action="store_true",
+                    help="F1 — 역방향만 재실행한다. 순방향 VWorld 는 부르지 않는다")
+    ap.add_argument("--basis", choices=REV2_BASES, default="src",
+                    help="역방향 질의 좌표 기준(--reverse-only 전용)")
     args = ap.parse_args(argv)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1042,8 +1263,13 @@ def main(argv=None):
     for d in (out_dir, diag_dir):
         if not os.path.isdir(d):
             os.makedirs(d)
-    out_path = os.path.join(out_dir, "verdict_%s.jsonl" % args.tag)
-    progress_path = os.path.join(out_dir, "progress_%s.json" % args.tag)
+    # 역방향 재측정은 **다른 이름으로** 쓴다. 기존 판정 파일을 덮으면 전후
+    # 대조가 불가능해진다(태스크 §6 금지). `--tag` 도 새 값을 받아야 한다.
+    stem = ("rev2_" + args.tag) if args.reverse_only else args.tag
+    out_path = os.path.join(out_dir, "%s_%s.jsonl"
+                            % ("rev2" if args.reverse_only else "verdict",
+                               args.tag))
+    progress_path = os.path.join(out_dir, "progress_%s.json" % stem)
     diag_path = os.path.join(diag_dir, "diag_%s.jsonl" % args.tag) if args.diag else None
 
     def log(msg):
@@ -1057,8 +1283,12 @@ def main(argv=None):
     log("측정 창 시작: %s" % json.dumps(win_start, ensure_ascii=False))
 
     records = load_sample(sample_path, args.limit or None)
-    log("표본 %s  %d 건  (T=%.0f m, 역방향=%s)"
-        % (args.sample, len(records), args.threshold, args.sample == "A"))
+    if args.reverse_only:
+        log("표본 %s  %d 건  역방향 재측정  기준=%s  type=both"
+            % (args.sample, len(records), args.basis))
+    else:
+        log("표본 %s  %d 건  (T=%.0f m, 역방향=%s)"
+            % (args.sample, len(records), args.threshold, args.sample == "A"))
 
     start = 0
     if args.resume and os.path.exists(progress_path):
@@ -1074,9 +1304,14 @@ def main(argv=None):
     t0 = time.time()
     aborted = None
     try:
-        stats = run(records, load_api_key(), out_path, progress_path, counters,
-                    t=args.threshold, reverse=(args.sample == "A"), start=start,
-                    diag_path=diag_path, diag_max=args.diag, log=log)
+        if args.reverse_only:
+            stats = run_rev2(records, load_api_key(), args.basis, out_path,
+                             progress_path, counters, start=start, log=log)
+        else:
+            stats = run(records, load_api_key(), out_path, progress_path,
+                        counters, t=args.threshold,
+                        reverse=(args.sample == "A"), start=start,
+                        diag_path=diag_path, diag_max=args.diag, log=log)
     except OverRequestLimit as exc:
         aborted = str(exc)
         stats = {"done": start, "diag_written": 0}
@@ -1091,13 +1326,15 @@ def main(argv=None):
 
     report = {
         "tag": args.tag, "sample": args.sample, "n": len(records),
+        "mode": "reverse_only" if args.reverse_only else "full",
+        "basis": args.basis if args.reverse_only else None,
         "elapsed_s": round(elapsed, 1), "aborted": aborted,
         "window_start": win_start, "window_end": win_end, "window_same": same,
         "geodist_fallback": geodist.fallback_count(),
         "counters": counters.snapshot(),
     }
     report.update(stats)
-    rp = os.path.join(out_dir, "run_%s.json" % args.tag)
+    rp = os.path.join(out_dir, "run_%s.json" % stem)
     with open(rp, "w") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2, sort_keys=True)
     log("완료 %d 건  %.1f s  →  %s" % (stats["done"] - start, elapsed, rp))
