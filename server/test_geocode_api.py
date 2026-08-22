@@ -87,13 +87,22 @@ class FakePoolCtx:
 
 
 class FakePool:
-    """POOL 대체: connection() 진입 시 예외 또는 FakeConn(FakeCursor) 제공."""
+    """POOL 대체: connection() 진입 시 예외 또는 FakeConn(FakeCursor) 제공.
+
+    ※ T047: `timeout` 인자를 받는다. 실제 `psycopg_pool.ConnectionPool.connection` 의 서명은
+      처음부터 `(self, timeout: float | None = None)` 이었는데 이 대역만 `(self)` 라서,
+      호출부가 timeout 을 명시하자 TypeError 로 죽었다(대역의 결함이지 계약 변경이 아니다).
+      /health 는 풀 기본값 30초를 물지 않도록 timeout 을 명시한다 —
+      timeouts 에 기록해 두어 필요하면 시험이 확인할 수 있게 한다.
+    """
 
     def __init__(self, cur=None, raise_on_enter=None):
         self._conn = FakeConn(cur or FakeCursor())
         self._raise = raise_on_enter
+        self.timeouts = []
 
-    def connection(self):
+    def connection(self, timeout=None):
+        self.timeouts.append(timeout)
         return FakePoolCtx(self._conn, self._raise)
 
 

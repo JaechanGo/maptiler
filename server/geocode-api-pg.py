@@ -12,13 +12,13 @@ server/geocode-api.py(SQLite FTS5+R-tree)의 **엔드포인트 계약·응답 �
   5b(shadow): 별도 포트(8092)로 띄워 SQLite판(8082)과 병행, scripts/13d-geocode-parity.py 로 질의 parity 측정.
   5c(전환):  게이트웨이 /geocode·/reverse upstream 을 이 서비스로 교체.
 """
-import json, math, os, re, sys, unicodedata
+import json, math, os, re, sys, time, unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 PORT = int(os.environ.get("GEOCODE_PORT", "8082"))
 DSN = os.environ.get("DATABASE_URL") or (
@@ -26,6 +26,10 @@ DSN = os.environ.get("DATABASE_URL") or (
     f"user={os.environ.get('PGUSER','cuvia')} dbname={os.environ.get('PGDATABASE','cuvia')} "
     f"password={os.environ.get('PGPASSWORD','cuvia')}")
 ADDR_CAP = 400
+# T047 §4.2 — 지번 근사 매칭(같은 본번의 다른 부번) 점수. 정확 매칭 200 보다 반드시 낮다.
+# 근사는 정확 매칭이 전부 실패한 뒤에만 열리므로 실제로 200 과 경합하지는 않지만,
+# 값 자체가 "이건 물어본 번지가 아니다"를 표현한다.
+APPROX_JIBUN_SCORE = 160
 # statement_timeout=3s — 폭주 쿼리 안전망(연결 단위 options, postgresql.conf 전역설정 회피).
 # 정상 검색은 지역 trgm 인덱스(11-address-search.sql)로 전부 <1s 이므로 3s 는 비정상만 차단.
 # plan_cache_mode=force_custom_plan — psycopg3 는 반복 실행 쿼리를 서버사이드 prepare 로 승격시키는데,
@@ -35,6 +39,22 @@ POOL = ConnectionPool(DSN, min_size=1, max_size=8,
                       kwargs={"row_factory": dict_row,
                               "options": "-c statement_timeout=3000 -c plan_cache_mode=force_custom_plan"},
                       open=False)
+# ★ timeout 미지정 = psycopg_pool 기본 **30초**. 이 30초가 T046 오염의 실체다
+#   (`WARNING table check failed: couldn't get a connection after 30.00 sec`).
+#   부팅 점검은 아래 BOOT_TRY_TIMEOUT_S 로 매 시도마다 이 기본값을 덮어쓴다.
+POOL_ACQUIRE_TIMEOUT_DEFAULT = 30.0
+
+# ── T047 P0: 부팅 침묵 실패 방어 예산 ────────────────────────────────────────
+# docker-compose 가 geocode 와 postgis 를 동시 기동하므로(StartedAt 0.017초 차) PostGIS 가
+# "starting up" 인 동안 연결 획득이 실패한다. 5회 기동 중 1회 실측(20%). 재시도로 흡수하되
+# **절대 deadline** 으로 상한을 묶는다 — 회수로 세면 시도별 타임아웃 소모가 상한을 흔든다.
+#   최악: deadline 60s 도달 + 진행 중이던 시도 3s = **≤63초**.
+#   (회수 6회 × 풀 기본 30초 + 백오프 31초 = ~211초가 되는 설계를 피한 이유.)
+BOOT_DB_WAIT_S = float(os.environ.get("GEOCODE_BOOT_DB_WAIT", "60"))
+BOOT_TRY_TIMEOUT_S = 3.0
+# 사전 적재 결과의 **기계 판독 표면**. "absent"(사전이 없다)와 "unknown"(확인 못 했다)은
+# 운영상 전혀 다른 사건인데 종전에는 구분이 불가능했다 — 그래서 12,000건이 오염된 채 완주했다.
+_DICT_STATE = "unknown"        # "present" | "absent" | "unknown"
 
 TOKEN_RE = re.compile(r"[^\w가-힣]+", re.UNICODE)
 
@@ -788,6 +808,37 @@ def parse(q):
             "bld_dong": bld_dong, "zipcode": zipcode}
 
 
+def addr_intent(p):
+    """이 질의는 '주소를 찾는' 질의인가 — T047 §4.1 (B) 의 게이트.
+
+    번지 토큰이 있고 **그 번지가 붙을 대상**(법정동/리/읍/면 또는 도로명)이 함께 잡힌 경우만
+    참이다. 좁게 잡는 것이 요점이다:
+
+      · `투다리`·`가상편의점` — 번지 없음 → 거짓.
+      · `강남역`·`가상아파트 101동` — 동번호는 `bld_dong` 으로 분리되므로 house 가 없다 → 거짓.
+      · `가상면 가상리 638-1` — 참. 여기서 주소가 0 건이면 상호를 정답처럼 내지 않는다.
+
+    합성 질의(S1/S2)가 전부 이 형태이고, 실재 주소 질의에서도 0.08% 가 이 경로를 탄다.
+
+    ★ 알려진 한계 — **상호 검색이 항상 종전 그대로인 것은 아니다** [T047 검수 실측].
+      이름이 **' 숫자'로 끝나는** POI 는 그 숫자가 `parse()` 에서 `house` 로 잡히므로,
+      `<시도> <시군구> <동> <상호>` 형태로 물으면 `addr_intent` 가 **참**이 된다. 그 지역에
+      해당 번지 주소가 없으면 **찾던 그 상호까지 함께 억제된다**(빈 결과 + `note`).
+      검수 배터리 60 건 중 24 건에서 재현됐고 유지된 건은 0 건이다.
+
+      노출 범위: POI 5,000,876 행 중 이름이 ' 숫자'로 끝나는 것은 **2,450 행(0.049%)** 이고
+      대부분 원천의 일련번호 접미(`읍사무소 1`·`주차장 3`)라 사람이 치는 형태가 아니다.
+      층·호점·번출구·가 접미(`… 2층`·`… 2호점`·`… 2번출구`)는 `house` 로 파싱되지 않아
+      현실 질의 패턴 10 건에서는 **소실 0 건**이었다.
+
+      술어를 좁히는 것(번지 토큰이 동/도로명 토큰에 **인접**할 때만 참)은 설계 변경이고
+      전면 재측정이 필요해 **별도 태스크로 뗐다.** 여기서 임의로 바꾸지 말 것 —
+      계획 §7 R1 이 지정한 술어를 그대로 쓰고 있으며, 잔여 비용이 이 문단이다.
+      시험: `test_t047_nonaddr.TestAddrIntentKnownLimit`.
+    """
+    return bool(p.get("house")) and bool(p.get("dong") or p.get("road"))
+
+
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
 def addr_at(cur, lon, lat, with_meta=False):
     """최근접 address 포인트 1행 → 주소객체. with_meta=True 면 (주소객체, meta) 쌍.
@@ -1045,8 +1096,17 @@ def apply_parcel_pip(cur, lon, lat, address, p, knn=None):
                           **{k: jo["structure"][k] for k in ROAD_SIDE_STRUCT_KEYS}}}, "pip_key"
 
 
-def geocode(cur, q, limit):
+def geocode(cur, q, limit, meta=None):
+    """질의 → 결과 목록.
+
+    `meta` 는 호출부가 넘기는 선택적 사전이다. 결과 목록에 실을 수 없는 **봉투 수준 신호**
+    (`note`·`suppressed`)를 여기에 채운다. 넘기지 않아도 동작은 같다 — 기존 호출부
+    (`_selftest`·단위시험)를 깨지 않기 위한 선택 인자다.
+    """
+    if meta is None:
+        meta = {}
     p = parse(q); results = []
+    _apx = None            # T047 §4.2 (A) — 지번 근사 질의(정확 경로가 전부 빈 뒤에만 연다)
 
     # ---- 우편번호 경로 (5자리 신우편번호 → postal 정확매칭, address_postal_idx) ----
     if p["zipcode"]:
@@ -1187,8 +1247,10 @@ def geocode(cur, q, limit):
                    "ST_Y(COALESCE(parcel.geom_pt, ST_PointOnSurface(parcel.geom))) AS lat "
                    "FROM parcel JOIN lawd_dong ld ON ld.emd_cd = parcel.emd_cd" + ri_join +
                    " WHERE parcel.sido_cd = ANY(%s::char(2)[]) AND parcel.emd_cd = ANY(%s::char(8)[]) "
-                   "AND parcel.ji_main = %s AND parcel.ji_sub = %s")
-            args = [sido_cds, cds, h[0], h[1]]
+                   "AND parcel.ji_main = %s")
+            # ji_sub 조건은 뒤에서 따로 붙인다 — T047 §4.2 (A) 의 근사 질의가 **이 WHERE 를 그대로
+            # 물려받고 ji_sub 만 뺀** 형태여야 하기 때문이다(같은 emd/리 페어 + 본번 정확 일치).
+            args = [sido_cds, cds, h[0]]
             if ri_cds:
                 # R-5: parcel.pnu 는 NOT NULL 이 아니다 → NULL 안전(모르는 필지를 탈락시키지 않는다).
                 #      (emd_cd, ri_cd) 를 페어로 묶어 교차조합 오매칭을 차단한다
@@ -1203,9 +1265,13 @@ def geocode(cur, q, limit):
             # 질의에 '산'이 없으면 일반 필지를 먼저 준다. 같은 번지에 산(임야)과 일반이 공존하면
             # 임의 순서로는 임야가 먼저 잡혀 수 km 떨어진 산자락을 반환한다(NO161·162·283·288).
             order = "parcel.san, " if not p["san"] else ""
-            sql += f" ORDER BY {order}parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}"
-            cur.execute(sql, args)
-            for r in cur.fetchall():
+
+            def _emit_parcel(rows, approx=False):
+                """parcel 행 → 결과 항목. 정확·근사가 같은 표기 규칙을 쓰도록 한 곳에 둔다."""
+                for r in rows:
+                    _emit_parcel_row(r, approx)
+
+            def _emit_parcel_row(r, approx):
                 san_b = bool(r["san"])
                 # 1순위: 이 행의 pnu 리코드로 조회한 사전값(DB 사실). 2순위: 리 필터가 실제로
                 # 걸린 경우의 질의 토큰. 둘 다 없으면 None — 입력토큰을 확인 없이 되돌려주지 않는다.
@@ -1232,7 +1298,28 @@ def geocode(cur, q, limit):
                 it["display"] = disp
                 it["address"] = {"road": None, "parcel": disp["full"], "zipcode": None,
                                  "bld": None, "structure": st}
-                results.append((200, it))
+                if approx:
+                    # 근사 결과는 **정확 매칭과 구분 가능해야 한다** — 소비자가 "이건 물어본 그
+                    # 번지가 아니다"를 알 수 있어야 근사가 오답이 되지 않는다.
+                    it["approx"] = True
+                results.append((APPROX_JIBUN_SCORE if approx else 200, it))
+
+            cur.execute(sql + " AND parcel.ji_sub = %s"
+                        + f" ORDER BY {order}parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}",
+                        args + [h[1]])
+            _emit_parcel(cur.fetchall())
+
+            # ---- T047 §4.2 (A) 근사 매칭 준비 — 지금 실행하지 않는다 ────────────────
+            # 부번을 명시했는데(`h[1]`) 그 필지가 없을 때만이다. **본번 근사는 금지** —
+            # 없는 본번(S2)에 근사를 걸면 전혀 다른 필지를 정답처럼 내놓는다(빈 결과가 정답이다).
+            # 실행을 미루는 이유: 아래 search_text 정확 매칭이 여전히 우선이다. 근사를 앞세우면
+            # address 테이블에 실재하는 주소를 근사 결과가 덮어쓰는 회귀가 된다.
+            # ADDR_CAP 절단 방어는 **SQL 단계**에서 한다 — 물어본 부번에 가까운 순으로 정렬해
+            # LIMIT 이 잘라내는 것이 항상 '가장 먼 부번'이 되게 한다(파이썬에서 자르면 이미 늦다).
+            if not results and h[1]:
+                _apx = (sql + " ORDER BY abs(parcel.ji_sub - %s), "
+                        + f"{order}parcel.emd_cd, parcel.ji_sub LIMIT {ADDR_CAP}",
+                        args + [h[1]], _emit_parcel)
 
     # ---- 지번 경로 (법정동/리 + 번지) ----
     # 도로명이 없고 동/리 토큰 + 번지가 있으면 지번주소. addr 행의 search_text 끝(= jibun '법정동 [산] 본번[-부번]')을
@@ -1269,6 +1356,18 @@ def geocode(cur, q, limit):
                   "lon": r["lon"], "lat": r["lat"], "address": addr_obj(r)}
             it["display"] = display_of(it, r)          # road/road_name 부재 → parcel 규칙(F3-a/b)
             results.append((200 + bonus, it))
+
+    # ---- T047 §4.2 (A) 지번 근사 — 정확 매칭이 **전부** 실패한 뒤에만 ────────────────
+    # parcel 정확 · address 정확이 모두 0 건이고 부번을 명시한 질의일 때, 같은 읍면동(리 좁힘이
+    # 걸렸으면 같은 리)의 **같은 본번** 다른 부번을 제안한다. 실측: 실재 본번의 없는 부번을
+    # 물으면 94.6% 가 아무 주소도 내지 못했다.
+    if not results and _apx is not None:
+        apx_sql, apx_args, emit = _apx
+        cur.execute(apx_sql, apx_args)
+        rows = cur.fetchall()
+        if rows:
+            emit(rows, approx=True)
+            meta["note"] = "approx_jibun"
 
     # 도로/지번 경로가 결과를 못 내면 이름+건물명 경로 진입(둘은 병합). 미리 캡처해 bld 경로가
     # results 를 채워도 이름 경로(POI/역)가 함께 돌도록(네이버/카카오식 '주소+장소' 병합).
@@ -1337,6 +1436,31 @@ def geocode(cur, q, limit):
             if _g(r, "phone"): item["phone"] = r["phone"]
             if _g(r, "source"): item["source"] = r["source"]
             results.append((s, item))   # display/structure 는 병합부에서(상위 limit개만, PIP 호출 절약)
+
+    # ---- T047 §4.1 (B) 교차 카테고리 폴백 차단 ────────────────────────────────
+    # 주소 의도가 명백한데 주소 경로가 전부 비면 이름 경로가 열려 biz(135)가 top-1 을 채운다.
+    # 합성 질의 92.8~98.2%, 실재 주소 질의 0.08%. 사용자에게는 "틀린 주소"가 아니라
+    # **"엉뚱한 가게"** 로 보이고, 1.2 km 떨어진 편의점이 정답 자리에 앉는다.
+    #
+    # B1(순위 강등) + B3(플래그) 병용이다. **억제가 아니라 강등**이 기본이라 정보 손실이 없고,
+    # 주소가 하나도 없을 때만 빈 결과를 준다 — 빈 결과가 엉뚱한 가게보다 정직하기 때문이다.
+    if addr_intent(p):
+        addr_hits = [(s, it) for s, it in results if it.get("kind") == "addr"]
+        if not addr_hits:
+            # 주소가 0 건 — 상호명을 정답처럼 내보내지 않는다. 이유를 봉투에 남긴다.
+            meta["note"] = "no_address_match"
+            meta["suppressed"] = len(results)
+            results = []
+        elif len(addr_hits) != len(results):
+            # 주소가 있다 — 비주소는 버리지 않고 **주소 뒤로** 민다(정보 손실 없음).
+            floor = min(s for s, _ in addr_hits)
+            demoted = []
+            for s, it in results:
+                if it.get("kind") != "addr":
+                    it["fallback"] = "nonaddr"      # 소비자가 구분할 수 있게 표시(B3)
+                    s = min(s, floor - 1)
+                demoted.append((s, it))
+            results = demoted
 
     # ---- 병합·정렬·중복 제거 ----
     results.sort(key=lambda x: -x[0])
@@ -1449,22 +1573,47 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path); qs = parse_qs(u.query)
-        try:
-            with POOL.connection() as con, con.cursor() as cur:
-                if u.path == "/health":
-                    # 필수테이블 점검 → 누락 시 degraded(503). 정상이면 기존 키(ok/places/areas) 보존.
+
+        # ── /health 는 POOL.connection() **밖**에서 처리한다 (T047 P0 §3.2) ──────────
+        #   종전에는 이 분기가 아래 with 블록 안에 있어서 **DB 를 못 잡으면 /health 자체가
+        #   503 으로 죽었다.** 즉 침묵 실패를 탐지하려는 수단이 침묵 실패의 순간에 함께 침묵한다.
+        #   사전 상태(_DICT_STATE 등)는 모듈 전역이라 DB 없이 읽히므로, DB 가 죽어도 반드시 낸다.
+        #   (T046 run_main.json 의 window_start.health == "ERR:HTTP Error 503" 이 이 경로였다.)
+        if u.path == "/health":
+            dict_state = {"lawd_ri": _DICT_STATE,                     # present|absent|unknown
+                          "sido_remap": "on" if _HAS_SIDO_REMAP else "off",
+                          "sgg_remap": "on" if _HAS_SGG_REMAP else "off",
+                          "ri_emds": len(_RI_EMDS)}
+            try:
+                with POOL.connection(timeout=BOOT_TRY_TIMEOUT_S) as con, con.cursor() as cur:
+                    # 필수테이블 점검 → 누락 시 degraded(503). 기존 계약 그대로 보존.
                     missing = _check_tables(cur)
                     if missing:
                         return self._send({"ok": False, "degraded": True,
-                                           "missing_tables": missing}, 503)
+                                           "missing_tables": missing, "dict": dict_state}, 503)
                     cur.execute("SELECT count(*) c FROM address"); pc = cur.fetchone()["c"]
                     cur.execute("SELECT count(*) c FROM admin_boundary"); ac = cur.fetchone()["c"]
-                    return self._send({"ok": True, "places": pc, "areas": ac})
+                # 기존 키(ok/places/areas) 그대로 + dict 추가 → 하위 호환.
+                return self._send({"ok": True, "places": pc, "areas": ac, "dict": dict_state})
+            except Exception as e:
+                # ★ DB 불가여도 dict 는 살려서 반환한다 — 이 한 줄이 측정 게이트의 실효성을 좌우한다.
+                #   ok 를 dict.lawd_ri 만으로 내리지는 **않는다**: 오케스트레이터가 /health 로
+                #   재기동을 걸면 부작용이 있다. 상태는 dict 로만 표현하고 판단은 소비자가 한다.
+                return self._send({"ok": False, "db": "unreachable",
+                                   "error": str(e)[:120], "dict": dict_state}, 503)
+
+        try:
+            with POOL.connection() as con, con.cursor() as cur:
                 if u.path == "/geocode":
                     q = (qs.get("q") or [""])[0]
                     limit = _limit(qs, 8)
+                    # meta 는 결과 목록에 실을 수 없는 봉투 신호를 받는다(T047 §4).
+                    # 기존 키(query/contract_version/results)는 그대로 두고 **추가만** 한다
+                    # → 하위 호환이 유지되므로 contract_version 은 올리지 않는다(R4).
+                    meta = {}
+                    rs = geocode(cur, q, limit, meta=meta)
                     return self._send({"query": q, "contract_version": CONTRACT_VERSION,
-                                       "results": geocode(cur, q, limit)})
+                                       "results": rs, **meta})
                 if u.path == "/reverse":
                     try:
                         lon = float((qs.get("lon") or [""])[0]); lat = float((qs.get("lat") or [""])[0])
@@ -1499,29 +1648,72 @@ def _selftest():
 
 
 def _boot_check():
-    """부팅 1회 필수테이블 점검 — 누락 시 stderr 경고만(프로세스 계속, fatal 금지)."""
-    try:
-        with POOL.connection() as con, con.cursor() as cur:
-            missing = _check_tables(cur)
-            has_ri = _probe_lawd_ri(cur)     # R-9: 필수테이블 아님 — 존재 여부만 1회 확정
-            has_remap = _load_sido_remap(cur)   # 안 A 치환표(부재 시 46/29 현행 유지)
-            has_sgg = _load_sgg_remap(cur)      # T026 인천 치환표(부재 시 중/동/서구 현행 유지)
-            n_ri_emds = _load_ri_emds(cur)      # A-5 관측용 리 보유 읍면동 집합
-        print(f"geocode-api-pg: lawd_ri: {'present' if has_ri else 'absent'}", file=sys.stderr)
-        # 안 A 상태를 기동 로그에 남긴다 — 운영에서 "왜 아직 46 이 나오냐"를 즉시 판별하기 위함.
-        print(f"geocode-api-pg: sido remap(안 A): "
-              f"{'ON' if has_remap else 'OFF(46/29 유지)'} "
-              f"emd={len(_SIDO_REMAP)} ri_exc={len(_RI_REMAP_EXC)} ri_emds={n_ri_emds}",
-              file=sys.stderr)
-        # T026 인천 개편 상태도 같은 이유로 기동 로그에 남긴다("왜 아직 중구가 나오냐"의 즉답).
-        print(f"geocode-api-pg: incheon sgg remap(T026): "
-              f"{'ON' if has_sgg else 'OFF(중구/동구/서구 유지)'} emd8={len(_SGG_REMAP)}",
-              file=sys.stderr)
-        if missing:
-            print(f"geocode-api-pg: WARNING degraded — missing tables: {', '.join(missing)}",
+    """부팅 1회 필수테이블 점검 + 사전 로더 5종 적재.
+
+    ★ T047 P0 — 이 함수의 `with POOL.connection()` 한 줄이 T046 오염의 현장이다.
+      연결 획득이 실패하면 예외가 최외곽으로 빠져 **블록 안의 로더 5개가 전부 호출되지
+      않고** 전역이 초기값으로 확정된다. 즉 리 좁힘만이 아니라 안 A 시도 치환(46/29)과
+      T026 인천 치환까지 **동시에** 꺼지고, 서비스는 그 사실을 알리지 않은 채 정상 기동한다.
+
+    R-9 fail-open 계약은 그대로 유지한다 — 전량 실패해도 프로세스는 뜬다.
+    **바꾸는 것은 *조용함* 이지 *열림* 이 아니다**: 실패를 UNKNOWN 으로 명시하고
+    `_DICT_STATE` 로 기계 판독 가능하게 만든다(`/health` 의 dict).
+
+    `POOL.wait()` 를 쓰지 않는 이유: 공식 API 문서상 실패하면 **풀을 닫고** PoolTimeout 을
+    던진다. 그러면 PostGIS 가 나중에 떠도 이후 모든 요청이 PoolClosed 로 죽어 현행보다
+    나빠진다(현행은 리만 꺼지고 서비스는 산다). R-9 와 정면 충돌한다.
+    """
+    global _DICT_STATE
+    deadline = time.monotonic() + BOOT_DB_WAIT_S
+    delay, attempts, last = 1.0, 0, None
+    while True:
+        attempts += 1
+        try:
+            # timeout 을 **반드시** 명시한다 — 생략하면 풀 기본값 30초가 적용돼
+            # 재시도 설계의 상한이 통째로 무너진다(POOL_ACQUIRE_TIMEOUT_DEFAULT).
+            with POOL.connection(timeout=BOOT_TRY_TIMEOUT_S) as con, con.cursor() as cur:
+                missing = _check_tables(cur)
+                has_ri = _probe_lawd_ri(cur)     # R-9: 필수테이블 아님 — 존재 여부만 1회 확정
+                has_remap = _load_sido_remap(cur)   # 안 A 치환표(부재 시 46/29 현행 유지)
+                has_sgg = _load_sgg_remap(cur)      # T026 인천 치환표(부재 시 중/동/서구 현행 유지)
+                n_ri_emds = _load_ri_emds(cur)      # A-5 관측용 리 보유 읍면동 집합
+            _DICT_STATE = "present" if has_ri else "absent"
+            retried = "" if attempts == 1 else f" (after {attempts} attempts)"
+            print(f"geocode-api-pg: lawd_ri: {_DICT_STATE}{retried}", file=sys.stderr)
+            # 안 A 상태를 기동 로그에 남긴다 — 운영에서 "왜 아직 46 이 나오냐"를 즉시 판별하기 위함.
+            print(f"geocode-api-pg: sido remap(안 A): "
+                  f"{'ON' if has_remap else 'OFF(46/29 유지)'} "
+                  f"emd={len(_SIDO_REMAP)} ri_exc={len(_RI_REMAP_EXC)} ri_emds={n_ri_emds}",
                   file=sys.stderr)
-    except Exception as e:                  # 점검 자체 실패도 비치명(경고만)
-        print(f"geocode-api-pg: WARNING table check failed: {str(e)[:120]}", file=sys.stderr)
+            # T026 인천 개편 상태도 같은 이유로 기동 로그에 남긴다("왜 아직 중구가 나오냐"의 즉답).
+            print(f"geocode-api-pg: incheon sgg remap(T026): "
+                  f"{'ON' if has_sgg else 'OFF(중구/동구/서구 유지)'} emd8={len(_SGG_REMAP)}",
+                  file=sys.stderr)
+            if missing:
+                print(f"geocode-api-pg: WARNING degraded — missing tables: {', '.join(missing)}",
+                      file=sys.stderr)
+            return
+        except (PoolTimeout, psycopg.OperationalError) as e:
+            # **연결 계열만** 재시도한다. PostGIS 기동 지연이 정확히 이 분기다.
+            # to_regclass 가 정상 응답한 "테이블 부재"는 여기 오지 않는다 — 위에서 absent 로 확정된다.
+            last = e
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            time.sleep(min(delay, remain))
+            delay = min(delay * 2, 8.0)
+        except Exception as e:
+            # 연결은 됐는데 질의가 실패한 경우 — 재시도해도 결과가 달라지지 않는다.
+            print(f"geocode-api-pg: WARNING boot check error: {str(e)[:120]}", file=sys.stderr)
+            _DICT_STATE = "unknown"
+            return
+    _DICT_STATE = "unknown"
+    # ★ 'absent' 와 반드시 다른 문자열이어야 한다 — "사전이 없음"과 "확인 못 함"은 다른 사건이다.
+    print(f"geocode-api-pg: lawd_ri: UNKNOWN (probe failed after {attempts} attempts / "
+          f"{BOOT_DB_WAIT_S:.0f}s: {str(last)[:80]})", file=sys.stderr)
+    # 피해 범위를 한 줄로 못박는다 — 리만 꺼진 것이 아니라는 사실이 이번 사고의 핵심이다.
+    print("geocode-api-pg: WARNING dictionaries NOT loaded — "
+          "ri narrowing, sido remap(안 A), incheon remap(T026) are ALL OFF", file=sys.stderr)
 
 
 if __name__ == "__main__":

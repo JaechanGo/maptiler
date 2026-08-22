@@ -935,11 +935,72 @@ def to_diag(obs, verdict, query):
 
 
 # ── 측정 창(§3.5) ────────────────────────────────────────────────────
+def fetch_health(base):
+    """`/health` 를 읽는다 → dict(파싱 성공) 또는 `"ERR:..."` 문자열.
+
+    ★ **503 본문을 반드시 읽는다.** T047 §3.2 의 `/health` 는 DB 가 죽어도 사전 상태를
+      `dict` 에 담아 내보내는데, 그 응답 코드가 **503** 이다. `urlopen` 은 503 에서
+      `HTTPError` 를 던지므로 예외만 잡고 넘어가면 정작 필요한 `dict` 를 통째로 버린다 —
+      "탐지 수단이 탐지 대상 상황에서 침묵한다"는 이번 사고의 형상이 한 겹 뒤에서 재현된다.
+      `HTTPError` 는 그 자체가 파일 객체이므로 본문을 그대로 읽을 수 있다.
+    """
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            return "ERR:%s" % exc
+    except Exception as exc:
+        return "ERR:%s" % exc
+
+
+GEOCODE_CONTAINER_DEFAULT = "server-geocode-pg-1"
+
+
+def resolve_geocode_container(base, sh):
+    """측정 대상(`base`)을 **실제로 서빙하는** 컨테이너 이름을 유도한다 → `(이름, 유도근거)`.
+
+    ★ 왜 필요한가 (T047 검수 6-2). 종전에는 컨테이너명이 `"server-geocode-pg-1"` 로 **고정**인데
+      `/health` 만 `OUR_BASE` 를 따랐다. 그래서 별도 프로브 포트(예: 8093)를 측정하면 무결성
+      기록이 **엉뚱한 컨테이너**의 id·md5·마운트를 적으면서 동시에 프로브의 사전 상태를 적었다.
+      즉 감사 기록이 측정 대상과 다른 판을 기술한다 — T047 이 막으려는 사고(런타임 상태와 기록의
+      불일치)와 정확히 같은 계열이라, 기록을 믿고 판을 확정하면 다시 오염된다.
+
+    유도는 **포트 발행**으로 한다(`docker ps --filter publish=<port>`). 이름 규칙이나 이미지에
+    기대지 않는다.
+
+    폴백 (전부 근거 문자열로 남긴다 — 조용히 기본값으로 떨어지지 않는다):
+      · 포트를 못 뽑음 / docker 실패 / 매칭 0 건  → 기본값, 근거 `fallback:*`
+      · 매칭 2 건 이상(포트 중복 발행)            → 기본값, 근거 `fallback:ambiguous(...)`
+    """
+    port = None
+    m = re.search(r":(\d+)", base or "")
+    if m:
+        port = m.group(1)
+    if not port:
+        return GEOCODE_CONTAINER_DEFAULT, "fallback:no-port-in-base"
+    out = sh(["docker_placeholder", "ps", "--filter", "publish=" + port,
+              "--format", "{{.Names}}"])
+    if out.startswith("ERR:"):
+        return GEOCODE_CONTAINER_DEFAULT, "fallback:docker-error"
+    names = [n.strip() for n in out.splitlines() if n.strip()]
+    if len(names) == 1:
+        return names[0], "port:" + port
+    if not names:
+        return GEOCODE_CONTAINER_DEFAULT, "fallback:no-container-on-port-" + port
+    return GEOCODE_CONTAINER_DEFAULT, "fallback:ambiguous(%s)" % ",".join(names[:4])
+
+
 def probe_window():
     """§3.5 — 컨테이너 ID·마운트·md5(양쪽)·`/health` 를 찍는다.
 
     8092 에는 healthcheck 가 없다. 낡은 코드를 물린 컨테이너를 측정한 사고가
     있었으므로 시작과 끝에서 같은 4 개를 대조한다.
+
+    컨테이너는 `OUR_BASE` 에서 유도한다(`resolve_geocode_container`) — 고정값을 쓰면
+    프로브 포트를 잴 때 기록과 측정 대상이 어긋난다(T047 검수 6-2).
     """
     import subprocess
     import pgprobe
@@ -953,31 +1014,105 @@ def probe_window():
             return "ERR:%s" % exc
 
     docker = pgprobe.DOCKER
+
+    def dsh(args):
+        return sh([docker] + list(args[1:]))      # 첫 항목(placeholder)을 실제 docker 로 치환
+
     win = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    win["geocode_id"] = sh([docker, "inspect", "-f", "{{.Id}}", "server-geocode-pg-1"])[:12]
-    win["geocode_started"] = sh([docker, "inspect", "-f", "{{.State.StartedAt}}",
-                                 "server-geocode-pg-1"])
+    cname, cwhy = resolve_geocode_container(OUR_BASE, dsh)
+    # 어느 컨테이너를 왜 골랐는지도 기록에 남긴다 — 사후에 판을 재구성할 수 있어야 한다.
+    win["geocode_base"] = OUR_BASE
+    win["geocode_container"] = cname
+    win["geocode_container_resolved_by"] = cwhy
+    win["geocode_id"] = sh([docker, "inspect", "-f", "{{.Id}}", cname])[:12]
+    win["geocode_started"] = sh([docker, "inspect", "-f", "{{.State.StartedAt}}", cname])
     src = sh([docker, "inspect", "-f",
               '{{range .Mounts}}{{if eq .Destination "/app/geocode-api-pg.py"}}'
-              '{{.Source}}{{end}}{{end}}', "server-geocode-pg-1"])
+              '{{.Source}}{{end}}{{end}}', cname])
     win["mount_source"] = src
-    win["md5_in_container"] = sh([docker, "exec", "server-geocode-pg-1",
+    win["md5_in_container"] = sh([docker, "exec", cname,
                                   "md5sum", "/app/geocode-api-pg.py"]).split()[:1]
     if src and os.path.exists(src):
         with open(src, "rb") as fh:
             win["md5_on_host"] = hashlib.md5(fh.read()).hexdigest()
     else:
         win["md5_on_host"] = None
-    try:
-        resp = urllib.request.urlopen(OUR_BASE + "/health", timeout=10)
-        win["health"] = json.loads(resp.read().decode("utf-8"))
-        resp.close()
-    except Exception as exc:
-        win["health"] = "ERR:%s" % exc
+    win["health"] = fetch_health(OUR_BASE)
     win["pg_id"] = sh([docker, "inspect", "-f", "{{.Id}}", pgprobe.CONTAINER])[:12]
     win["pg_started"] = sh([docker, "inspect", "-f", "{{.State.StartedAt}}",
                             pgprobe.CONTAINER])
     return win
+
+
+# ── T047 P0 §3.3 — 사전 상태 게이트 ──────────────────────────────────
+#
+# T046 본 측정 12,000 건은 리 사전·안 A 시도 치환·T026 인천 치환이 **전부 꺼진**
+# 프로세스를 상대로 완주했다. `_boot_check` 의 `with POOL.connection()` 이 30 초
+# 타임아웃으로 실패해 그 블록 안 로더 5 개가 통째로 호출되지 않은 상태였다
+# (5 회 기동 중 1 회 = 20%). md5 3 자 대조로는 잡히지 않는다 — 코드도 데이터도
+# 정본이었고 **런타임 상태만** 달랐다.
+#
+# 경고 신호는 실제로 있었다: `run_main.json` 의 `window_start.health` 가
+# `"ERR:HTTP Error 503"`. 그런데 그것이 **경고에 그쳐** 측정이 진행됐다.
+# 그래서 여기서는 경고가 아니라 **중단**한다.
+
+def _health_dict(win):
+    """측정창 스냅샷에서 `/health` 의 dict 를 꺼낸다. 못 꺼내면 None."""
+    h = (win or {}).get("health")
+    if not isinstance(h, dict):
+        return None                      # "ERR:..." 문자열이거나 아예 없음
+    d = h.get("dict")
+    return d if isinstance(d, dict) else None
+
+
+def dict_gate(win):
+    """측정 시작 가부를 판정한다 → `(ok, reason)`.
+
+    차단(=`ok False`) 조건은 둘뿐이고 둘 다 **"확인되지 않았다"** 는 뜻이다.
+      · `/health` 가 응답하지 않았다(`ERR:*`) — 모르면 재지 않는다
+      · `dict.lawd_ri != "present"` — 사전이 안 걸린 채로 재면 그 수치는 폐기 대상이다
+
+    `sido_remap`/`sgg_remap` 이 `off` 인 것은 **차단하지 않는다.** 두 치환표는 R-9 상
+    정당하게 부재할 수 있기 때문이다(부재 시 46/29·중구 유지가 설계된 동작). 다만 이번
+    사고에서는 다섯이 함께 꺼졌으므로 사유 문자열에 반드시 실어 기록에 남긴다 —
+    부팅 경합이면 `lawd_ri` 가 `unknown` 이 되어 위 조건이 먼저 잡는다.
+    """
+    h = (win or {}).get("health")
+    if not isinstance(h, dict):
+        return False, ("/health 응답 없음(%s) — 사전 상태를 확인할 수 없다. "
+                       "T046 은 바로 이 상태(ERR:HTTP Error 503)에서 완주해 오염됐다."
+                       % (str(h)[:80] if h else "없음"))
+    d = _health_dict(win)
+    if d is None:
+        return False, ("/health 에 dict 가 없다 — 사전 상태를 노출하지 않는 구판 서버다. "
+                       "T047 §3.2 판을 올린 뒤 다시 시작하라.")
+    state = d.get("lawd_ri")
+    notes = []
+    if d.get("sido_remap") == "off":
+        notes.append("sido_remap=off(안 A 시도 치환 비활성)")
+    if d.get("sgg_remap") == "off":
+        notes.append("sgg_remap=off(T026 인천 치환 비활성)")
+    tail = ("  ※ " + " · ".join(notes)) if notes else ""
+    if state != "present":
+        extra = ""
+        if state == "unknown":
+            extra = (" — 부팅 시 DB 연결 실패로 사전 로더 5 종이 통째로 건너뛰어졌다는 뜻이다. "
+                     "컨테이너를 재기동하고 `docker logs` 에서 lawd_ri: present 를 확인하라.")
+        elif state == "absent":
+            extra = " — lawd_ri 테이블이 실제로 없다. 사전을 적재한 뒤 재시도하라."
+        return False, "dict.lawd_ri=%r (present 아님)%s%s" % (state, extra, tail)
+    return True, ("dict.lawd_ri=present ri_emds=%s" % d.get("ri_emds")) + tail
+
+
+def dict_same(win_a, win_b):
+    """측정 창 양끝의 사전 상태가 같은가 — 측정 도중 재기동 탐지(R7).
+
+    한쪽이라도 `/health` 를 못 읽었으면 **다르다고 본다**(모르는 것을 같다고 하지 않는다).
+    """
+    a, b = _health_dict(win_a), _health_dict(win_b)
+    if a is None or b is None:
+        return False
+    return a == b
 
 
 # ── 역방향 재측정(F1) ────────────────────────────────────────────────
@@ -1251,6 +1386,12 @@ def main(argv=None):
                     help="F1 — 역방향만 재실행한다. 순방향 VWorld 는 부르지 않는다")
     ap.add_argument("--basis", choices=REV2_BASES, default="src",
                     help="역방향 질의 좌표 기준(--reverse-only 전용)")
+    # T047 §3.3 — 사전 상태 게이트의 유일한 탈출구. 기본은 차단이다.
+    # 명시적으로 타이핑해야 하고 run_*.json 에 dict_gate_override=true 로 남는다
+    # (조용히 넘어가는 순간 그것이 새로운 침묵 실패다).
+    ap.add_argument("--allow-dict-degraded", action="store_true",
+                    help="사전 미적재 상태에서도 측정을 강행한다. 결과는 오염 가능으로 "
+                         "표시되며 run_*.json 에 기록된다. 정상 운용에서는 쓰지 마라")
     args = ap.parse_args(argv)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1281,6 +1422,20 @@ def main(argv=None):
 
     win_start = probe_window()
     log("측정 창 시작: %s" % json.dumps(win_start, ensure_ascii=False))
+
+    # ── T047 §3.3 사전 상태 게이트 — 표본 적재·외부 호출보다 **먼저** ──────────────
+    #   경고가 아니라 중단이다. T046 은 window_start.health 가 ERR:503 인 채로 12,000 건을
+    #   완주해 통째로 오염됐다. 여기서 막지 못하면 그 사고가 그대로 재발한다.
+    gate_ok, gate_reason = dict_gate(win_start)
+    if gate_ok:
+        log("사전 상태 게이트 통과: %s" % gate_reason)
+    elif args.allow_dict_degraded:
+        log("!! 사전 상태 게이트 강제 통과(--allow-dict-degraded): %s" % gate_reason)
+        log("!! 이 측정의 결과는 오염 가능이다. run_%s.json 에 그대로 기록된다." % stem)
+    else:
+        log("측정 중단 — 사전 상태 게이트: %s" % gate_reason)
+        log("강행하려면 --allow-dict-degraded 를 명시하라(결과에 오염 표시가 남는다).")
+        return 3
 
     records = load_sample(sample_path, args.limit or None)
     if args.reverse_only:
@@ -1322,7 +1477,12 @@ def main(argv=None):
     same = all(win_start.get(k) == win_end.get(k)
                for k in ("geocode_id", "mount_source", "md5_in_container",
                          "md5_on_host", "pg_id"))
-    log("측정 창 종료: 일치=%s" % same)
+    # md5·마운트 일치만으로는 부족하다(이번 사고에서 md5 는 3 자 전부 일치했다).
+    # 측정 도중 재기동으로 사전 상태가 바뀌었는지를 별도 축으로 본다(R7).
+    d_same = dict_same(win_start, win_end)
+    log("측정 창 종료: 일치=%s  사전상태 일치=%s" % (same, d_same))
+    if not d_same:
+        log("경고: 측정 중 사전 상태가 바뀌었다(재기동 추정). 구간을 폐기하고 재측정하라.")
 
     report = {
         "tag": args.tag, "sample": args.sample, "n": len(records),
@@ -1330,6 +1490,10 @@ def main(argv=None):
         "basis": args.basis if args.reverse_only else None,
         "elapsed_s": round(elapsed, 1), "aborted": aborted,
         "window_start": win_start, "window_end": win_end, "window_same": same,
+        # T047 §3.3 — 사후에 "이 측정은 사전이 걸린 상태였나"를 기계로 읽는 자리.
+        "dict_gate_ok": gate_ok, "dict_gate_reason": gate_reason,
+        "dict_gate_override": bool(args.allow_dict_degraded and not gate_ok),
+        "dict_same": d_same,
         "geodist_fallback": geodist.fallback_count(),
         "counters": counters.snapshot(),
     }
