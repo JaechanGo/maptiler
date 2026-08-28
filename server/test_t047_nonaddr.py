@@ -203,30 +203,50 @@ class TestAddrIntent(_Base):
         self.assertFalse(M.addr_intent(M.parse("가상면 가상리")))
 
 
-class TestAddrIntentKnownLimit(_Base):
-    """★ 알려진 한계를 **실행 가능한 형태로** 고정한다 (T047 검수 6-1).
+class TestAddrIntentAdjacency(_Base):
+    """★ T047 검수 6-1 의 한계 해소를 고정한다 (T051 — 인접성 술어).
 
-    docstring 만으로는 다음 유지보수자가 또 놓친다. 여기서 고정하는 것은 "이것이 옳다"가
-    아니라 **"현재 이렇게 동작한다"** 이다 — 술어를 좁히는 후속 태스크가 이 시험을
-    **의도적으로 갱신**하게 만드는 것이 목적이다.
-
-    이름이 ' 숫자'로 끝나는 POI 는 그 숫자가 `house` 로 파싱돼 `addr_intent` 가 참이 되고,
-    주소가 0 건이면 **찾던 그 상호까지** 억제된다. 검수 배터리 60 건 중 24 건 재현·유지 0 건.
+    구 판은 이름이 ' 숫자'로 끝나는 POI 질의에서 그 숫자가 `house` 로 파싱돼 찾던 상호까지
+    억제했다(배터리 60 건 중 24 건 소실). 지금 술어는 번지 토큰이 동/리/읍/면/N가/도로명
+    토큰의 **직전 인접**일 때만 참이다(`parse()["house_adj"]`). 이 클래스가 그 경계를
+    양방향으로 고정한다 — 오탐 해소(거짓)와 회귀 축 보존(참)을 함께.
     """
 
-    def test_poi_name_ending_in_bare_number_flips_intent(self):
+    def test_poi_name_ending_in_bare_number_no_longer_flips_intent(self):
+        """T047 시절 참이었다 — 001 의 직전 토큰이 상호라 이제 거짓이다."""
         p = M.parse("가상도 가상군 가상면 주차장 3")
         self.assertEqual(p["house"], (3, 0))
-        self.assertTrue(M.addr_intent(p),
-                        "한계가 해소됐다면 이 시험과 addr_intent docstring 을 함께 갱신하라")
+        self.assertFalse(p["house_adj"])
+        self.assertFalse(M.addr_intent(p))
 
-    def test_such_poi_is_suppressed_when_no_address(self):
-        """찾던 그 상호가 사라진다 — 이것이 이 한계의 실제 피해다."""
+    def test_such_poi_survives_when_no_address(self):
+        """T047 검수 6-1 의 실제 피해 시나리오 — 이제 찾던 상호가 살아남는다."""
         cur = GeoCursor(parcel_exact=[], name_rows=[biz_row("주차장 3")])
         out, meta = self.go(cur, "가상도 가상군 가상면 주차장 3")
-        self.assertEqual(out, [])
-        self.assertEqual(meta.get("note"), "no_address_match")
-        self.assertEqual(meta.get("suppressed"), 1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["kind"], "biz")
+        self.assertNotIn("note", meta)
+
+    def test_adjacent_house_still_true(self):
+        """회귀 축 — 인접형(실재 주소·S1/S2 합성 질의 형태)은 전부 참을 유지한다."""
+        for q in (Q_EXACT, Q_S1, Q_S2,
+                  "가상면 가상리 638-1",       # 리 직전
+                  "가상동 123-4",              # 동 직전
+                  "가상리 산 25-1",            # 단독 '산' 개재 — 인접성 유지
+                  "가상대로 152",              # 도로명 직전
+                  "가상동123-4",               # 동+번지 한 토큰
+                  "가상대로152"):              # 도로+번지 한 토큰
+            p = M.parse(q)
+            self.assertTrue(p["house_adj"], q)
+            self.assertTrue(M.addr_intent(p), q)
+
+    def test_nonadjacent_house_false(self):
+        """상호·건물동 토큰이 끼면 거짓 — 억제 게이트가 열리지 않는다."""
+        for q in ("가상도 가상군 가상면 에스테틱 001",
+                  "가상면 가상카페 2",
+                  "가상동 101동 5"):           # 건물 동번호는 앵커가 아니다
+            p = M.parse(q)
+            self.assertFalse(M.addr_intent(p), q)
 
     def test_common_poi_suffixes_are_not_affected(self):
         """층·호점·번출구·동 접미는 house 로 파싱되지 않는다 — 현실 질의 패턴은 안전하다."""

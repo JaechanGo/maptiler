@@ -745,19 +745,23 @@ def parse(q):
     # '149맥금동' 을 통째로 dong 에 넣어 번지가 증발한다(NO117/118 683m 이탈).
     q = re.sub(r"[()\[\]{}]", " ", q)
     house = road = dong = ri = bld_dong = zipcode = None; san = False; terms = []
+    # [T051] house_adj — 번지 토큰이 그 번지가 붙을 대상(동/리/읍/면/N가/도로명 토큰)에 **직전 인접**했는가.
+    #   addr_intent 가 이 플래그를 요구한다. '역삼동 123-4'(참) vs '역삼동 에스테틱 001'(거짓 — 001 의
+    #   직전 토큰이 상호다). 단독 '산' 토큰은 동/로와 번지 사이에 오므로 인접성을 끊지 않는다.
+    house_adj = False; prev_anchor = False; zip_adj = False
     for t in re.split(r"[\s,]+", q):
         t = t.strip(".·;:'\"")                              # D3-R1 ②: 토큰 양끝 문장부호(꼬리 '.' 등)
         if not t: continue
-        if t == "산": san = True; continue                  # 단독 '산'(임야) 표기
+        if t == "산": san = True; continue                  # 단독 '산'(임야) 표기 — prev_anchor 유지
         if zipcode is None and re.fullmatch(r"\d{5}", t):    # 5자리 = 신우편번호 후보(번지보다 우선; 도로/동 동반 시 아래서 번지로 승격)
-            zipcode = t; continue
+            zip_adj = prev_anchor; zipcode = t; prev_anchor = False; continue
         m = re.fullmatch(r"(산)?(\d+)(?:-(\d+))?", t)        # 번지: '산12-3'·'산12'·'12-3'·'5'(산 접두 허용)
         if m:
             if m.group(1): san = True
             a, b = int(m.group(2)), int(m.group(3) or 0)
             if house is None and a <= 99999 and b <= 99999:  # 첫 유효 번지만 채택 + int4 범위 가드(오버플로 500 예방)
-                house = (a, b)
-            continue
+                house = (a, b); house_adj = prev_anchor      # [T051] 맨숫자 번지는 직전 토큰이 앵커일 때만 인접
+            prev_anchor = False; continue
         # 도로명+번지가 공백없이 붙은 토큰('7나길9'·'테헤란로152'·'과천대로7나길9') → 도로(로/길끝) + 끝번지 분리.
         # fullmatch+greedy 라 '로/길로 끝나는 부분 + 순수 끝번지'가 토큰 전체를 덮을 때만 매칭(단지명 오인 차단).
         mr = re.fullmatch(r"(.+(?:로|길))(\d+)(?:-(\d+))?", t)
@@ -765,11 +769,11 @@ def parse(q):
             road = _acc_road(road, rnorm(mr.group(1)))
             a, b = int(mr.group(2)), int(mr.group(3) or 0)
             if house is None and a <= 99999 and b <= 99999:
-                house = (a, b)
-            continue
+                house = (a, b); house_adj = True             # [T051] 도로명+번지 한 토큰 = 정의상 인접
+            prev_anchor = True; continue
         # 복합 도로명(상위 '○○대로/로' + 하위 'N길/N나길/N번길')을 띄어 입력하면 두 토큰으로 쪼개진다.
         # 덮어쓰면 마지막 '7나길'만 남아 0건 → 누적 연결로 '과천대로7나길'(정식 road_norm) 복원.
-        if re.search(r"(로|길)$", t): road = _acc_road(road, rnorm(t)); continue
+        if re.search(r"(로|길)$", t): road = _acc_road(road, rnorm(t)); prev_anchor = True; continue
         # 법정동/리/읍/면/'N가' 접미부와 번지가 공백없이 붙은 토큰('성동리263-8'·'청운동1'·'종로1가15')을
         # 접미부 + 번지로 분해한다. 위 도로(로/길) 규칙보다 반드시 뒤여야 '검단리1길'이 도로로 먼저 소비된다.
         # 접미 앞에 한글 1자 이상을 요구해 '101동5'(건물 동) 같은 토큰은 매칭되지 않게 한다.
@@ -777,7 +781,8 @@ def parse(q):
         if mj:
             if mj.group(2): san = True
             a, b = int(mj.group(3)), int(mj.group(4) or 0)
-            if house is None and a <= 99999 and b <= 99999: house = (a, b)
+            if house is None and a <= 99999 and b <= 99999:
+                house = (a, b); house_adj = True             # [T051] 동·리 접미+번지 한 토큰 = 정의상 인접
             t = mj.group(1)          # 접미부만 남겨 아래 dong/ri 판정으로 흘려보낸다
         ct = re.sub(r"[^\w가-힣]", "", t)
         if not ct: continue
@@ -785,7 +790,7 @@ def parse(q):
         # terms/dong 에서 분리: terms 에 남으면 이름경로 다중토큰 AND 가 POI 0건을 유발(POI엔 동번호 없음)하기 때문.
         if bld_dong is None and re.fullmatch(r"\d+동", ct):
             bld_dong = ct
-            continue
+            prev_anchor = False; continue                    # [T051] 건물 동번호는 번지의 앵커가 아니다
         # 법정동/리/읍/면/'N가'(종로1가 등) 토큰 → 지번경로 분기 단서(terms 에도 남겨 지역가산·이름검색에 활용)
         # ※ 읍/면 누락 시 농촌(읍·면) 지번질의 전면 0건이 되므로 반드시 포함. 숫자+동(아파트)은 위에서 이미 분리됨.
         if dong is None and len(ct) >= 2 and (re.search(r"(동|리|읍|면)$", ct) or re.search(r"\d가$", ct)):
@@ -795,17 +800,20 @@ def parse(q):
         # POI 경로를 가로챈다(실측 상호 충돌 20,078건). dong 의 의미·우선순위는 불변.
         elif ri is None and dong is not None and ct != dong and len(ct) >= 2 and ct.endswith("리"):
             ri = ct
+        # [T051] 앵커 판정은 dong/ri **변수 채움 여부가 아니라 토큰 형태**로 한다 — dong 이 이미
+        #   잡힌 뒤의 두 번째 동 토큰도 번지가 붙을 수 있는 대상이다. 술어는 dong 판정식과 동일.
+        prev_anchor = len(ct) >= 2 and bool(re.search(r"(동|리|읍|면)$", ct) or re.search(r"\d가$", ct))
         terms.append(ct)
     # 5자리 숫자가 도로/법정동과 함께면 우편번호가 아니라 번지(예 '○○로 10524') → house 로 승격.
     if zipcode is not None and house is None and (road or dong):
-        house = (int(zipcode), 0); zipcode = None
+        house = (int(zipcode), 0); zipcode = None; house_adj = zip_adj   # [T051] 승격분은 캡처 시점 인접성
     # 원본 대장에 도로명이 통짜로 반복된 행이 있다('… 방내시장길 32 방내시장길 32').
     # _acc_road 가 대부분 걸러내지만 표기가 미세하게 달라 통과한 잔여분을 정수배 반복이면 1회로 접는다.
     if road:
         mm = re.fullmatch(r"(.+?)\1+", road)
         if mm: road = mm.group(1)
     return {"road": road, "house": house, "terms": terms, "dong": dong, "ri": ri, "san": san,
-            "bld_dong": bld_dong, "zipcode": zipcode}
+            "bld_dong": bld_dong, "zipcode": zipcode, "house_adj": house_adj}
 
 
 def addr_intent(p):
@@ -820,23 +828,23 @@ def addr_intent(p):
 
     합성 질의(S1/S2)가 전부 이 형태이고, 실재 주소 질의에서도 0.08% 가 이 경로를 탄다.
 
-    ★ 알려진 한계 — **상호 검색이 항상 종전 그대로인 것은 아니다** [T047 검수 실측].
-      이름이 **' 숫자'로 끝나는** POI 는 그 숫자가 `parse()` 에서 `house` 로 잡히므로,
-      `<시도> <시군구> <동> <상호>` 형태로 물으면 `addr_intent` 가 **참**이 된다. 그 지역에
-      해당 번지 주소가 없으면 **찾던 그 상호까지 함께 억제된다**(빈 결과 + `note`).
-      검수 배터리 60 건 중 24 건에서 재현됐고 유지된 건은 0 건이다.
+    ★ 정밀화 이력 [T051, 2026-08-28] — T047 검수 6-1 의 오탐을 인접성 조건으로 해소했다.
+      T047 판(계획 §7 R1)은 `house ∧ (dong ∨ road)` 였고, 이름이 **' 숫자'로 끝나는** POI
+      (전수 2,450 행 = 0.049%)를 `<시도> <시군구> <동> <상호>` 로 물으면 그 숫자가 `house` 로
+      잡혀 **찾던 그 상호까지 억제**됐다(검수 배터리 60 건 중 24 건 소실). 지금 술어는
+      `parse()` 의 `house_adj` — **번지 토큰이 동/리/읍/면/N가/도로명 토큰의 직전 인접일 때만**
+      — 를 추가로 요구한다. `역삼동 123-4`(참) vs `역삼동 에스테틱 001`(거짓). 합성 질의
+      (S1/S2)와 실재 주소 질의는 전부 인접형이라 T047 회귀 축(S2 `addr>0` 0 유지 · 대조군
+      불변)은 구조적으로 보존된다. 단독 `산` 토큰(`가상리 산 25-1`)은 인접성을 끊지 않는다.
 
-      노출 범위: POI 5,000,876 행 중 이름이 ' 숫자'로 끝나는 것은 **2,450 행(0.049%)** 이고
-      대부분 원천의 일련번호 접미(`읍사무소 1`·`주차장 3`)라 사람이 치는 형태가 아니다.
-      층·호점·번출구·가 접미(`… 2층`·`… 2호점`·`… 2번출구`)는 `house` 로 파싱되지 않아
-      현실 질의 패턴 10 건에서는 **소실 0 건**이었다.
-
-      술어를 좁히는 것(번지 토큰이 동/도로명 토큰에 **인접**할 때만 참)은 설계 변경이고
-      전면 재측정이 필요해 **별도 태스크로 뗐다.** 여기서 임의로 바꾸지 말 것 —
-      계획 §7 R1 이 지정한 술어를 그대로 쓰고 있으며, 잔여 비용이 이 문단이다.
-      시험: `test_t047_nonaddr.TestAddrIntentKnownLimit`.
+    ★ 남는 한계 — 상호 **자체가** 리/동/로 로 끝나고 바로 뒤에 숫자가 오는 질의
+      (`투다리 3`)는 그 상호 토큰이 앵커 형태와 구분 불가라 여전히 참이다. 또 상호가
+      순수 숫자 하나인 POI 도 동 토큰 직후에 치면 참이 된다. 두 경우 모두 주소가
+      실재하면 강등(B1)이라 정보 손실이 없고, 주소 0 건일 때만 빈 결과가 된다.
+      시험: `test_t047_nonaddr.TestAddrIntentAdjacency`.
     """
-    return bool(p.get("house")) and bool(p.get("dong") or p.get("road"))
+    return (bool(p.get("house")) and bool(p.get("dong") or p.get("road"))
+            and bool(p.get("house_adj")))
 
 
 # ── 좌표 → 최근접 도로명주소(역지오코딩/주소부착) ──────────────────
