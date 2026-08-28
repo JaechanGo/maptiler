@@ -370,8 +370,11 @@ def cmd_measure(args):
     for no, expected in load_expected(args.xlsx):
         try:
             fwd = get("/geocode", q=expected)
+            if "results" in fwd:            # geocode/2 계약: 최상위가 아니라 results[0]
+                fwd = (fwd["results"] or [{}])[0]
             lat, lon = fwd["lat"], fwd["lon"]
-            ours = get("/reverse", lat=lat, lon=lon).get("jibun", "")
+            rev = get("/reverse", lat=lat, lon=lon)
+            ours = rev.get("jibun", "") or rev.get("address", {}).get("parcel", "")
         except Exception as exc:                       # noqa: BLE001
             bad.append((no, expected, f"<오류: {exc}>"))
             continue

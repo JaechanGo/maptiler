@@ -23,7 +23,7 @@ NFC = lambda s: unicodedata.normalize("NFC", s)
 
 # 한국 좌표 범위(build-localdata 가드와 동일)
 LON0, LON1, LAT0, LAT1 = 124.0, 132.0, 33.0, 39.0
-EXP_SIDO = 17  # 17개 시도
+EXP_SIDO = 16  # 16개 시도 — 2026 광주·전남 → 전남광주통합특별시 통합 반영(구 17)
 
 def q1(db, sql, *a):
     r = db.execute(sql, a).fetchone()
