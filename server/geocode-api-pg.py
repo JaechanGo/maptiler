@@ -859,18 +859,22 @@ def addr_at(cur, lon, lat, with_meta=False):
     거리는 바깥 SELECT 에서 계산한다 — LIMIT 1 서브쿼리 밖이라 ST_Distance 는 정확히 1행에
     대해서만 평가된다(안쪽 타깃리스트에 두면 KNN 주행 중 스캔되는 모든 행에서 평가될 수 있다).
     """
-    # geom && ST_Expand 는 Index Cond 로 내려가 KNN 주행범위를 묶는다(geography 캐스트한
-    # ST_DWithin 은 Filter 로만 걸려 반경 내 0건이면 인덱스 전체를 훑고 statement_timeout).
-    # 0.035°는 2.5km 의 경도 상한(위도 38.7°에서 0.0288°) 초과분 — 정확도는 ST_DWithin 이 보장.
+    # KNN 인덱스 순회를 유일한 스캔으로 강제한다 — 종전의 `geom && ST_Expand + ST_DWithin`
+    # 결합은 플래너가 KNN 대신 bbox Bitmap Scan + Gather(요청마다 병렬워커 fork)로 풀어
+    # 리 지역 실측 105ms(웜)였다. 순수 KNN LIMIT 8 은 같은 좌표 3ms — 후보가 항상 8행뿐이라
+    # "반경 내 0건이면 인덱스 전체를 훑고 statement_timeout" 하던 옛 함정도 원천 차단된다.
+    # 반경 2.5km 컷과 최종 순위는 바깥에서 geography 실거리로 판정한다(8행에만 측지 연산 —
+    # 度 단위 KNN 의 경도/위도 이방성으로 최근접 순위가 뒤집히는 경계 케이스를 함께 흡수).
     cur.execute(
-        """SELECT s.*, ST_Distance(s.geom::geography,
-                  ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS knn_dist_m
-           FROM (SELECT * FROM address
-                 WHERE kind='addr' AND geom IS NOT NULL
-                   AND geom && ST_Expand(ST_SetSRID(ST_MakePoint(%s,%s),4326), 0.035)
-                   AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, 2500)
-                 ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326) LIMIT 1) s""",
-        (lon, lat, lon, lat, lon, lat, lon, lat))
+        """SELECT * FROM (
+             SELECT s.*, ST_Distance(s.geom::geography,
+                    ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS knn_dist_m
+             FROM (SELECT * FROM address
+                   WHERE kind='addr' AND geom IS NOT NULL
+                   ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s,%s),4326) LIMIT 8) s) d
+           WHERE d.knn_dist_m <= 2500
+           ORDER BY d.knn_dist_m LIMIT 1""",
+        (lon, lat, lon, lat))
     r = cur.fetchone()
     if not with_meta:
         return addr_obj(r) if r else None
@@ -1511,15 +1515,18 @@ def reverse(cur, lon, lat, limit):
     address, address_source = apply_parcel_pip(
         cur, lon, lat, address, parcel_at(cur, lon, lat), knn_meta)
     pt = "ST_SetSRID(ST_MakePoint(%s,%s),4326)"
-    # addr_at 과 동일한 이유로 bbox 선행(0.25° > 20km 의 경도 상한 0.2299°).
+    # addr_at 과 같은 수술 — 종전 bbox(0.25°)+ST_DWithin 결합은 플래너가 KNN 을 버리고
+    # bbox Bitmap Scan 으로 풀어 산간 좌표 실측 수백 ms 였다(2026-08-28). 순수 KNN 으로
+    # limit 의 4배(≥32) 후보만 인덱스 순회하고, 20km 컷·최종 순위는 바깥 geography 실거리로.
+    knn_k = max(limit * 4, 32)
     cur.execute(
-        f"""SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat,
-                   ST_Distance(geom::geography, {pt}::geography) AS d FROM address
-            WHERE geom IS NOT NULL
-              AND geom && ST_Expand({pt}, 0.25)
-              AND ST_DWithin(geom::geography, {pt}::geography, 20000)
-            ORDER BY geom <-> {pt} LIMIT %s""",
-        (lon, lat, lon, lat, lon, lat, lon, lat, limit))
+        f"""SELECT * FROM (
+              SELECT s.*, ST_X(s.geom) AS lon, ST_Y(s.geom) AS lat,
+                     ST_Distance(s.geom::geography, {pt}::geography) AS d
+              FROM (SELECT * FROM address WHERE geom IS NOT NULL
+                    ORDER BY geom <-> {pt} LIMIT %s) s) t
+            WHERE t.d <= 20000 ORDER BY t.d LIMIT %s""",
+        (lon, lat, lon, lat, knn_k, limit))
     nearest = []
     for r in cur.fetchall():
         nm = addr_str(r) if r["kind"] == "addr" else r["name"]
