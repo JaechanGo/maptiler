@@ -598,7 +598,10 @@ def TARGETS():
         "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
-                 "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er"]),   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
+                 "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er",   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
+                 "--t018-disposed"]),   # [F1 2026-08-28·T045] T018 리 백필 처분 완료 — G0 해제 조건 5.
+                                        #   조건 1·2: ri_backfill_* 폐기 헤더·s3 하드게이트 폐기, 조건 3: load_geocode.py 는
+                                        #   ri/bcode 를 무가공 통과(확인), 조건 4: backfill-admin-codes.py PK6 세대 가드.
         # 리(legal-ri)는 if/else 가드로 감싼다 — 아직 한 번도 반입한 적이 없어 보통 디렉터리가 없다.
         #   · `&& … || echo` 로 쓰지 않는 이유: 디렉터리가 있는데 06 이 실패해도 rc 가 0 으로 덮여
         #     areas 단계가 '성공'으로 기록된다. if/else 는 06 의 rc 를 그대로 전파한다.

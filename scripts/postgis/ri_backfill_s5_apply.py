@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# [F1 처분 2026-08-28 · T045] 폐기(retired) — 실행 금지. main() 가드가 강제한다. 사유: ri_backfill_s3_todo.sql 헤더.
 """ri_backfill_s5_apply.py — T018 Phase 1 / S5. address.bcode 리 자리 배치 백필.
 
 _ri_backfill_todo 를 id 오름차순으로 청크 단위 UPDATE 한다. 약 674만 행.
@@ -90,6 +91,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="청크 경계만 계산하고 UPDATE 는 하지 않는다")
     ap.add_argument("--max-chunks", type=int, default=0, help="0 이면 전량. 시험 실행용")
     args = ap.parse_args()
+
+    # [F1 처분 2026-08-28 · T045] 폐기 가드 — PK6 재빌드(T043·T045)가 ri/bcode 를 원천에서
+    #   직접 싣는다. 백필 대상이 존재하지 않으며, 실행 시 old_bcode 원본이 오염될 수 있다.
+    print("F1 처분(2026-08-28·T045): ri 백필 파이프라인은 폐기됐다 — 실행 금지. 사유: ri_backfill_s3_todo.sql 헤더.", file=sys.stderr)
+    return 3
 
     conn = psycopg.connect(conninfo())
     conn.autocommit = True          # 트랜잭션은 BEGIN/COMMIT 으로 직접 관리한다(VACUUM 때문).
