@@ -12,6 +12,18 @@ dedup(is_primary)이 이미 geocode.sqlite `places`(lon/lat=4326)에 다 들어�
 
 연결은 libpq 환경변수(PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD). 기본 cuvia/cuvia@localhost:5433(맵 전용 컨테이너 호스트포트).
   PGPASSWORD=... scripts/postgis/load_geocode.py [--db ~/geocode-build/geocode.sqlite]
+
+[T049] 모드 2종:
+  --mode swap (기본)  : 서비스 무중단 테이블 스왑. 기존 테이블을 건드리지 않고 <t>_new 에
+                        적재·인덱싱·검증한 뒤 RENAME 한 순간만 잠근다. 실패해도 서비스 무손상.
+                        인덱스는 하드코딩이 아니라 **살아있는 pg_indexes/pg_statistic_ext 정의**를
+                        읽어 재생성한다(수동 추가 인덱스 5종 소실 사고의 재발 차단).
+      --phase address|poi   스왑은 한 번에 한 테이블만(디스크 피크 관리, address 먼저).
+      --dry-run             적재·인덱스·검증까지만 하고 스왑하지 않는다(<t>_new 잔류).
+      --finalize            스왑 후 검증을 통과한 뒤에만: (선택 --rollback-drill 로 롤백 실증)
+                            시퀀스 소유권 이전 → <t>_old DROP → 인덱스/제약/통계 정식명 환원.
+      --limit N             (스모크 전용) 앞 N 행만 — 강제로 dry-run 이 된다.
+  --mode truncate     : 종전 경로 그대로(TRUNCATE 후 재적재). 회귀 대비로 보존 — 운영에서 쓰지 마라.
 """
 import argparse, csv, os, re, subprocess, sys, tempfile, time
 
@@ -123,9 +135,293 @@ SELECT 'address' AS t, count(*) FROM address UNION ALL SELECT 'poi', count(*) FR
 """
 
 
+# ═══════════════════════ [T049] 테이블 스왑 모드 ═══════════════════════
+# 설계 근거: .team/tasks/049-*/task.md — TRUNCATE 경로는 실패 시 서비스 전멸 + 수동 추가
+# 인덱스 5종(sido/sigungu/emd trgm·postal·poi_tier)이 하드코딩 목록에 없어 조용히 소실됐다.
+# 스왑 모드는 (a) 원본 보존 (b) 인덱스를 라이브 카탈로그에서 복제 (c) 스왑 전 검증 게이트로
+# 세 결함을 구조적으로 막는다.
+
+INT_COLS = {"main_no", "sub_no", "is_primary"}
+
+PHASES = {
+    "address": {
+        "cols": ["kind","name","subtype","sido","sigungu","emd","ri","road","road_norm",
+                 "main_no","sub_no","bld","postal","haeng_dong","bd_mgt_sn","bcode","hcode",
+                 "phone","opened","jibun","cat1","cat2","source","is_primary","geom"],
+        "select": "SELECT kind,name,subtype,sido,sigungu,emd,ri,road,road_norm,"
+                  "main_no,sub_no,bld,postal,haeng_dong,bd_mgt_sn,bcode,hcode,"
+                  "phone,opened,jibun,cat1,cat2,source,is_primary,lon,lat FROM places",
+        "seq": "address_id_seq",
+    },
+    "poi": {
+        "cols": ["kind","name","subtype","cat1","cat2","source","is_primary","phone","geom"],
+        "select": "SELECT kind,name,subtype,cat1,cat2,source,is_primary,phone,lon,lat FROM places "
+                  "WHERE kind IN ('biz','facility') AND lon IS NOT NULL AND lat IS NOT NULL",
+        "seq": "poi_id_seq",
+    },
+}
+
+
+def psql(env, *cmds, capture=False):
+    """한 psql 세션에서 -c 를 순차 실행. SET 은 세션에 남는다(각 -c 는 별도 트랜잭션)."""
+    argv = ["psql", "-v", "ON_ERROR_STOP=1", "-q"]
+    for c in cmds:
+        argv += ["-c", c]
+    r = subprocess.run(argv, env=env, text=True,
+                       capture_output=capture)
+    if r.returncode != 0:
+        sys.exit(f"✗ psql 실패 (rc={r.returncode}): {cmds[0][:80]}…")
+    return r.stdout if capture else None
+
+
+def psql_q(env, query):
+    r = subprocess.run(["psql", "-tAc", query], env=env, text=True, capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"✗ psql 질의 실패: {r.stderr.strip()[:200]}")
+    return r.stdout.strip()
+
+
+def sqlite_expected(db_path, phase):
+    """원천(geocode.sqlite) 기준 기대값 — 게이트의 정답지. 읽기 전용."""
+    import sqlite3
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    if phase == "address":
+        total = con.execute("SELECT count(*) FROM places").fetchone()[0]
+        cross = dict(((k, s), n) for k, s, n in con.execute(
+            "SELECT kind, source, count(*) FROM places GROUP BY 1,2"))
+        ri = con.execute("SELECT count(*) FROM places WHERE kind='addr' AND ri IS NOT NULL AND ri<>''").fetchone()[0]
+        addr = con.execute("SELECT count(*) FROM places WHERE kind='addr'").fetchone()[0]
+    else:
+        total = con.execute("SELECT count(*) FROM places WHERE kind IN ('biz','facility') "
+                            "AND lon IS NOT NULL AND lat IS NOT NULL").fetchone()[0]
+        cross = dict(((k, s), n) for k, s, n in con.execute(
+            "SELECT kind, source, count(*) FROM places WHERE kind IN ('biz','facility') "
+            "AND lon IS NOT NULL AND lat IS NOT NULL GROUP BY 1,2"))
+        ri = addr = None
+    con.close()
+    return {"total": total, "cross": cross, "ri": ri, "addr": addr}
+
+
+def stream_copy(env, db_path, phase, table, limit=None):
+    """sqlite → psql \\copy STDIN 직송. 호스트 임시 CSV 를 만들지 않는다(디스크 피크 절감).
+
+    파리티 계약(기존 truncate 경로와 동일한 결과):
+      · text 빈값/NULL → '' (staging text 경로와 동일)
+      · int(main_no/sub_no/is_primary) 빈값 → NULL
+      · geom: lon·lat 둘 다 있을 때만 EWKT, 아니면 NULL
+    """
+    import sqlite3
+    spec = PHASES[phase]
+    sel = spec["select"] + (f" LIMIT {int(limit)}" if limit else "")
+    ncols = len(spec["cols"])
+    copy = (f"\\copy {table} ({','.join(spec['cols'])}) "
+            "FROM STDIN WITH (FORMAT csv, NULL '\\N')")
+    proc = subprocess.Popen(
+        ["psql", "-v", "ON_ERROR_STOP=1", "-q",
+         "-c", "SET synchronous_commit = off", "-c", copy],
+        env=env, stdin=subprocess.PIPE, text=True)
+    w = csv.writer(proc.stdin)
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    cur = con.execute(sel)
+    n = 0
+    while True:
+        rows = cur.fetchmany(50000)
+        if not rows:
+            break
+        out = []
+        for r in rows:
+            lon, lat = r[-2], r[-1]
+            vals = []
+            for name, v in zip(spec["cols"][:-1], r[:-2]):
+                if name in INT_COLS:
+                    vals.append("\\N" if v in (None, "") else v)
+                else:
+                    vals.append("" if v is None else v)
+            vals.append("\\N" if lon in (None, "") or lat in (None, "")
+                        else f"SRID=4326;POINT({lon} {lat})")
+            assert len(vals) == ncols
+            out.append(vals)
+        w.writerows(out)
+        n += len(rows)
+        if n % 1000000 < 50000:
+            print(f"      … {n:,} rows", file=sys.stderr)
+    con.close()
+    proc.stdin.close()
+    if proc.wait() != 0:
+        sys.exit("✗ copy(STDIN) 실패")
+    return n
+
+
+def live_index_defs(env, table):
+    """살아있는 카탈로그에서 2차 인덱스 + 확장통계 DDL 을 뜬다. pkey 는 제약으로 별도 생성."""
+    idefs = [l for l in psql_q(env,
+        f"SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='{table}' "
+        f"AND indexname <> '{table}_pkey' ORDER BY indexname").splitlines() if l.strip()]
+    sdefs = [l for l in psql_q(env,
+        f"SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxrelid='{table}'::regclass"
+    ).splitlines() if l.strip()]
+    return idefs, sdefs
+
+
+def _to_new(ddl, table):
+    """인덱스/통계 DDL 을 <table>_new 대상·<name>_new 명칭으로 변환."""
+    m = re.match(r"CREATE (UNIQUE )?INDEX (\S+) ON ", ddl)
+    if m:
+        ddl = ddl.replace(f"CREATE {m.group(1) or ''}INDEX {m.group(2)} ON ",
+                          f"CREATE {m.group(1) or ''}INDEX {m.group(2)}_new ON ", 1)
+    m2 = re.match(r"CREATE STATISTICS (\S+) ", ddl)
+    if m2:
+        ddl = ddl.replace(f"CREATE STATISTICS {m2.group(1)} ",
+                          f"CREATE STATISTICS {m2.group(1)}_new ", 1)
+    return (ddl.replace(f" ON public.{table} USING ", f" ON public.{table}_new USING ")
+               .replace(f" FROM {table}", f" FROM {table}_new")
+               .replace(f" FROM public.{table}", f" FROM public.{table}_new"))
+
+
+def cmd_swap(args, env):
+    phase, table = args.phase, args.phase
+    new, old = f"{table}_new", f"{table}_old"
+    t0 = time.time()
+
+    if psql_q(env, f"SELECT to_regclass('public.{old}') IS NOT NULL") == "t":
+        sys.exit(f"✗ {old} 가 이미 있다 — 이전 스왑이 finalize 되지 않았다. 검증 후 --finalize 먼저.")
+    if psql_q(env, f"SELECT to_regclass('public.{new}') IS NOT NULL") == "t":
+        sys.exit(f"✗ {new} 가 이미 있다 — 잔재를 확인하고 수동 DROP 후 재시도하라.")
+
+    print(f"[0/5] 기대값 산출(원천 sqlite, 읽기전용) …", file=sys.stderr)
+    exp = sqlite_expected(args.db, phase)
+    cur_total = int(psql_q(env, f"SELECT count(*) FROM {table}"))
+    print(f"      기대 {exp['total']:,} rows · 현행 {table} {cur_total:,} rows", file=sys.stderr)
+
+    print(f"[1/5] {new} 생성(LIKE — 컬럼·기본값·생성컬럼 복제) + 적재 …", file=sys.stderr)
+    psql(env, f"CREATE TABLE {new} (LIKE {table} INCLUDING DEFAULTS INCLUDING GENERATED)")
+    n = stream_copy(env, args.db, phase, new, args.limit)
+    got = int(psql_q(env, f"SELECT count(*) FROM {new}"))
+    print(f"      적재 {n:,} → 테이블 {got:,}", file=sys.stderr)
+    if got != n:
+        sys.exit(f"✗ 적재 행수 불일치: 스트림 {n:,} vs 테이블 {got:,}")
+
+    print(f"[2/5] 인덱스 재생성(라이브 카탈로그 복제) …", file=sys.stderr)
+    idefs, sdefs = live_index_defs(env, table)
+    mwm = os.environ.get("GEOCODE_MAINT_MEM", "2GB")
+    if not re.fullmatch(r"\d+[kKmMgG][bB]?", mwm):
+        mwm = "2GB"
+    mpw = str(int(os.environ.get("GEOCODE_MAINT_WORKERS", "4")))
+    for d in idefs:
+        nd = _to_new(d, table)
+        print(f"      · {nd.split(' ON ')[0][:70]}", file=sys.stderr)
+        psql(env, f"SET maintenance_work_mem = '{mwm}'",
+                  f"SET max_parallel_maintenance_workers = {mpw}", nd)
+    psql(env, f"ALTER TABLE {new} ADD CONSTRAINT {new}_pkey PRIMARY KEY (id)")
+    for d in sdefs:
+        psql(env, _to_new(d, table))
+    psql(env, f"ANALYZE {new}")
+
+    print(f"[3/5] 스왑 전 검증 게이트 …", file=sys.stderr)
+    fails = []
+    if args.limit is None:
+        if got != exp["total"]:
+            fails.append(f"총행수 {got:,} ≠ 기대 {exp['total']:,}")
+        if got < int(cur_total * 0.95):
+            fails.append(f"총행수 {got:,} < 현행 95% ({int(cur_total*0.95):,})")
+        cross_new = {}
+        for line in psql_q(env, f"SELECT kind||'|'||source||'|'||count(*) FROM {new} GROUP BY kind, source").splitlines():
+            k, s2, c = line.rsplit("|", 2)
+            cross_new[(k, s2)] = int(c)
+        if cross_new != exp["cross"]:
+            miss = set(exp["cross"]) - set(cross_new)
+            diff = {k: (exp["cross"].get(k), cross_new.get(k))
+                    for k in set(exp["cross"]) | set(cross_new)
+                    if exp["cross"].get(k) != cross_new.get(k)}
+            fails.append(f"kind×source 교차표 불일치: {dict(list(diff.items())[:4])}" +
+                         (f" · 소실 {miss}" if miss else ""))
+    n_idx_old = int(psql_q(env, f"SELECT count(*) FROM pg_indexes WHERE tablename='{table}'"))
+    n_idx_new = int(psql_q(env, f"SELECT count(*) FROM pg_indexes WHERE tablename='{new}'"))
+    if n_idx_new != n_idx_old:
+        fails.append(f"인덱스 수 {n_idx_new} ≠ 현행 {n_idx_old}")
+    if phase == "address" and args.limit is None:
+        ri_new = int(psql_q(env, f"SELECT count(*) FROM {new} WHERE kind='addr' AND ri IS NOT NULL AND ri<>''"))
+        print(f"      ri 채움: {ri_new:,}/{exp['addr']:,} ({ri_new/max(exp['addr'],1):.2%}) — 기대 {exp['ri']:,}", file=sys.stderr)
+        if ri_new != exp["ri"]:
+            fails.append(f"ri 채움 {ri_new:,} ≠ 원천 {exp['ri']:,}")
+    if fails:
+        print(f"✗ 게이트 실패 — 스왑하지 않는다. {new} 는 진단용으로 남긴다:", file=sys.stderr)
+        for f in fails:
+            print(f"    · {f}", file=sys.stderr)
+        sys.exit(3)
+    print(f"      게이트 통과: 행수·교차표·인덱스 {n_idx_new}종 일치", file=sys.stderr)
+
+    if args.dry_run or args.limit is not None:
+        print(f"[4/5] --dry-run/--limit — 스왑 생략. {new} 잔류(검증·폐기는 운영자 몫). "
+              f"{time.time()-t0:.0f}s", file=sys.stderr)
+        return
+
+    print(f"[4/5] 스왑(RENAME 트랜잭션) …", file=sys.stderr)
+    ts = time.time()
+    psql(env, f"BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE; "
+              f"ALTER TABLE {table} RENAME TO {old}; "
+              f"ALTER TABLE {new} RENAME TO {table}; COMMIT;")
+    dt = time.time() - ts
+    now = int(psql_q(env, f"SELECT count(*) FROM {table}"))
+    print(f"[5/5] 스왑 완료 — 다운타임(락 구간) {dt*1000:.0f}ms · 현행 {table} {now:,} rows · "
+          f"{old} 보존(롤백 경로) · 총 {time.time()-t0:.0f}s", file=sys.stderr)
+    print(f"      다음: 외부 검증(§4.2) 통과 후 --finalize 로 {old} 정리", file=sys.stderr)
+
+
+def cmd_finalize(args, env):
+    phase, table = args.phase, args.phase
+    old, seq = f"{table}_old", PHASES[phase]["seq"]
+    if psql_q(env, f"SELECT to_regclass('public.{old}') IS NOT NULL") != "t":
+        sys.exit(f"✗ {old} 가 없다 — finalize 할 것이 없다.")
+
+    if args.rollback_drill:
+        print("[드릴] 롤백 실증: 역스왑 → 확인 → 재스왑 …", file=sys.stderr)
+        ts = time.time()
+        psql(env, f"BEGIN; ALTER TABLE {table} RENAME TO {table}_tmp_drill; "
+                  f"ALTER TABLE {old} RENAME TO {table}; COMMIT;")
+        back = int(psql_q(env, f"SELECT count(*) FROM {table}"))
+        psql(env, f"BEGIN; ALTER TABLE {table} RENAME TO {old}; "
+                  f"ALTER TABLE {table}_tmp_drill RENAME TO {table}; COMMIT;")
+        fwd = int(psql_q(env, f"SELECT count(*) FROM {table}"))
+        print(f"[드릴] 완료 {time.time()-ts:.2f}s — 구판 {back:,} ↔ 신판 {fwd:,} rows. 롤백 경로 실증됨",
+              file=sys.stderr)
+
+    print(f"[1/3] 시퀀스 소유권 이전({seq} → {table}.id) — {old} DROP 의 연쇄삭제 차단", file=sys.stderr)
+    psql(env, f"ALTER SEQUENCE {seq} OWNED BY {table}.id")
+    print(f"[2/3] {old} DROP …", file=sys.stderr)
+    psql(env, f"DROP TABLE {old}")
+    print(f"[3/3] 인덱스·제약·통계 정식명 환원 …", file=sys.stderr)
+    for line in psql_q(env, f"SELECT indexname FROM pg_indexes WHERE tablename='{table}' "
+                            f"AND indexname LIKE '%\\_new'").splitlines():
+        nm = line.strip()
+        if not nm:
+            continue
+        if nm == f"{table}_new_pkey":
+            psql(env, f"ALTER TABLE {table} RENAME CONSTRAINT {table}_new_pkey TO {table}_pkey")
+        else:
+            psql(env, f"ALTER INDEX {nm} RENAME TO {nm[:-4]}")
+    for line in psql_q(env, "SELECT stxname FROM pg_statistic_ext WHERE "
+                            f"stxrelid='{table}'::regclass AND stxname LIKE '%\\_new'").splitlines():
+        nm = line.strip()
+        if nm:
+            psql(env, f"ALTER STATISTICS {nm} RENAME TO {nm[:-4]}")
+    psql(env, f"ANALYZE {table}")
+    n_idx = int(psql_q(env, f"SELECT count(*) FROM pg_indexes WHERE tablename='{table}'"))
+    print(f"완료: {table} 인덱스 {n_idx}종 · finalize 종료", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "geocode.sqlite"))
+    ap.add_argument("--mode", choices=["swap", "truncate"], default="swap",
+                    help="swap(기본)=무중단 테이블 스왑 / truncate=종전 경로(운영 사용 금지)")
+    ap.add_argument("--phase", choices=["address", "poi"],
+                    help="swap 모드 필수 — 한 번에 한 테이블(디스크 피크 관리, address 먼저)")
+    ap.add_argument("--dry-run", action="store_true", help="swap: 적재·인덱스·검증까지만")
+    ap.add_argument("--finalize", action="store_true",
+                    help="swap 후 검증 통과 시: (--rollback-drill) → <t>_old DROP → 정식명 환원")
+    ap.add_argument("--rollback-drill", action="store_true", help="finalize 직전 롤백 실증(역스왑↔재스왑)")
+    ap.add_argument("--limit", type=int, default=None, help="스모크 전용 — 강제 dry-run")
     args = ap.parse_args()
     if not os.path.exists(args.db):
         sys.exit(f"geocode.sqlite 없음: {args.db} (09-gen-geocode.py 먼저)")
@@ -135,6 +431,16 @@ def main():
     env.setdefault("PGUSER", "cuvia"); env.setdefault("PGDATABASE", "cuvia")
     env.setdefault("PGPASSWORD", "cuvia")
 
+    if args.mode == "swap":
+        if not args.phase:
+            sys.exit("✗ --mode swap 은 --phase address|poi 가 필수다 (address 먼저)")
+        if args.finalize:
+            cmd_finalize(args, env)
+        else:
+            cmd_swap(args, env)
+        return
+
+    # ── 이하 종전 truncate 경로(보존 — 운영에서 쓰지 마라) ──
     t0 = time.time()
     tmpd = os.path.join(os.path.dirname(os.path.abspath(args.db)), "tmp")
     os.makedirs(tmpd, exist_ok=True)
