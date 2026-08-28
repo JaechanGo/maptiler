@@ -391,8 +391,10 @@ def cmd_finalize(args, env):
     print(f"[2/3] {old} DROP …", file=sys.stderr)
     psql(env, f"DROP TABLE {old}")
     print(f"[3/3] 인덱스·제약·통계 정식명 환원 …", file=sys.stderr)
+    # PK 제약명 {table}_new_pkey 는 접미가 _pkey 라 '%\_new' 에 안 걸린다 — 명시 포함하지
+    # 않으면 매 스왑마다 이름 충돌(relation already exists)로 [2/5] 가 죽는다.
     for line in psql_q(env, f"SELECT indexname FROM pg_indexes WHERE tablename='{table}' "
-                            f"AND indexname LIKE '%\\_new'").splitlines():
+                            f"AND (indexname LIKE '%\\_new' OR indexname = '{table}_new_pkey')").splitlines():
         nm = line.strip()
         if not nm:
             continue
