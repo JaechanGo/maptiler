@@ -112,8 +112,13 @@
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
     "pick": "max"
    },
-   "collect": {"method": "vworld_session", "ds_id": "18", "level": "sido", "file_nos": [],
-    "list_url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL"},
+   "collect": {
+    "method": "vworld_session",
+    "ds_id": "18",
+    "level": "sido",
+    "file_nos": [],
+    "list_url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL"
+   },
    "default_collect": false,
    "build_input": {
     "dest": "staged/gis",
@@ -129,7 +134,12 @@
    "period_fmt": "YYYY-MM-DD",
    "cycle": "수시",
    "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh(파티션은 파일명 아닌 PNU 앞2자리로 라우팅). fileNo 는 쿠키로 목록페이지에서 자동발견. ⚠ level=sido(시도 통합 1파일/시도)는 대형 시도(경기·충북·충남·전남·경북·경남·전북) 통합파일이 빈 응답(0바이트)이라 ~10시도만 수집됨 → level=sigungu(시군구 단위 ~250파일 전수)로 전환해 전국 커버. 다운로드 엔드포인트=downloadResourceFile.do?ds_id=&fileNo=.",
-   "collect": {"method": "vworld_session", "ds_id": "30563", "level": "sigungu", "file_nos": []},
+   "collect": {
+    "method": "vworld_session",
+    "ds_id": "30563",
+    "level": "sigungu",
+    "file_nos": []
+   },
    "default_collect": false,
    "build_input": {
     "dest": "staged/parcel",
@@ -217,7 +227,12 @@
     "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
     "pick": "max"
    },
-   "collect": {"method": "vworld_session", "ds_id": "30505", "level": "all", "file_nos": []},
+   "collect": {
+    "method": "vworld_session",
+    "ds_id": "30505",
+    "level": "all",
+    "file_nos": []
+   },
    "default_collect": false,
    "build_input": {
     "dest": "staged/lawd_code_v2",
@@ -253,9 +268,17 @@
    "period_fmt": "YYYY-MM-DD",
    "cycle": "연",
    "note": "관서명+도로명주소(좌표無→지오코딩 단계서 채움). PostGIS public_facility(kind=police). 무인증 datago_filedown(fileDetailSn=1). 적재: load_facility.py --kind police. ※키워드검색의 15054711(폐PK) 사용금지.",
-   "collect": {"method": "datago_filedown", "publicDataPk": "15077036", "fileDetailSn": "1"},
+   "collect": {
+    "method": "datago_filedown",
+    "publicDataPk": "15077036",
+    "fileDetailSn": "1"
+   },
    "default_collect": false,
-   "build_input": {"dest": "staged/facility_src/police", "extract": null, "into": "dir"}
+   "build_input": {
+    "dest": "staged/facility_src/police",
+    "extract": null,
+    "into": "dir"
+   }
   },
   {
    "key": "fire_station",
@@ -265,9 +288,17 @@
    "period_fmt": "YYYY-MM-DD",
    "cycle": "수시",
    "note": "119안전센터명+주소. ZIP→연도별 CSV(load_facility 가 최신연도 선택). PostGIS public_facility(kind=fire_station). 무인증. ※소방관서현황 15033759(시·도 집계표)는 POI 아님—금지.",
-   "collect": {"method": "datago_filedown", "publicDataPk": "15065056", "fileDetailSn": "1"},
+   "collect": {
+    "method": "datago_filedown",
+    "publicDataPk": "15065056",
+    "fileDetailSn": "1"
+   },
    "default_collect": false,
-   "build_input": {"dest": "staged/facility_src/fire_station", "extract": "zip", "into": "dir"}
+   "build_input": {
+    "dest": "staged/facility_src/fire_station",
+    "extract": "zip",
+    "into": "dir"
+   }
   },
   {
    "key": "aed",
@@ -277,7 +308,11 @@
    "period_fmt": "YYYY-MM-DD",
    "cycle": "수시",
    "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선. ※업로드분은 load-all.sh facility 단계가 디렉토리명→--kind aed 로 자동 적재(soft-wired).",
-   "build_input": {"dest": "staged/facility_src/aed", "extract": null, "into": "dir"}
+   "build_input": {
+    "dest": "staged/facility_src/aed",
+    "extract": null,
+    "into": "dir"
+   }
   },
   {
    "key": "style",
@@ -291,6 +326,81 @@
     "dest": "staged/style",
     "extract": null,
     "into": "file"
+   }
+  },
+  {
+   "key": "juso_entrance",
+   "name": "도로명주소 출입구 정보 (전체분)",
+   "category": "주소",
+   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "default_collect": false,
+   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명주소 기준 주(보조)출입구 좌표(집합건물 주소 단위). 내비DB 내장 match_rs_entrc 와의 중복성 판정 필요 — 판정 후 지오코딩 정밀화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+   "planned_build_input": {
+    "dest": "staged/juso_entrance",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "juso_building_shp",
+   "name": "도로명주소 건물 도형 (전체분)",
+   "category": "건물",
+   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "default_collect": false,
+   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명주소 건물 도형+출입구+연결선. VWorld AL_D010 의 신개발지구 신축 공백(과천지식정보타운 등) 보완 원천 — building 적재 병합이 1순위 편입 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+   "planned_build_input": {
+    "dest": "staged/juso_building_shp",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "juso_building_dong",
+   "name": "건물군 내 상세주소 동 도형 (전체분)",
+   "category": "건물",
+   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "default_collect": false,
+   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 집합건물 내 동(棟) 단위 도형. 아파트 동 표시·상세주소 검색 고도화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+   "planned_build_input": {
+    "dest": "staged/juso_building_dong",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "juso_thing_shp",
+   "name": "사물주소 시설 도형 (전체분)",
+   "category": "시설",
+   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "default_collect": false,
+   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명+기초번호 기반 사물주소 시설 도형. facility 축 보강 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+   "planned_build_input": {
+    "dest": "staged/juso_thing_shp",
+    "extract": "zip",
+    "into": "dir"
+   }
+  },
+  {
+   "key": "juso_zone",
+   "name": "구역의 도형 (법정·행정·기초구역, 전체분)",
+   "category": "행정경계",
+   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+   "period_fmt": "YYYYMM",
+   "cycle": "월",
+   "default_collect": false,
+   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 법정구역·행정구역·기초구역(우편)·지점번호표기의무지역 경계. boundary_* 계열 보강 및 기초구역(우편번호) 폴리곤 신규 축 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+   "planned_build_input": {
+    "dest": "staged/juso_zone",
+    "extract": "zip",
+    "into": "dir"
    }
   }
  ]
