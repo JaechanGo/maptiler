@@ -57,6 +57,8 @@ postgres:
         name: text
         render_height: float4
         levels: int4
+        id: int8               # 행 고유키 — 스타일 스튜디오 '완전 개별 객체' 선택 필터용
+                               # (name/levels/render_height 조합은 같은 단지 동들이 겹쳐 근사임)
 
     public_facility:           # 병원/경찰/소방/AED/대피소
       schema: public
