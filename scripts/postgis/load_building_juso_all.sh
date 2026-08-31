@@ -63,3 +63,5 @@ done
 rmdir "$WORK" 2>/dev/null || true
 
 [ "$FAIL" = "0" ] && echo "OK: juso 건물 패치 완료" || { echo "✗ 일부 시도 실패 — 로그 확인" >&2; exit 1; }
+# 단독 실행(월간 패치 등) 시 캐시 3겹 교체를 잊지 말 것 — load-all 경유면 거기서 체인된다.
+echo "→ 단독 실행이었다면 다음을 꼭 실행: scripts/postgis/refresh_tile_cache.sh (martin L1·L2·스타일 버전)"

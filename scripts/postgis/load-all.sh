@@ -195,6 +195,16 @@ if has facility; then
   else echo "  (건너뜀) 공공시설 CSV 폴더 없음: $FSRC"; fi
 fi
 
+# 6) 타일 캐시 3겹 교체 — 데이터가 갈렸는데 캐시(martin L1·게이트웨이 L2·브라우저)가 옛 세대를
+#    서빙하는 사고 방지(2026-08-31 실측). 서빙 스택 미가동 호스트에선 스스로 건너뛴다(비치명).
+#    opt-out: TILECACHE_SKIP=1 (연속 부분 적재 중 마지막 1회만 돌리고 싶을 때).
+if [ -z "${TILECACHE_SKIP:-}" ]; then
+  run "$HERE/refresh_tile_cache.sh" \
+    || { echo "  ✗ 타일 캐시 교체 실패 — 수동 재실행: $HERE/refresh_tile_cache.sh" >&2; fail=1; }
+else
+  echo "  (건너뜀) TILECACHE_SKIP=1 — 캐시 교체는 수동으로: $HERE/refresh_tile_cache.sh"
+fi
+
 echo; echo "━━ 적재 요약 ━━"
 psql -P pager=off -c "
   SELECT 'admin_boundary' t, count(*) FROM admin_boundary
