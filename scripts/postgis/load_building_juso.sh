@@ -142,7 +142,13 @@ SELECT DISTINCT ON (m.fid)
    -- 적재된 것이므로 건물군을 버린다. 키 의미에 의존하지 않아 원천 변화에도 안전하다.
    AND NOT EXISTS (SELECT 1 FROM _stg_juso_dong d
                     WHERE d.geom && m.geom
-                      AND ST_Contains(m.geom, ST_PointOnSurface(d.geom)));
+                      AND ST_Contains(m.geom, ST_PointOnSurface(d.geom)))
+   -- juso 동도형에 없는 단지(AL_D010 에만 동이 있는 곳)도 걸러야 한다 — 동도형 대조만으로는
+   -- 전국 1,063건의 단지 덮개가 통과했다(과천 원문동 등 실측). 기존 building 대표점이
+   -- 3개 이상 들어 있는 건물군 = 이미 동 단위로 존재하는 단지의 덮개다.
+   AND (SELECT count(*) FROM building bb
+         WHERE bb.sido_cd = '$SIDO' AND bb.geom && m.geom
+           AND ST_Contains(m.geom, ST_PointOnSurface(bb.geom))) < 3;
 CREATE INDEX ON _stg_juso_cand USING GIST(geom);
 ANALYZE _stg_juso_cand;
 
