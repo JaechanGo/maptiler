@@ -1105,7 +1105,7 @@ OVERRIDE_LAYERS = {
     "poi-label": {"name": "str", "cat1": "str"},
     "place-label": {"name": "str"}, "dong-label": {"name": "str"},
 }
-_OVR_OPS = {"int": ("==", ">=", "<"), "str": ("==", "prefix")}
+_OVR_OPS = {"int": ("==", ">=", "<", "any"), "str": ("==", "prefix", "any")}   # any=무조건 참(레이어 전체)
 _OVR_PAINT = {   # 레이어 type → (color, opacity, width) paint prop
     "fill": ("fill-color", "fill-opacity", None),
     "fill-extrusion": ("fill-extrusion-color", "fill-extrusion-opacity", None),
@@ -1137,6 +1137,9 @@ def sanitize_overrides(ovr):
                 continue
             op = c.get("op") or "=="
             if op not in _OVR_OPS[t]:
+                continue
+            if op == "any":                       # 레이어 전체 — 값 불요
+                conds.append({"key": c["key"], "op": "any", "value": 0})
                 continue
             v = c.get("value")
             if t == "int":
@@ -1171,6 +1174,8 @@ def sanitize_overrides(ovr):
 
 def _ovr_cond_expr(c):
     g = ["get", c["key"]]
+    if c["op"] == "any":
+        return ["==", 1, 1]
     if c["op"] == "prefix":
         return ["==", ["slice", ["coalesce", g, ""], 0, len(c["value"])], c["value"]]
     if c["op"] in (">=", "<"):

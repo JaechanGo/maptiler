@@ -858,25 +858,27 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 
  // ══ 객체 클릭 편집(부분 오버라이드) — 서버 apply_overrides 와 대칭(제외+클론) ══
  const OVRMETA={
-  'Building 3D':{label:'건물(3D)',color:'fill-extrusion-color',opacity:'fill-extrusion-opacity'},
-  'building-2d':{label:'건물(2D)',color:'fill-color',opacity:'fill-opacity'},
-  'road-motorway':{label:'도로(고속)',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'road-primary':{label:'도로(주간선)',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'road-secondary':{label:'도로(보조간선)',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'road-minor':{label:'도로(소로)',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'Building 3D':{label:'건물(3D)',color:'fill-extrusion-color',opacity:'fill-extrusion-opacity',theme:['building3d','building2d']},
+  'building-2d':{label:'건물(2D)',color:'fill-color',opacity:'fill-opacity',theme:['building2d','building3d']},
+  'road-motorway':{label:'도로(고속)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-primary':{label:'도로(주간선)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-secondary':{label:'도로(보조간선)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-minor':{label:'도로(소로)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
   'railway':{label:'철도',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'water':{label:'물·호수',color:'fill-color',opacity:'fill-opacity'},
-  'waterway':{label:'물길',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'landcover':{label:'산·녹지',color:'fill-color',opacity:'fill-opacity'},
-  'park':{label:'공원',color:'fill-color',opacity:'fill-opacity'},
+  'water':{label:'물·호수',color:'fill-color',opacity:'fill-opacity',theme:['water']},
+  'waterway':{label:'물길',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['water']},
+  'landcover':{label:'산·녹지',color:'fill-color',opacity:'fill-opacity',theme:['greenery']},
+  'park':{label:'공원',color:'fill-color',opacity:'fill-opacity',theme:['greenery']},
+  'boundary':{label:'행정경계',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['boundary']},
   'parcel-line':{label:'필지 경계',color:'line-color',opacity:'line-opacity',width:'line-width'},
-  'poi-label':{label:'POI 라벨',color:'text-color',opacity:'text-opacity'},
-  'place-label':{label:'지명 라벨',color:'text-color',opacity:'text-opacity'},
-  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity'}};
- const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
+  'poi-label':{label:'POI 라벨',color:'text-color',opacity:'text-opacity',theme:['poilabel']},
+  'place-label':{label:'지명 라벨',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity',theme:['donglabel']}};
+ const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',rail:'철도',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
  const ovrKo=v=>OVRCLS[v]||v;
  let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[];
  function ovrCondExpr(c){const g=['get',c.key];
+   if(c.op==='any')return ['==',1,1];
    if(c.op==='prefix')return ['==',['slice',['coalesce',g,''],0,c.value.length],c.value];
    if(c.op==='>='||c.op==='<')return [c.op,['coalesce',g,-1],c.value];
    return ['==',['coalesce',g,typeof c.value==='string'?'':-1],c.value];}
@@ -912,7 +914,9 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      if(o.width!=null&&mm.width) map.setPaintProperty(cloneDef.id,mm.width,o.width);
      (clones[lid]=clones[lid]||[]).push(cloneDef.id); });
  }
- function ovrScopeOptions(f){const lid=f.layer.id,p=f.properties,o=[];
+ // 범위 옵션 — 시연 페이지와 동일 계층: 완전개별 → 객체그룹 → 유형그룹 → 전체.
+ //  conds 형 = 오버라이드(부분), theme 형 = 기존 테마 색·투명도와 연동(색상 탭과 동일 대상).
+ function ovrScopeOptions(f){const lid=f.layer.id,p=f.properties,mm=OVRMETA[lid],o=[];
    const push=(label,conds,tag)=>o.push({label,conds,tag});
    if(lid==='Building 3D'||lid==='building-2d'){
      if(p.id!=null)push('이 동만 — 완전 개별',[{key:'id',value:p.id}],'개별');
@@ -921,20 +925,45 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      if(lv>=15)push('같은 층수대 — 고층(15층↑)',[{key:'levels',op:'>=',value:15}],'유형그룹');
      else if(lv>=5)push('같은 층수대 — 중층(5~14층)',[{key:'levels',op:'>=',value:5},{key:'levels',op:'<',value:15}],'유형그룹');
      else push('같은 층수대 — 저층(4층↓)',[{key:'levels',op:'<',value:5}],'유형그룹');
-   } else if(/^road-/.test(lid)||lid==='railway'){
+   } else if(/^road-/.test(lid)){
      if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
+     push('이 등급 전체 — '+mm.label,[{key:'class',op:'any'}],'유형그룹');
+   } else if(lid==='railway'){
+     push('철도 전체',[{key:'class',op:'any'}],'유형그룹');
    } else if(lid==='landcover'||lid==='park'||lid==='water'||lid==='waterway'){
      if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
    } else if(lid==='parcel-line'){
      if(p.pnu){push('이 필지만 — '+p.pnu,[{key:'pnu',value:String(p.pnu)}],'개별');
        push('같은 법정동 — '+String(p.pnu).slice(0,10),[{key:'pnu',op:'prefix',value:String(p.pnu).slice(0,10)}],'객체그룹');}
+     push('필지 전체',[{key:'pnu',op:'any'}],'유형그룹');
    } else if(lid==='poi-label'){
      if(p.name)push('이 POI만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
      if(p.cat1)push('같은 카테고리 — '+p.cat1,[{key:'cat1',value:String(p.cat1)}],'객체그룹');
    } else if(lid==='place-label'||lid==='dong-label'){
      if(p.name)push('이 라벨만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
    }
+   if(mm.theme) o.push({label:(mm.theme[0]==='road'?'도로 전체(4등급)':mm.theme[0]==='greenery'?'산·녹지·공원 전체':mm.theme[0]==='water'?'물 전체(면+물길)':mm.theme.length>1?'건물 전체(2D+3D)':OVRMETA[lid].label+' 전체')+' — 테마 색',theme:mm.theme,tag:'전체'});
    return o;}
+ // ── 선택 하이라이트 — 모달 열려 있는 동안 노란 테두리(범위 바꾸면 따라감) ──
+ function ovrHLClear(){['ovr-hl','ovr-hl-pt'].forEach(id=>{if(map.getLayer(id))map.removeLayer(id);});}
+ function ovrHLShow(){ ovrHLClear(); if(!ovrCur)return;
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
+   const op=ovrOpts[+sel.value]; if(!op)return;
+   const lid=ovrCur.layer.id;
+   const base=map.getStyle().layers.find(l=>l.id===lid); if(!base)return;
+   let cond=null;
+   if(op.conds){const cs=op.conds.map(ovrCondExpr);cond=cs.length===1?cs[0]:['all',...cs];}
+   const bf=ovrBaseF[lid]!==undefined?ovrBaseF[lid]:base.filter;
+   const filt=cond?(bf?['all',bf,cond]:cond):(bf||null);
+   if(base.type==='symbol'||base.type==='circle'){
+     const def={id:'ovr-hl-pt',type:'circle',source:base.source,paint:{'circle-color':'rgba(0,0,0,0)','circle-radius':13,'circle-stroke-color':'#ffd60a','circle-stroke-width':2.5}};
+     if(base['source-layer'])def['source-layer']=base['source-layer'];
+     if(filt)def.filter=filt; map.addLayer(def);
+   } else {
+     const def={id:'ovr-hl',type:'line',source:base.source,paint:{'line-color':'#ffd60a','line-width':3}};
+     if(base['source-layer'])def['source-layer']=base['source-layer'];
+     if(filt)def.filter=filt; map.addLayer(def);
+   }}
  function renderOvrList(){const el=$('#ovrlist'); if(!el)return;
    if(!OVR.length){el.innerHTML='<p class=hint>등록된 오버라이드가 없습니다 — 지도를 클릭해 추가하세요.</p>';return;}
    el.innerHTML=OVR.map((o,i)=>{const mm=OVRMETA[o.layer]||{label:o.layer};
@@ -957,9 +986,9 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   '<div class=row><label style="flex:0 0 52px">투명도</label><input type=range id=ovrOp min=0 max=100 value=100 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrOpv>100%</span></div>'+
   '<div class=row id=ovrWrow style="display:none"><label style="flex:0 0 52px">굵기</label><input type=range id=ovrW min=1 max=120 value=10 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrWv>1.0</span></div>'+
   '<div style="display:flex;gap:8px"><button id=ovrApply style="flex:1">추가</button><button id=ovrHide class=g style="flex:1">숨기기</button></div>'+
-  '<p class=hint id=ovrNote style="margin:0">적용 범위를 고르고 [추가] — ‘저장 &amp; 적용’ 시 영구 반영됩니다.</p></div>';
+  '<p class=hint id=ovrNote style="margin:0">노란 테두리 = 지금 선택된 적용 범위. ‘저장 &amp; 적용’ 시 영구 반영됩니다.</p></div>';
  document.body.appendChild(ovrModal);
- $('#ovrX').onclick=()=>ovrModal.style.display='none';
+ $('#ovrX').onclick=()=>{ovrModal.style.display='none';ovrHLClear();};
  $('#ovrOp').oninput=e=>$('#ovrOpv').textContent=e.target.value+'%';
  $('#ovrW').oninput=e=>$('#ovrWv').textContent=(e.target.value/10).toFixed(1);
  function ovrOpenModal(f,pt){ovrCur=f;const mm=OVRMETA[f.layer.id];
@@ -970,21 +999,29 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const p=f.properties,ks=Object.keys(p).slice(0,6);
    $('#ovrInfo').innerHTML=ks.length?ks.map(k=>'<b style="color:#5b9bd5">'+k+'</b>: '+String(p[k]).slice(0,36)).join('<br>'):'(속성 없음)';
    ovrOpts=ovrScopeOptions(f);
-   if(!ovrOpts.length){$('#ovrScopes').innerHTML='<p class=hint>이 유형은 부분 선택 키가 없어 개별 편집 불가 — 전체 색은 색상 탭에서.</p>';}
-   else $('#ovrScopes').innerHTML=ovrOpts.map((o,i)=>'<label style="display:flex;gap:8px;align-items:center;background:#0d1320;border:1px solid #26304a;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px"><input type=radio name=ovrscope value='+i+' '+(i===0?'checked':'')+'>'+o.label+'<small style="color:#5f6b80;margin-left:auto">'+o.tag+'</small></label>').join('');
+   $('#ovrScopes').innerHTML=ovrOpts.map((o,i)=>'<label style="display:flex;gap:8px;align-items:center;background:#0d1320;border:1px solid #26304a;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px"><input type=radio name=ovrscope value='+i+' '+(i===0?'checked':'')+'>'+o.label+'<small style="color:#5f6b80;margin-left:auto">'+o.tag+'</small></label>').join('');
+   document.querySelectorAll('input[name=ovrscope]').forEach(r=>r.onchange=ovrHLShow);
    $('#ovrWrow').style.display=mm.width?'flex':'none';
    ovrModal.style.display='block';
    ovrModal.style.left=Math.min(pt.x+14,innerWidth-320)+'px';
-   ovrModal.style.top=Math.min(pt.y+60,innerHeight-420)+'px';}
+   ovrModal.style.top=Math.min(pt.y+60,innerHeight-460)+'px';
+   ovrHLShow();}
  function ovrPush(hide){ if(!ovrCur||!ovrOpts.length)return;
    const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
    const op=ovrOpts[+sel.value];
+   if(op.theme){ // 전체 범위 — 기존 테마(색상·투명도·표시 탭)와 연동
+     op.theme.forEach(k=>{
+       if(hide){const v=$('#v_'+k); if(v){v.checked=false; v.dispatchEvent(new Event('change'));} return;}
+       const c=$('#c_'+k); if(c){c.value=$('#ovrColor').value; c.dispatchEvent(new Event('input'));}
+       const o2=$('#o_'+k); if(o2){o2.value=$('#ovrOp').value; o2.dispatchEvent(new Event('input'));}});
+     $('#status').textContent='전체 범위 — 테마('+op.theme.join('·')+') 변경, 저장 & 적용 시 영구 반영';
+     ovrModal.style.display='none'; ovrHLClear(); return;}
    const o={layer:ovrCur.layer.id,conds:op.conds,label:op.label};
    if(hide)o.hide=true; else{o.color=$('#ovrColor').value;o.opacity=+$('#ovrOp').value/100;
      if(OVRMETA[ovrCur.layer.id].width)o.width=+$('#ovrW').value/10;}
    OVR.push(o);OVRdirty=true;renderOvrList();ovrRebuild();
    $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영';
-   ovrModal.style.display='none';}
+   ovrModal.style.display='none'; ovrHLClear();}
  $('#ovrApply').onclick=()=>ovrPush(false);
  $('#ovrHide').onclick=()=>ovrPush(true);
  // map 준비되면 부착(메인 fetch 콜백에서 map 생성됨)
@@ -994,8 +1031,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      OVR=d.overrides||[]; try{ovrUnwrap();ovrRebuild();}catch(e){console.warn('ovr init',e);} renderOvrList();});
    map.isStyleLoaded()?init():map.once('idle',init);
    map.on('click',e=>{
-     const fs=map.queryRenderedFeatures(e.point).filter(x=>OVRMETA[x.layer.id]&&!/^ovr-preview-/.test(x.layer.id));
-     if(!fs.length){ovrModal.style.display='none';return;}
+     const fs=map.queryRenderedFeatures(e.point).filter(x=>OVRMETA[x.layer.id]&&!/^ovr-(preview-|hl)/.test(x.layer.id));
+     if(!fs.length){ovrModal.style.display='none';ovrHLClear();return;}
      const seen=new Set();ovrHits=[];
      for(const x of fs){if(!seen.has(x.layer.id)){seen.add(x.layer.id);ovrHits.push(x);}if(ovrHits.length>=5)break;}
      ovrOpenModal(ovrHits[0],e.point);});
