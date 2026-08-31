@@ -33,13 +33,31 @@
 각 레이어는 **독립 재빌드 → 산출물 파일 교체 → 컨테이너 재시작**으로 무중단에 가깝게 갱신된다.
 공통: 온라인 PC에서 빌드 → 산출물을 폐쇄망 서버 `~/geocode-build/`(타일은 `tiles/`)에 반입 → `docker compose restart <서비스>`.
 
-### (4) 3D 건물 — `buildings.mbtiles`  ★ 갱신 잦음
-- **다운로드**: data.go.kr [15052097 일별](https://www.data.go.kr/data/15052097/fileData.do)(신축 최신) 또는 [15083092 분기](https://www.data.go.kr/data/15083092/fileData.do), 또는 VWorld 공간정보 다운로드.
-  - **시도별 SHP 17개**(전체데이터, 최신 기준일). VWorld는 로그인+라온K 필요 → data.go.kr이 간단.
-  - 좌표계 **EPSG:5186**(.prj `AUTHORITY["EPSG","5186"]`). 컬럼은 `A0~A28`(generic): **A16=높이(m, 결측多)·A26=지상층수·A27=지하층수**. 컬럼 의미는 페이지의 "컬럼 정의서"로 확인.
-- **빌드**: `bash ~/geocode-build/deploy/build-buildings.sh <SHP폴더>`
-  - 처리: 5186→4326 변환 + `render_height = A16>0?A16:A26×3.3` + tippecanoe(z13–16) + tile-join. 디스크 절약형(시도별 처리·즉시 삭제).
-- **반영**: `tiles/buildings.mbtiles` 교체 → tileserver-config에 `buildings` 데이터 등록 → `docker compose restart tileserver`.
+### (4) 3D 건물 — PostGIS `building` 테이블 (martin 동적타일)  ★ 갱신 잦음
+> `buildings.mbtiles` 방식은 T028 에서 폐기 — 현행은 PostGIS 시도 파티션 + martin `/dyn/building`.
+- **다운로드**: data.go.kr [15052097 일별](https://www.data.go.kr/data/15052097/fileData.do)(신축 최신) 또는 [15083092 분기](https://www.data.go.kr/data/15083092/fileData.do), 또는 VWorld 공간정보 다운로드(AL_D010).
+  - **시도별 SHP**(전체데이터, 최신 기준일). ⚠ 2026 개편 후 광주(29)·전남(46)은 **통합 12 파일 하나**로만 나온다(20260809 실측).
+  - 좌표계 **EPSG:5186**. 컬럼 `A0~A28`(generic): **A1=GIS건물통합식별번호(28자리, 고유키)·A2=PNU·A16=높이(m, 결측多)·A26=지상층수**. 버전별 A코드 변동 가능 — ogrinfo 로 컬럼 정의서 대조.
+- **적재**: `STEPS=building scripts/postgis/load-all.sh` (또는 `scripts/postgis/load_building.sh --shp <폴더> --fresh`)
+  - 처리: 5186→4326 + `render_height = A16>0?A16:A26×3.3(폴백 6)` + ON CONFLICT(sido_cd,bld_mgt_no) 중복 방어.
+  - load-all 은 직후 juso 건물도형 패치(아래 4b)와 **타일 캐시 3겹 교체**까지 자동 체인한다.
+- **반영**: load-all 경유면 자동. 수동 적재였다면 `scripts/postgis/refresh_tile_cache.sh` 필수
+  (martin L1 재시작 → 게이트웨이 L2 퍼지 → 스타일 `/dyn/v<BUILD_ID>/` 버전 범프 — 하나라도 빠지면
+  줌 레벨마다 다른 시대의 캐시 타일이 섞여 보인다. 2026-08-31 실측).
+
+### (4b) juso 건물도형 신축 패치 — 월간  ★ AL_D010 공백 보완
+AL_D010 은 신개발지구 신축이 수년 늦다(과천지식정보타운 실측 — 최신본에도 전무). 행안부
+**건물도형(TL_SGCO_RNADR_MST/DONG)** 으로 증분 보완한다. 전체 흐름은 AL_D010 재적재 **직후**가 원칙
+(dedup 이 최신 건물 기준으로 서야 함 — load-all 이 이 순서를 보장).
+- **다운로드**(수동, 심사 계정): business.juso.go.kr → 전자지도 제공 → **건물도형** 월간 전체분
+  (매월 1일 게시. 기존 신청그룹 재사용: `JsmAddressInfoAplyDetails?reqstGroup=46372`).
+  시도별 zip 을 `$BUILD_HOME/sources/juso_building_shp/` 에 배치.
+- **적재**: `scripts/postgis/load_building_juso_all.sh` — 시도별 해제→적재→삭제.
+  - MST 는 **건물군(단지) 폴리곤** — 동(DONG)이 안에 있거나 기존 건물 3채 이상 품으면 제외,
+    최종 dedup 은 기존 건물과 **겹침 총합 15%** 초과 시 제외(신축=빈 땅 논리). 상세는 스크립트 헤더.
+  - dedup 의 building 조회는 시도 **리터럴** 필수 — 상관식이면 파티션 프루닝 붕괴(경기 30분+).
+- **반영**: 단독 실행 시 `scripts/postgis/refresh_tile_cache.sh` 잊지 말 것(스크립트가 말미에 상기시킴).
+- **검증**: 신개발지구 1곳(예: 과천지식정보타운)을 z16/z17/z18 로 돌며 타워 존재·덮개 부재·전 줌 동일 확인.
 
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
