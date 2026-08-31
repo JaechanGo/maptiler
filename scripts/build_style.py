@@ -53,7 +53,10 @@ if imported and pathlib.Path(imported).is_file():
     print(f"OK: {out} (가져온 스타일 사용 ← {imported} · layers={len(style['layers'])})")
 else:
     style = load_json(root / "base.json")
-    for frag_path in sorted((root / "layers").glob("*.json")):
+    # '._*' 제외 — macOS tar 가 남기는 AppleDouble 메타파일(바이너리)이 유입되면
+    # UTF-8 파싱에서 죽는다(이중 방어 — 생성측은 package.sh COPYFILE_DISABLE).
+    for frag_path in sorted(p for p in (root / "layers").glob("*.json")
+                            if not p.name.startswith("._")):
         frag = load_json(frag_path)
         style.setdefault("sources", {}).update(frag.get("sources", {}))
         style["layers"].extend(frag.get("layers", []))

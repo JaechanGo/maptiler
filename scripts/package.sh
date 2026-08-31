@@ -290,7 +290,10 @@ fi
 # M2: vendor/ 는 maplibre·maputnik 등 오프라인 자산 전체를 포함하며 의도적으로 통째로 번들링함.
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 # `tar && mv`로 묶으면 set -e가 tar 실패를 전파하지 못해 stale 번들로 0종료한다 → 분리.
-tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
+# COPYFILE_DISABLE=1: macOS tar 의 AppleDouble(._*) 리소스포크 동반을 차단한다 —
+#   폐쇄망에서 풀면 style/layers/._*.json 같은 바이너리 쓰레기가 glob('*.json') 에 걸려
+#   build_style 이 UnicodeDecodeError 로 죽는다(2026-08-31 .244 실측, 595개 유입).
+COPYFILE_DISABLE=1 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   -C "$ROOT"       style demo vendor server scripts/deploy.sh scripts/13-qc-check.py \
                    scripts/style-studio.py scripts/style_objects.py scripts/build_style.py \
                    scripts/build-style.sh scripts/start-style-studio.sh \
