@@ -84,6 +84,9 @@ def apply_style_theme(theme, commit_pending=True):
     pl = style_objects.sanitize_placement(theme.get("placement"))   # 라벨 배치(offset·anchor·생략)
     if pl:
         clean["placement"] = {**(clean.get("placement") or {}), **pl}
+    ov = style_objects.sanitize_overrides(theme.get("overrides"))   # 객체 오버라이드(클릭 편집)
+    if ov is not None:                                              # 리스트로 오면 전체 교체([]=전부 삭제)
+        clean["overrides"] = ov
     # 건물 2D/3D pitch 전환 임계값(숫자 0~85 또는 None/삭제)
     bpv = theme.get("building_pitch_3d")
     if isinstance(bpv, (int, float)) and not isinstance(bpv, bool) and 0 <= bpv <= 85:
@@ -256,6 +259,7 @@ class H(BaseHTTPRequestHandler):
                                "taxonomy": taxonomy, "icon_overrides": iov_cur,
                                "poi_tiers": poi_tiers, "cat_tiers": cat_tiers,
                                "cache": cache_cur,
+                               "overrides": style_objects.sanitize_overrides(_thm.get("overrides")) or [],
                                "gradient_objects": [{"key": g["key"], "label": g["label"], **(grad_cur.get(g["key"]) or {})}
                                                     for g in style_objects.gradient_targets()],
                                "building_pitch_3d": building_pitch_3d_cur,
@@ -414,7 +418,16 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <button class=tab data-t=icon>아이콘</button>
      <button class=tab data-t=data>데이터</button>
      <button class=tab data-t=zoom>줌·투명도</button>
+     <button class=tab data-t=ovr>객체 편집</button>
      <button class=tab data-t=adv>고급</button>
+   </div>
+   <div class=pane data-p=ovr hidden>
+     <h2>객체 클릭 편집 — 부분 스타일 오버라이드</h2>
+     <p class=hint>미리보기 지도에서 <b>객체(건물·도로·필지·라벨·녹지…)를 클릭</b>하면 편집 모달이 열립니다.
+     <br>범위: <b>완전 개별 / 객체 그룹(단지·법정동·카테고리·도로종류) / 유형 그룹(층수대·등급) / 전체</b>.
+     <br>전체 범위는 기존 색상·투명도 탭과 같은 대상이라 그 탭에서 조정하세요 — 여기선 부분 범위만 담습니다.</p>
+     <div id=ovrlist></div>
+     <p class=hint>변경은 미리보기에 즉시 반영되고, <b>‘저장 &amp; 적용’</b>을 눌러야 theme.json 에 영구 반영됩니다.</p>
    </div>
    <div class=pane data-p=color>
      <h2>객체</h2><div id=rows></div>
@@ -473,7 +486,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{}}, INITIOV={cat2:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null, CACHE_DEF={}, INITCACHE={};
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{}}, INITIOV={cat2:{}}, IOVdirty=false, OVR=[], OVRdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null, CACHE_DEF={}, INITCACHE={};
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -812,6 +825,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const plc=placeChanged(); if(plc) theme.placement=plc;
    const fc=fontsChanged(); if(fc) theme.fonts=fc;
    if(IOVdirty) theme.icon_overrides=IOV;
+   if(OVRdirty) theme.overrides=OVR;
    const grc=gradChanged(); if(grc) theme.gradient=grc;
    const pcc=poiColChanged(); if(pcc) theme.poi_colors=pcc;
    const tc=tiersChanged(); if(tc){ if(tc.poi_tiers)theme.poi_tiers=tc.poi_tiers; if(tc.cat_tiers)theme.cat_tiers=tc.cat_tiers; }
@@ -830,6 +844,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        PLACE.forEach(t=>{const e=$('#pl_'+t.key); if(!e)return; INITPL[t.key]= t.type==='bool'?e.checked : (t.type==='anchor'?(e.value===''?null:e.value):(e.value===''?null:+e.value));});
        Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)INITF[k]=e.value;}); if($('#font_all'))$('#font_all').value='';
        INITIOV=JSON.parse(JSON.stringify(IOV)); IOVdirty=false;
+       OVRdirty=false; if(window.renderOvrList)renderOvrList();
        GRAD.forEach(g=>{INITG[g.key]={on:$('#g_'+g.key).checked,low:$('#glo_'+g.key).value,high:$('#ghi_'+g.key).value,max:+$('#gmx_'+g.key).value};});
        INITPC=poiColMap();
        PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();}); renderTree();
@@ -840,6 +855,152 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
    }).catch(e=>$('#status').textContent='✗ 실패: '+e);
  };
+
+ // ══ 객체 클릭 편집(부분 오버라이드) — 서버 apply_overrides 와 대칭(제외+클론) ══
+ const OVRMETA={
+  'Building 3D':{label:'건물(3D)',color:'fill-extrusion-color',opacity:'fill-extrusion-opacity'},
+  'building-2d':{label:'건물(2D)',color:'fill-color',opacity:'fill-opacity'},
+  'road-motorway':{label:'도로(고속)',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'road-primary':{label:'도로(주간선)',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'road-secondary':{label:'도로(보조간선)',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'road-minor':{label:'도로(소로)',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'railway':{label:'철도',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'water':{label:'물·호수',color:'fill-color',opacity:'fill-opacity'},
+  'waterway':{label:'물길',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'landcover':{label:'산·녹지',color:'fill-color',opacity:'fill-opacity'},
+  'park':{label:'공원',color:'fill-color',opacity:'fill-opacity'},
+  'parcel-line':{label:'필지 경계',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'poi-label':{label:'POI 라벨',color:'text-color',opacity:'text-opacity'},
+  'place-label':{label:'지명 라벨',color:'text-color',opacity:'text-opacity'},
+  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity'}};
+ const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
+ const ovrKo=v=>OVRCLS[v]||v;
+ let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[];
+ function ovrCondExpr(c){const g=['get',c.key];
+   if(c.op==='prefix')return ['==',['slice',['coalesce',g,''],0,c.value.length],c.value];
+   if(c.op==='>='||c.op==='<')return [c.op,['coalesce',g,-1],c.value];
+   return ['==',['coalesce',g,typeof c.value==='string'?'':-1],c.value];}
+ function ovrUnwrap(){ // 서빙 스타일에 '구워진' 오버라이드 제거 → 원본 베이스 복원.
+   // ★ OVR 목록에서 기대되는 제외식만 정밀 매칭해 벗긴다 — 원본 필터가 우연히
+   //   ['all',X,['!',…]] 꼴이어도 건드리지 않는다(무차별 언랩 금지).
+   const negs=new Set(OVR.map(o=>{const cs=o.conds.map(ovrCondExpr);
+     const c=cs.length===1?cs[0]:['all'].concat(cs);return JSON.stringify(['!',c]);}));
+   (map.getStyle().layers||[]).filter(l=>/^ovr-\d+$/.test(l.id)).forEach(l=>map.removeLayer(l.id));
+   for(const lid of Object.keys(OVRMETA)){ if(!map.getLayer(lid))continue;
+     let f=map.getFilter(lid);
+     while(Array.isArray(f)&&f[0]==='all'&&f.length===3&&negs.has(JSON.stringify(f[2]))) f=f[1];
+     ovrBaseF[lid]=f||null; map.setFilter(lid,f||null);}}
+ function ovrRebuild(){ // OVR 전체를 미리보기에 재적용(서버와 같은 순서·의미)
+   (map.getStyle().layers||[]).filter(l=>/^ovr-preview-/.test(l.id)).forEach(l=>map.removeLayer(l.id));
+   for(const lid of Object.keys(ovrBaseF)) if(map.getLayer(lid)) map.setFilter(lid, ovrBaseF[lid]);
+   const clones={};
+   OVR.forEach((o,i)=>{ const lid=o.layer, mm=OVRMETA[lid]; if(!mm||!map.getLayer(lid))return;
+     const conds=o.conds.map(ovrCondExpr); const cond=conds.length===1?conds[0]:['all',...conds];
+     const base=map.getStyle().layers.find(l=>l.id===lid);
+     const cloneDef=JSON.parse(JSON.stringify(base)); // 제외 전 상태
+     const neg=['!',cond];
+     const wrap=f=>f?['all',f,neg]:neg;
+     map.setFilter(lid, wrap(map.getFilter(lid)));
+     (clones[lid]||[]).forEach(cid=>map.setFilter(cid, wrap(map.getFilter(cid))));
+     if(o.hide)return;
+     cloneDef.id='ovr-preview-'+i;
+     cloneDef.filter=cloneDef.filter?['all',cloneDef.filter,cond]:cond;
+     const idx=map.getStyle().layers.findIndex(l=>l.id===lid);
+     map.addLayer(cloneDef, map.getStyle().layers[idx+1] && map.getStyle().layers[idx+1].id);
+     if(o.color) map.setPaintProperty(cloneDef.id,mm.color,o.color);
+     if(o.opacity!=null) map.setPaintProperty(cloneDef.id,mm.opacity,o.opacity);
+     if(o.width!=null&&mm.width) map.setPaintProperty(cloneDef.id,mm.width,o.width);
+     (clones[lid]=clones[lid]||[]).push(cloneDef.id); });
+ }
+ function ovrScopeOptions(f){const lid=f.layer.id,p=f.properties,o=[];
+   const push=(label,conds,tag)=>o.push({label,conds,tag});
+   if(lid==='Building 3D'||lid==='building-2d'){
+     if(p.id!=null)push('이 동만 — 완전 개별',[{key:'id',value:p.id}],'개별');
+     if(p.name)push('같은 단지 «'+String(p.name).slice(0,14)+'»',[{key:'name',value:String(p.name)}],'객체그룹');
+     const lv=p.levels||0;
+     if(lv>=15)push('같은 층수대 — 고층(15층↑)',[{key:'levels',op:'>=',value:15}],'유형그룹');
+     else if(lv>=5)push('같은 층수대 — 중층(5~14층)',[{key:'levels',op:'>=',value:5},{key:'levels',op:'<',value:15}],'유형그룹');
+     else push('같은 층수대 — 저층(4층↓)',[{key:'levels',op:'<',value:5}],'유형그룹');
+   } else if(/^road-/.test(lid)||lid==='railway'){
+     if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
+   } else if(lid==='landcover'||lid==='park'||lid==='water'||lid==='waterway'){
+     if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
+   } else if(lid==='parcel-line'){
+     if(p.pnu){push('이 필지만 — '+p.pnu,[{key:'pnu',value:String(p.pnu)}],'개별');
+       push('같은 법정동 — '+String(p.pnu).slice(0,10),[{key:'pnu',op:'prefix',value:String(p.pnu).slice(0,10)}],'객체그룹');}
+   } else if(lid==='poi-label'){
+     if(p.name)push('이 POI만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
+     if(p.cat1)push('같은 카테고리 — '+p.cat1,[{key:'cat1',value:String(p.cat1)}],'객체그룹');
+   } else if(lid==='place-label'||lid==='dong-label'){
+     if(p.name)push('이 라벨만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
+   }
+   return o;}
+ function renderOvrList(){const el=$('#ovrlist'); if(!el)return;
+   if(!OVR.length){el.innerHTML='<p class=hint>등록된 오버라이드가 없습니다 — 지도를 클릭해 추가하세요.</p>';return;}
+   el.innerHTML=OVR.map((o,i)=>{const mm=OVRMETA[o.layer]||{label:o.layer};
+     const what=[o.hide?'숨김':null,o.color?'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+o.color+'"></span> '+o.color:null,
+       o.opacity!=null?Math.round(o.opacity*100)+'%':null,o.width!=null?'굵기 '+o.width:null].filter(Boolean).join(' · ');
+     return '<div class=row style="gap:8px"><label style="flex:1;font-size:12px">'+mm.label+' — '+(o.label||'')+'<br><span style="color:#5f6b80;font-size:11px">'+what+'</span></label>'+
+       '<button class="mini g" onclick="ovrDel('+i+')">삭제</button></div>';}).join('');}
+ window.renderOvrList=renderOvrList;
+ window.ovrDel=i=>{OVR.splice(i,1);OVRdirty=true;renderOvrList();ovrRebuild();};
+ // ── 모달 ──
+ const ovrModal=document.createElement('div');
+ ovrModal.id='ovrmodal';
+ ovrModal.style.cssText='position:absolute;z-index:9;display:none;width:300px;background:#121826;color:#e8edf5;border:1px solid #26304a;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.55);font-size:13px';
+ ovrModal.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #26304a;font-weight:700"><span id=ovrTitle style="color:#5b9bd5">객체</span><span style="cursor:pointer;color:#8d9bb5" id=ovrX>✕</span></div>'+
+  '<div style="padding:12px 14px;display:flex;flex-direction:column;gap:9px;max-height:64vh;overflow:auto">'+
+  '<div id=ovrTabs style="display:flex;gap:6px;flex-wrap:wrap"></div>'+
+  '<div id=ovrInfo style="background:#0d1320;border-radius:8px;padding:7px 10px;color:#8d9bb5;font-size:11.5px;line-height:1.5;max-height:60px;overflow:auto"></div>'+
+  '<div id=ovrScopes style="display:flex;flex-direction:column;gap:5px"></div>'+
+  '<div class=row><label style="flex:0 0 52px">색상</label><input type=color id=ovrColor value="#e64a3c"></div>'+
+  '<div class=row><label style="flex:0 0 52px">투명도</label><input type=range id=ovrOp min=0 max=100 value=100 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrOpv>100%</span></div>'+
+  '<div class=row id=ovrWrow style="display:none"><label style="flex:0 0 52px">굵기</label><input type=range id=ovrW min=1 max=120 value=10 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrWv>1.0</span></div>'+
+  '<div style="display:flex;gap:8px"><button id=ovrApply style="flex:1">추가</button><button id=ovrHide class=g style="flex:1">숨기기</button></div>'+
+  '<p class=hint id=ovrNote style="margin:0">적용 범위를 고르고 [추가] — ‘저장 &amp; 적용’ 시 영구 반영됩니다.</p></div>';
+ document.body.appendChild(ovrModal);
+ $('#ovrX').onclick=()=>ovrModal.style.display='none';
+ $('#ovrOp').oninput=e=>$('#ovrOpv').textContent=e.target.value+'%';
+ $('#ovrW').oninput=e=>$('#ovrWv').textContent=(e.target.value/10).toFixed(1);
+ function ovrOpenModal(f,pt){ovrCur=f;const mm=OVRMETA[f.layer.id];
+   $('#ovrTitle').textContent=mm.label;
+   $('#ovrTabs').innerHTML='';
+   ovrHits.forEach(h=>{const b=document.createElement('button');b.className='mini'+(h.layer.id===f.layer.id?'':' g');
+     b.textContent=OVRMETA[h.layer.id].label;b.onclick=()=>ovrOpenModal(h,pt);$('#ovrTabs').appendChild(b);});
+   const p=f.properties,ks=Object.keys(p).slice(0,6);
+   $('#ovrInfo').innerHTML=ks.length?ks.map(k=>'<b style="color:#5b9bd5">'+k+'</b>: '+String(p[k]).slice(0,36)).join('<br>'):'(속성 없음)';
+   ovrOpts=ovrScopeOptions(f);
+   if(!ovrOpts.length){$('#ovrScopes').innerHTML='<p class=hint>이 유형은 부분 선택 키가 없어 개별 편집 불가 — 전체 색은 색상 탭에서.</p>';}
+   else $('#ovrScopes').innerHTML=ovrOpts.map((o,i)=>'<label style="display:flex;gap:8px;align-items:center;background:#0d1320;border:1px solid #26304a;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px"><input type=radio name=ovrscope value='+i+' '+(i===0?'checked':'')+'>'+o.label+'<small style="color:#5f6b80;margin-left:auto">'+o.tag+'</small></label>').join('');
+   $('#ovrWrow').style.display=mm.width?'flex':'none';
+   ovrModal.style.display='block';
+   ovrModal.style.left=Math.min(pt.x+14,innerWidth-320)+'px';
+   ovrModal.style.top=Math.min(pt.y+60,innerHeight-420)+'px';}
+ function ovrPush(hide){ if(!ovrCur||!ovrOpts.length)return;
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
+   const op=ovrOpts[+sel.value];
+   const o={layer:ovrCur.layer.id,conds:op.conds,label:op.label};
+   if(hide)o.hide=true; else{o.color=$('#ovrColor').value;o.opacity=+$('#ovrOp').value/100;
+     if(OVRMETA[ovrCur.layer.id].width)o.width=+$('#ovrW').value/10;}
+   OVR.push(o);OVRdirty=true;renderOvrList();ovrRebuild();
+   $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영';
+   ovrModal.style.display='none';}
+ $('#ovrApply').onclick=()=>ovrPush(false);
+ $('#ovrHide').onclick=()=>ovrPush(true);
+ // map 준비되면 부착(메인 fetch 콜백에서 map 생성됨)
+ const ovrBoot=setInterval(()=>{ if(!map)return; clearInterval(ovrBoot);
+   // 순서 중요: OVR 목록을 먼저 받아야 정밀 언랩이 가능하다(제외식 매칭 기반).
+   const init=()=>fetch('/api/style/objects').then(r=>r.json()).then(d=>{
+     OVR=d.overrides||[]; try{ovrUnwrap();ovrRebuild();}catch(e){console.warn('ovr init',e);} renderOvrList();});
+   map.isStyleLoaded()?init():map.once('idle',init);
+   map.on('click',e=>{
+     const fs=map.queryRenderedFeatures(e.point).filter(x=>OVRMETA[x.layer.id]&&!/^ovr-preview-/.test(x.layer.id));
+     if(!fs.length){ovrModal.style.display='none';return;}
+     const seen=new Set();ovrHits=[];
+     for(const x of fs){if(!seen.has(x.layer.id)){seen.add(x.layer.id);ovrHits.push(x);}if(ovrHits.length>=5)break;}
+     ovrOpenModal(ovrHits[0],e.point);});
+ },300);
+
 </script></html>"""
 
 
