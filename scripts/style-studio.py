@@ -117,9 +117,27 @@ def apply_style_theme(theme, commit_pending=True):
     prev_theme = theme_file.read_bytes() if theme_file.is_file() else None   # 빌드 실패 시 롤백용
     theme_file.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []
+    # 서빙 중인 스타일의 /dyn/v<id>/ 캐시 네임스페이스 보존 — BUILD_ID 없이 재조립하면 비버전
+    # /dyn/ 으로 회귀해 브라우저·게이트웨이 L2 캐시를 무효화할 수단을 잃는다(2026-08-31 .244 실측:
+    # 저장할 때마다 버전이 벗겨져, 줌 레벨마다 서로 다른 시대의 캐시 타일이 보이던 원인).
+    # 버전은 '데이터 세대'를 따르므로 스타일 저장은 기존 id 를 그대로 잇는다(없으면 종전대로 비버전).
+    env = os.environ.copy()
+    if "BUILD_ID" not in env:
+        try:
+            cur = json.loads((ROOT / "style" / "style.json").read_text(encoding="utf-8"))
+            for src in (cur.get("sources") or {}).values():
+                for t in (src.get("tiles") or []):
+                    m = re.search(r"/dyn/v([0-9A-Za-z._-]+)/", t or "")
+                    if m:
+                        env["BUILD_ID"] = m.group(1)
+                        break
+                if "BUILD_ID" in env:
+                    break
+        except Exception:
+            pass   # 스타일 부재/파손 시 종전 동작(비버전) 유지
     try:
         r = subprocess.run(["python3", str(ROOT / "scripts/build_style.py")],
-                           capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+                           capture_output=True, text=True, cwd=str(ROOT), timeout=60, env=env)
         log.append(r.stdout.strip() or r.stderr.strip())
         if r.returncode != 0:
             if prev_theme is not None: theme_file.write_bytes(prev_theme)   # theme.json 원복(부분상태 방지)
