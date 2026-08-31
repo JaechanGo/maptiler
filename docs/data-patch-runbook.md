@@ -59,6 +59,20 @@ AL_D010 은 신개발지구 신축이 수년 늦다(과천지식정보타운 실
 - **반영**: 단독 실행 시 `scripts/postgis/refresh_tile_cache.sh` 잊지 말 것(스크립트가 말미에 상기시킴).
 - **검증**: 신개발지구 1곳(예: 과천지식정보타운)을 z16/z17/z18 로 돌며 타워 존재·덮개 부재·전 줌 동일 확인.
 
+### (4c) 위성(정사영상) 베이스맵 — 폐쇄망 반입  ★ 레이어 스위처 '위성' 모드
+데모/뷰어의 레이어 타입(기본/2D/3D/**위성**) 중 위성 모드의 원천. 외부 XYZ(구글·VWorld 실시간)는
+폐쇄망에서 못 쓰므로 **정사영상을 반입해 자체 mbtiles 로 서빙**한다.
+- **다운로드**(수동, 심사): 국토지리정보원 **정사영상**(국토정보플랫폼 map.ngii.go.kr — 25cm/51cm GeoTIFF,
+  제공 신청 절차). 좌표계 무관(변환 스크립트가 3857 재투영). `$BUILD_HOME/sources/ortho/` 에 배치.
+- **변환**: `scripts/gen_satellite_mbtiles.sh` — VRT 모자이크 → 3857 재투영 → MBTiles(JPEG) → 오버뷰.
+  용량 감: 전국 z15 급 ≈ 4~5GB, 도심 z17 추가 시 수십 GB(반입 매체 계획에 반영).
+- **등록**: mbtiles 를 tiles/ 에 배치한 **후에만** `tileserver-config.json` 의 data 에
+  `"satellite": {"mbtiles": "satellite.mbtiles"}` 추가 → tileserver 재시작.
+  ⚠ 파일 없이 미리 등록하면 tileserver-gl v5 가 **크래시 루프**(2026-09-01 실측) — 그래서 저장소
+  기본 config 에는 satellite 항목이 없다.
+- **활성화**: 데모의 '위성' 버튼은 `/data/satellite.json` 프로브로 자동 활성화(코드 수정 불요).
+  위성 모드는 하이브리드 — 영상 위에 도로·라벨·필지·경계는 유지, 면(녹지·물·건물)만 숨김.
+
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
 - **지오코딩 적재**: 17개 CSV 를 한 폴더에 모은다 (kind=biz). 좌표 이미 4326 → 변환 불필요.
