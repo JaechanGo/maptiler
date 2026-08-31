@@ -152,16 +152,19 @@ SELECT DISTINCT ON (m.fid)
 CREATE INDEX ON _stg_juso_cand USING GIST(geom);
 ANALYZE _stg_juso_cand;
 
--- 공간 dedup 2단: (1) 대표점 포함  (2) 겹침 면적 30% 이상
+-- 공간 dedup 2단: (1) 대표점 포함  (2) 기존 건물들과의 **겹침 총합** 15% 이상
+--   개별 30% 판정은 여러 채와 조금씩 비껴 겹치는 형상차 쌍을 통과시켰다(경기 실측
+--   35,084건 — 이중 상자). 총합 15% 는 진짜 신축(빈 땅, 겹침≈0)만 남긴다.
 DROP TABLE IF EXISTS _stg_juso_final;
 CREATE TABLE _stg_juso_final AS
 SELECT c.* FROM _stg_juso_cand c
  WHERE NOT EXISTS (SELECT 1 FROM building b
                     WHERE b.sido_cd = '$SIDO'
                       AND ST_Intersects(b.geom, ST_PointOnSurface(c.geom)))
-   AND NOT EXISTS (SELECT 1 FROM building b
-                    WHERE b.sido_cd = '$SIDO' AND b.geom && c.geom
-                      AND ST_Area(ST_Intersection(b.geom, c.geom)) > 0.3 * ST_Area(c.geom));
+   AND (SELECT coalesce(sum(ST_Area(ST_Intersection(b.geom, c.geom))),0)
+          FROM building b
+         WHERE b.sido_cd = '$SIDO' AND b.geom && c.geom)
+       <= 0.15 * ST_Area(c.geom);
 CREATE INDEX ON _stg_juso_final USING GIST(geom);
 ANALYZE _stg_juso_final;
 SQL
