@@ -974,7 +974,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      const what=[o.hide?'숨김':null,o.color?'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+o.color+'"></span> '+o.color:null,
        o.opacity!=null?Math.round(o.opacity*100)+'%':null,o.width!=null?'굵기 '+o.width:null].filter(Boolean).join(' · ');
      return '<div class=row style="gap:8px"><label style="flex:1;font-size:12px">'+mm.label+' — '+(o.label||'')+'<br><span style="color:#5f6b80;font-size:11px">'+what+'</span></label>'+
-       '<button class="mini g" onclick="ovrDel('+i+')">삭제</button></div>';}).join('');}
+       '<button class="mini g" onclick="ovrDel('+i+')">'+(o.hide?'해제':'삭제')+'</button></div>';}).join('');}
  window.renderOvrList=renderOvrList;
  window.ovrDel=i=>{OVR.splice(i,1);OVRdirty=true;renderOvrList();ovrRebuild();};
  // ── 모달 ──
@@ -1062,10 +1062,27 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      ovrCloseModal(); return;}
    OVR.push({layer:ovrCur.layer.id,conds:op.conds,label:op.label,hide:true});
    OVRdirty=true;renderOvrList();ovrRebuild();
-   $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영';
+   $('#status').textContent='숨김 적용 — 원복은 옆 목록의 [해제], 저장 & 적용 시 영구 반영';
+   const ovrTab=document.querySelector('[data-t=ovr]'); if(ovrTab)ovrTab.click();
    ovrCloseModal();}
  $('#ovrApply').onclick=ovrCommit;
  $('#ovrHide').onclick=ovrPushHide;
+ // 전역 '되돌리기' 확장 — 원래 핸들러(스타일 전체 리로드) 후 오버라이드를 서버 저장
+ // 상태로 재초기화한다. 이게 없으면 리로드된 구운 스타일과 로컬 OVR 상태기계가 어긋나
+ // 숨김·미저장 편집을 원복할 길이 없다(사용자 실측 불편).
+ (function(){const orig=$('#reset').onclick;
+   $('#reset').onclick=()=>{ if(orig)orig();
+     // idle 은 콜드 타일 로딩으로 수십 초 지연될 수 있다 — 레이어 파싱 완료를 폴링(0.5s×60).
+     let tries=0; const t=setInterval(()=>{
+       if(++tries>60){clearInterval(t);return;}
+       if(!map.getStyle()||!map.getLayer('Building 3D'))return;
+       clearInterval(t);
+       fetch('/api/style/objects').then(r=>r.json()).then(d=>{
+         OVR=d.overrides||[]; OVRdirty=false; ovrBaseF={};
+         try{ovrUnwrap();ovrRebuild();}catch(e){console.warn('ovr reset',e);}
+         renderOvrList();
+         $('#status').textContent='되돌림 — 저장된 상태로 복원(오버라이드 '+OVR.length+'건)';});
+     },500);};})();
  // map 준비되면 부착(메인 fetch 콜백에서 map 생성됨)
  const ovrBoot=setInterval(()=>{ if(!map)return; clearInterval(ovrBoot);
    // 순서 중요: OVR 목록을 먼저 받아야 정밀 언랩이 가능하다(제외식 매칭 기반).
