@@ -91,6 +91,11 @@ if has building; then
   else
     echo "  (건너뜀) 건물 SHP 없음: $GIS"
   fi
+  # juso 건물도형 패치 — AL_D010 이 놓친 신축(신개발지구, 수년 지연) 증분 보완.
+  # AL_D010 적재 **직후**에 돌아야 dedup(기존 건물 공간 대조)이 최신 기준으로 선다.
+  # 원천 없으면 스크립트가 스스로 건너뛴다(옵션 원천 — 실패로 치지 않음).
+  run "$HERE/load_building_juso_all.sh" \
+    || { echo "  ✗ juso 건물 패치 실패 — 신축 보완 미완(기본 건물은 적재됨). 재실행: STEPS=building $0" >&2; fail=1; }
 fi
 
 # 4) 주소 + POI (geocode.sqlite 재사용 — 09-gen-geocode.py 산출 필요)

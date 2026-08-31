@@ -1,407 +1,407 @@
 {
- "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '자동 수집 목록'이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동. collect{method,...} 있으면 자동수집(file.localdata/data.go.kr/geofabrik 우회). default_collect=목록 기본 체크. build_input 있으면 업로드/적재 지원. 날짜 표기는 yyyy-mm-dd 표준.",
- "sources": [
-  {
-   "key": "juso_navi",
-   "name": "도로명주소 내비게이션용DB 전체분",
-   "category": "주소",
-   "url": "https://business.juso.go.kr/addrlink/main.do",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용. 수동 업로드.",
-   "latest_check": {
-    "type": "json",
-    "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
-    "method": "POST",
-    "body": {
-     "rtlDtaDtlSn": "28",
-     "year": "{year}",
-     "month": "{month}",
-     "expand": "Y"
+  "_comment": "빌드 입력 데이터 출처 레지스트리 — Build Studio '자동 수집 목록'이 사용. latest_check{regex,pick,url?} 있으면 [최신 조회] 자동. collect{method,...} 있으면 자동수집(file.localdata/data.go.kr/geofabrik 우회). default_collect=목록 기본 체크. build_input 있으면 업로드/적재 지원. 날짜 표기는 yyyy-mm-dd 표준.",
+  "sources": [
+    {
+      "key": "juso_navi",
+      "name": "도로명주소 내비게이션용DB 전체분",
+      "category": "주소",
+      "url": "https://business.juso.go.kr/addrlink/main.do",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "note": "지오코더 주소 원천(건물단위 주소+좌표). juso 자료제공 '내비게이션DB(전체분)'(SN 28). match_build_*.txt 사용. 수동 업로드.",
+      "latest_check": {
+        "type": "json",
+        "url": "https://business.juso.go.kr/api/jst/selectAttrbDBDwldList",
+        "method": "POST",
+        "body": {
+          "rtlDtaDtlSn": "28",
+          "year": "{year}",
+          "month": "{month}",
+          "expand": "Y"
+        },
+        "json_path": "results.allMonthFileList",
+        "field": "crtrYm",
+        "filter": {
+          "isExist": "Y",
+          "fileTypeNm": "NAVIDATA"
+        },
+        "pick": "max"
+      },
+      "build_input": {
+        "dest": "staged/navi",
+        "extract": "7z",
+        "into": "dir"
+      }
     },
-    "json_path": "results.allMonthFileList",
-    "field": "crtrYm",
-    "filter": {
-     "isExist": "Y",
-     "fileTypeNm": "NAVIDATA"
+    {
+      "key": "sangga",
+      "name": "소상공인시장진흥공단 상가(상권)정보",
+      "category": "상가",
+      "url": "https://www.data.go.kr/data/15083033/fileData.do",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "분기",
+      "note": "상호·업종(POI/상가). 자동 다운로드: selectFileDataDownload.do(atchFileId 획득) → cmm/cmm/fileDownload.do(파일 스트림). data.go.kr 미차단. poi-all/sangga 에 zip 추출, 09가 glob.",
+      "latest_check": {
+        "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "first"
+      },
+      "collect": {
+        "method": "datago_filedown",
+        "publicDataPk": "15083033",
+        "publicDataDetailPk": "uddi:6a450671-390c-4b6d-979c-fa056a627084",
+        "detail_url": "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do"
+      },
+      "default_collect": true,
+      "build_input": {
+        "dest": "poi-all/sangga",
+        "extract": null,
+        "into": "dir"
+      }
     },
-    "pick": "max"
-   },
-   "build_input": {
-    "dest": "staged/navi",
-    "extract": "7z",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "sangga",
-   "name": "소상공인시장진흥공단 상가(상권)정보",
-   "category": "상가",
-   "url": "https://www.data.go.kr/data/15083033/fileData.do",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "분기",
-   "note": "상호·업종(POI/상가). 자동 다운로드: selectFileDataDownload.do(atchFileId 획득) → cmm/cmm/fileDownload.do(파일 스트림). data.go.kr 미차단. poi-all/sangga 에 zip 추출, 09가 glob.",
-   "latest_check": {
-    "regex": "수정일[\\s\\S]{0,120}?(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "first"
-   },
-   "collect": {
-    "method": "datago_filedown",
-    "publicDataPk": "15083033",
-    "publicDataDetailPk": "uddi:6a450671-390c-4b6d-979c-fa056a627084",
-    "detail_url": "https://www.data.go.kr/tcs/dss/selectFileDataDownload.do"
-   },
-   "default_collect": true,
-   "build_input": {
-    "dest": "poi-all/sangga",
-    "extract": null,
-    "into": "dir"
-   }
-  },
-  {
-   "key": "localdata",
-   "name": "인허가 지역별 전체분",
-   "category": "인허가",
-   "url": "https://www.localdata.go.kr/",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "일",
-   "note": "지방행정 인허가(업소) 전국 전체분. file.localdata.go.kr 우회(한국 IP 호스트). 하위=17 시·도(orgCode_ALL, localdata-regions.json). URL 확정(2026-06 캡처): /file/download-all, 시·도=?orgCode=<code>_ALL.",
-   "collect": {
-    "method": "localdata_all",
-    "base": "https://file.localdata.go.kr",
-    "path": "/file/download-all",
-    "region_path": "/file/download-all?orgCode={orgCode}_ALL",
-    "regions": "localdata-regions.json"
-   },
-   "default_collect": true,
-   "build_input": {
-    "dest": "staged/localdata",
-    "extract": null,
-    "into": "dir"
-   }
-  },
-  {
-   "key": "facility",
-   "name": "생활편의시설(공공)",
-   "category": "생활편의",
-   "url": "https://www.localdata.go.kr/",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "공중화장실·무인민원발급기 등 14종. file.localdata.go.kr 우회. kind=facility 로 별도 적재(상가/인허가 biz 분리). 14종·슬러그=facility-catalog.json. 종류 선택 다운로드.",
-   "collect": {
-    "method": "localdata_facility",
-    "catalog": "facility-catalog.json"
-   },
-   "default_collect": true,
-   "build_input": {
-    "dest": "staged/facility",
-    "extract": null,
-    "into": "dir"
-   }
-  },
-  {
-   "key": "building_db",
-   "name": "GIS건물통합정보 (건물DB)",
-   "category": "건물",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "월(일 변경분)",
-   "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드(시도 17개 단위 SHP, 실제 파일명 AL_D010_<시도코드2자리>_<YYYYMMDD>.zip — 전체분; 변동분=CH_D010). 출처 URL은 fileGbnCd=AL(전체분만)·datPageSize=17(17시도 1페이지) — 갱신일 max가 일자 변동분이 아닌 전체분 기준이 되게 함(2026-06 기준 기준일=09·갱신일=10). 폴더채로 올리면 파일별 시도·기준일·최신화 상태 파싱(/api/sources/files, 시도 그룹핑). 최신화 비교=갱신일 대비 월(YYYYMM) 정밀도(월 전체분이라 일자 drift 무시).",
-   "latest_check": {
-    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL",
-    "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "max"
-   },
-   "collect": {
-    "method": "vworld_session",
-    "ds_id": "18",
-    "level": "sido",
-    "file_nos": [],
-    "list_url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL"
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "staged/gis",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "parcel",
-   "name": "연속지적도 (VWorld dsId=30563)",
-   "category": "지적",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30563",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh(파티션은 파일명 아닌 PNU 앞2자리로 라우팅). fileNo 는 쿠키로 목록페이지에서 자동발견. ⚠ level=sido(시도 통합 1파일/시도)는 대형 시도(경기·충북·충남·전남·경북·경남·전북) 통합파일이 빈 응답(0바이트)이라 ~10시도만 수집됨 → level=sigungu(시군구 단위 ~250파일 전수)로 전환해 전국 커버. 다운로드 엔드포인트=downloadResourceFile.do?ds_id=&fileNo=.",
-   "collect": {
-    "method": "vworld_session",
-    "ds_id": "30563",
-    "level": "sigungu",
-    "file_nos": []
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "staged/parcel",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "osm",
-   "name": "OpenStreetMap (남한, geofabrik)",
-   "category": "OSM",
-   "url": "https://download.geofabrik.de/asia/south-korea.html",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "일",
-   "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf 직접 다운로드(차단 없음). 거의 안 바뀌어 기본 미체크(직전 OSM 재사용), 체크 시에만 .pbf 재다운로드+변환(planetiler→korea.mbtiles, osm.sqlite, 동 라벨). 변환은 무거움(Java·~1GB 보조데이터·수십분).",
-   "latest_check": {
-    "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "first"
-   },
-   "collect": {
-    "method": "geofabrik",
-    "url": "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf",
-    "dest": "data/osm/south-korea.osm.pbf",
-    "build_targets": [
-     "osm_vector",
-     "osm_sqlite",
-     "dong"
-    ]
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "data/osm",
-    "extract": null,
-    "into": "file"
-   }
-  },
-  {
-   "key": "boundary_legal",
-   "name": "행정구역 읍면동(법정동) 경계",
-   "category": "행정경계",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "월",
-   "note": "VWorld dsId=30603(datPageSize=100로 17시도 전체 한 페이지) 「행정구역_읍면동(법정동)」 LSMD_ADM_SECT_UMD_<시도>(시도별 SHP). EPSG:5186·CP949, 필드 EMD_NM/EMD_CD(8자리=법정동코드 앞8). 역지오코딩 areas(type=legal-dong) 적재: `06-gen-areas.py --shp sources/boundary/legal --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong`. 2026-06 기준 5,370건. 갱신일 추적=VWorld 30603(갱신일 YYYY-MM-DD). 대안 법정동 소스 GIS Developer(gisdeveloper.co.kr/?p=2332, 읍면동=법정동, 가입X)이나 날짜가 지저분해 VWorld 채택.",
-   "build_input": {
-    "dest": "sources/boundary/legal",
-    "extract": "zip",
-    "into": "dir"
-   },
-   "latest_check": {
-    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
-    "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "max"
-   }
-  },
-  {
-   "key": "boundary_admin",
-   "name": "행정동 경계 (센서스경계)",
-   "category": "행정경계",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "반기",
-   "note": "행정동 경계 BND_ADM_DONG_PG(VWorld dsId=30017, 통계청 센서스경계와 동일파일) BND_ADM_DONG_PG(단일 SHP). EPSG:5186·CP949, 필드 ADM_NM/ADM_CD(8자리, SGIS 한국행정구역분류 코드계 — navi h_code와 다른 체계, 이름은 일치). 역지오코딩 areas(type=admin-dong) 적재: `06-gen-areas.py --shp sources/boundary/admin/BND_ADM_DONG_PG.shp --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong`. 2025-06-30 기준 3,559건 갱신일 추적=VWorld 30017 BND_ADM_DONG_PG 갱신일(서버렌더·정적 OK, 파일 DBF 날짜와 일치). data.go.kr 15125055도 동일 데이터(수정일).",
-   "build_input": {
-    "dest": "sources/boundary/admin",
-    "extract": "zip",
-    "into": "dir"
-   },
-   "latest_check": {
-    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
-    "regex": "BND_ADM_DONG_PG[\\s\\S]*?갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "first"
-   }
-  },
-  {
-   "key": "lawd_code_v2",
-   "name": "법정동코드(신구대응) — VWorld 국가공간정보 dsId=30505",
-   "category": "행정코드",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "OLD_LAWDCD(신구 법정동코드 대응)의 유일 원천. 리 사전 원천인 lawd_code(code.go.kr, 53,387행)와 별개 — 대체하지 말 것. cp949 10컬럼 CSV(LSCT_LAWDCD.csv, 31,172행) → lawd_code_v2 적재(load_lawd_code_v2.py). 인천 신설 4구·전남광주 12체계의 옛→신 대응을 명칭 조인 없이 산출하는 축. ※실측(2026-08-18): 목록에 파일 2건 — fileNo=1 LSCT_LAWDCD.zip(276KB, 본체) · fileNo=2 Z_LURIS_LSCT_LAWDCD.xlsx(11KB, 부수). dsFileId 는 페이지 dsId 와 동일한 '30505'(건물DB 의 '20171128DS00010' 같은 불일치 없음). level=all 이라 xlsx 도 함께 받지만 적재기는 CSV 만 읽으므로 무해하고, fileNo 하드코딩 대신 목록 자동조회를 써야 갱신분을 따라간다.",
-   "latest_check": {
-    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505&datPageSize=100",
-    "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "max"
-   },
-   "collect": {
-    "method": "vworld_session",
-    "ds_id": "30505",
-    "level": "all",
-    "file_nos": []
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "staged/lawd_code_v2",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "boundary_ri",
-   "name": "VWorld 구역의 도형 — 리(LSMD_ADM_SECT_RI)",
-   "category": "행정경계",
-   "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "월",
-   "note": "법정리 경계. VWorld dsId=30602 「구역의 도형」 LSMD_ADM_SECT_RI_<시도>(시도별 SHP), EPSG:5186·CP949 — 읍면동(30603)과 같은 계열이라 boundary_legal 블록을 복제해 등록했다. 06-gen-areas.py --type legal-ri 로 areas 에 적재. 필드명(RI_NM/RI_CD)은 잠정값 — 반입 후 ogrinfo 로 확정할 것. 수동 업로드(boundary_legal·boundary_admin 과 동일하게 collect 미배선). 아직 한 번도 반입한 적이 없어 areas 에 legal-ri 행이 없다.",
-   "default_collect": false,
-   "build_input": {
-    "dest": "sources/boundary/ri",
-    "extract": "zip",
-    "into": "dir"
-   },
-   "latest_check": {
-    "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
-    "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
-    "pick": "max"
-   }
-  },
-  {
-   "key": "police",
-   "name": "경찰청_전국 지구대·파출소 주소 현황",
-   "category": "시설",
-   "url": "https://www.data.go.kr/data/15077036/fileData.do",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "연",
-   "note": "관서명+도로명주소(좌표無→지오코딩 단계서 채움). PostGIS public_facility(kind=police). 무인증 datago_filedown(fileDetailSn=1). 적재: load_facility.py --kind police. ※키워드검색의 15054711(폐PK) 사용금지.",
-   "collect": {
-    "method": "datago_filedown",
-    "publicDataPk": "15077036",
-    "fileDetailSn": "1"
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "staged/facility_src/police",
-    "extract": null,
-    "into": "dir"
-   }
-  },
-  {
-   "key": "fire_station",
-   "name": "소방청_119안전센터 현황",
-   "category": "시설",
-   "url": "https://www.data.go.kr/data/15065056/fileData.do",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "119안전센터명+주소. ZIP→연도별 CSV(load_facility 가 최신연도 선택). PostGIS public_facility(kind=fire_station). 무인증. ※소방관서현황 15033759(시·도 집계표)는 POI 아님—금지.",
-   "collect": {
-    "method": "datago_filedown",
-    "publicDataPk": "15065056",
-    "fileDetailSn": "1"
-   },
-   "default_collect": false,
-   "build_input": {
-    "dest": "staged/facility_src/fire_station",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "aed",
-   "name": "국립중앙의료원_전국 자동심장충격기(AED) 정보",
-   "category": "시설",
-   "url": "https://www.data.go.kr/data/15000652/openapi.do",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수시",
-   "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선. ※업로드분은 load-all.sh facility 단계가 디렉토리명→--kind aed 로 자동 적재(soft-wired).",
-   "build_input": {
-    "dest": "staged/facility_src/aed",
-    "extract": null,
-    "into": "dir"
-   }
-  },
-  {
-   "key": "style",
-   "name": "지도 스타일 (style.json — Style Studio 내보내기)",
-   "category": "스타일",
-   "url": "/style",
-   "period_fmt": "YYYY-MM-DD",
-   "cycle": "수동",
-   "note": "Style Studio 에서 '내보내기'로 받은 완성형 style.json(MapLibre 스타일 v8, layers 배열 포함) 을 업로드하면 패키징(폐쇄망 번들) 단계에서 그대로 사용한다. 업로드하지 않으면 기본 스타일을 자동 조립(style/base.json + layers/*.json + theme.json). 빌드 시 staged/style 로 적재되어 package.sh [1/4] 가 STYLE_IMPORT 로 인식.",
-   "build_input": {
-    "dest": "staged/style",
-    "extract": null,
-    "into": "file"
-   }
-  },
-  {
-   "key": "juso_entrance",
-   "name": "도로명주소 출입구 정보 (전체분)",
-   "category": "주소",
-   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "default_collect": false,
-   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명주소 기준 주(보조)출입구 좌표(집합건물 주소 단위). 내비DB 내장 match_rs_entrc 와의 중복성 판정 필요 — 판정 후 지오코딩 정밀화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
-   "planned_build_input": {
-    "dest": "staged/juso_entrance",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "juso_building_shp",
-   "name": "도로명주소 건물 도형 (전체분)",
-   "category": "건물",
-   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "default_collect": false,
-   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명주소 건물 도형+출입구+연결선. VWorld AL_D010 의 신개발지구 신축 공백(과천지식정보타운 등) 보완 원천 — building 적재 병합이 1순위 편입 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
-   "planned_build_input": {
-    "dest": "staged/juso_building_shp",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "juso_building_dong",
-   "name": "건물군 내 상세주소 동 도형 (전체분)",
-   "category": "건물",
-   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "default_collect": false,
-   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 집합건물 내 동(棟) 단위 도형. 아파트 동 표시·상세주소 검색 고도화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
-   "planned_build_input": {
-    "dest": "staged/juso_building_dong",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "juso_thing_shp",
-   "name": "사물주소 시설 도형 (전체분)",
-   "category": "시설",
-   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "default_collect": false,
-   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명+기초번호 기반 사물주소 시설 도형. facility 축 보강 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
-   "planned_build_input": {
-    "dest": "staged/juso_thing_shp",
-    "extract": "zip",
-    "into": "dir"
-   }
-  },
-  {
-   "key": "juso_zone",
-   "name": "구역의 도형 (법정·행정·기초구역, 전체분)",
-   "category": "행정경계",
-   "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
-   "period_fmt": "YYYYMM",
-   "cycle": "월",
-   "default_collect": false,
-   "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 법정구역·행정구역·기초구역(우편)·지점번호표기의무지역 경계. boundary_* 계열 보강 및 기초구역(우편번호) 폴리곤 신규 축 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
-   "planned_build_input": {
-    "dest": "staged/juso_zone",
-    "extract": "zip",
-    "into": "dir"
-   }
-  }
- ]
+    {
+      "key": "localdata",
+      "name": "인허가 지역별 전체분",
+      "category": "인허가",
+      "url": "https://www.localdata.go.kr/",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "일",
+      "note": "지방행정 인허가(업소) 전국 전체분. file.localdata.go.kr 우회(한국 IP 호스트). 하위=17 시·도(orgCode_ALL, localdata-regions.json). URL 확정(2026-06 캡처): /file/download-all, 시·도=?orgCode=<code>_ALL.",
+      "collect": {
+        "method": "localdata_all",
+        "base": "https://file.localdata.go.kr",
+        "path": "/file/download-all",
+        "region_path": "/file/download-all?orgCode={orgCode}_ALL",
+        "regions": "localdata-regions.json"
+      },
+      "default_collect": true,
+      "build_input": {
+        "dest": "staged/localdata",
+        "extract": null,
+        "into": "dir"
+      }
+    },
+    {
+      "key": "facility",
+      "name": "생활편의시설(공공)",
+      "category": "생활편의",
+      "url": "https://www.localdata.go.kr/",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "공중화장실·무인민원발급기 등 14종. file.localdata.go.kr 우회. kind=facility 로 별도 적재(상가/인허가 biz 분리). 14종·슬러그=facility-catalog.json. 종류 선택 다운로드.",
+      "collect": {
+        "method": "localdata_facility",
+        "catalog": "facility-catalog.json"
+      },
+      "default_collect": true,
+      "build_input": {
+        "dest": "staged/facility",
+        "extract": null,
+        "into": "dir"
+      }
+    },
+    {
+      "key": "building_db",
+      "name": "GIS건물통합정보 (건물DB)",
+      "category": "건물",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "월(일 변경분)",
+      "note": "건물 외곽·층수(3D 건물). VWorld 국가중점데이터 dsId=18. 수동 업로드(시도 17개 단위 SHP, 실제 파일명 AL_D010_<시도코드2자리>_<YYYYMMDD>.zip — 전체분; 변동분=CH_D010). 출처 URL은 fileGbnCd=AL(전체분만)·datPageSize=17(17시도 1페이지) — 갱신일 max가 일자 변동분이 아닌 전체분 기준이 되게 함(2026-06 기준 기준일=09·갱신일=10). 폴더채로 올리면 파일별 시도·기준일·최신화 상태 파싱(/api/sources/files, 시도 그룹핑). 최신화 비교=갱신일 대비 월(YYYYMM) 정밀도(월 전체분이라 일자 drift 무시).",
+      "latest_check": {
+        "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL",
+        "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "max"
+      },
+      "collect": {
+        "method": "vworld_session",
+        "ds_id": "18",
+        "level": "sido",
+        "file_nos": [],
+        "list_url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?datIde=&dsId=18&datPageSize=17&svcCde=NA&fileGbnCd=AL"
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "staged/gis",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "parcel",
+      "name": "연속지적도 (VWorld dsId=30563)",
+      "category": "지적",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30563",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "전국 연속지적(≈39.6M 필지). VWorld 로그인 쿠키 필요(vworld_session, 무인증 대체 없음). PostGIS parcel(시도 LIST 파티션) 적재=scripts/postgis/load_parcel.sh(파티션은 파일명 아닌 PNU 앞2자리로 라우팅). fileNo 는 쿠키로 목록페이지에서 자동발견. ⚠ level=sido(시도 통합 1파일/시도)는 대형 시도(경기·충북·충남·전남·경북·경남·전북) 통합파일이 빈 응답(0바이트)이라 ~10시도만 수집됨 → level=sigungu(시군구 단위 ~250파일 전수)로 전환해 전국 커버. 다운로드 엔드포인트=downloadResourceFile.do?ds_id=&fileNo=.",
+      "collect": {
+        "method": "vworld_session",
+        "ds_id": "30563",
+        "level": "sigungu",
+        "file_nos": []
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "staged/parcel",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "osm",
+      "name": "OpenStreetMap (남한, geofabrik)",
+      "category": "OSM",
+      "url": "https://download.geofabrik.de/asia/south-korea.html",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "일",
+      "note": "base 벡터타일(도로·수계·지형) + 아파트 동(棟) 라벨 + 지오코더(역·지명·POI) 보강. south-korea-latest.osm.pbf 직접 다운로드(차단 없음). 거의 안 바뀌어 기본 미체크(직전 OSM 재사용), 체크 시에만 .pbf 재다운로드+변환(planetiler→korea.mbtiles, osm.sqlite, 동 라벨). 변환은 무거움(Java·~1GB 보조데이터·수십분).",
+      "latest_check": {
+        "regex": "up to\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "first"
+      },
+      "collect": {
+        "method": "geofabrik",
+        "url": "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf",
+        "dest": "data/osm/south-korea.osm.pbf",
+        "build_targets": [
+          "osm_vector",
+          "osm_sqlite",
+          "dong"
+        ]
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "data/osm",
+        "extract": null,
+        "into": "file"
+      }
+    },
+    {
+      "key": "boundary_legal",
+      "name": "행정구역 읍면동(법정동) 경계",
+      "category": "행정경계",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "월",
+      "note": "VWorld dsId=30603(datPageSize=100로 17시도 전체 한 페이지) 「행정구역_읍면동(법정동)」 LSMD_ADM_SECT_UMD_<시도>(시도별 SHP). EPSG:5186·CP949, 필드 EMD_NM/EMD_CD(8자리=법정동코드 앞8). 역지오코딩 areas(type=legal-dong) 적재: `06-gen-areas.py --shp sources/boundary/legal --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong`. 2026-06 기준 5,370건. 갱신일 추적=VWorld 30603(갱신일 YYYY-MM-DD). 대안 법정동 소스 GIS Developer(gisdeveloper.co.kr/?p=2332, 읍면동=법정동, 가입X)이나 날짜가 지저분해 VWorld 채택.",
+      "build_input": {
+        "dest": "sources/boundary/legal",
+        "extract": "zip",
+        "into": "dir"
+      },
+      "latest_check": {
+        "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
+        "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "max"
+      }
+    },
+    {
+      "key": "boundary_admin",
+      "name": "행정동 경계 (센서스경계)",
+      "category": "행정경계",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "반기",
+      "note": "행정동 경계 BND_ADM_DONG_PG(VWorld dsId=30017, 통계청 센서스경계와 동일파일) BND_ADM_DONG_PG(단일 SHP). EPSG:5186·CP949, 필드 ADM_NM/ADM_CD(8자리, SGIS 한국행정구역분류 코드계 — navi h_code와 다른 체계, 이름은 일치). 역지오코딩 areas(type=admin-dong) 적재: `06-gen-areas.py --shp sources/boundary/admin/BND_ADM_DONG_PG.shp --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong`. 2025-06-30 기준 3,559건 갱신일 추적=VWorld 30017 BND_ADM_DONG_PG 갱신일(서버렌더·정적 OK, 파일 DBF 날짜와 일치). data.go.kr 15125055도 동일 데이터(수정일).",
+      "build_input": {
+        "dest": "sources/boundary/admin",
+        "extract": "zip",
+        "into": "dir"
+      },
+      "latest_check": {
+        "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30017&datPageSize=100",
+        "regex": "BND_ADM_DONG_PG[\\s\\S]*?갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "first"
+      }
+    },
+    {
+      "key": "lawd_code_v2",
+      "name": "법정동코드(신구대응) — VWorld 국가공간정보 dsId=30505",
+      "category": "행정코드",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "OLD_LAWDCD(신구 법정동코드 대응)의 유일 원천. 리 사전 원천인 lawd_code(code.go.kr, 53,387행)와 별개 — 대체하지 말 것. cp949 10컬럼 CSV(LSCT_LAWDCD.csv, 31,172행) → lawd_code_v2 적재(load_lawd_code_v2.py). 인천 신설 4구·전남광주 12체계의 옛→신 대응을 명칭 조인 없이 산출하는 축. ※실측(2026-08-18): 목록에 파일 2건 — fileNo=1 LSCT_LAWDCD.zip(276KB, 본체) · fileNo=2 Z_LURIS_LSCT_LAWDCD.xlsx(11KB, 부수). dsFileId 는 페이지 dsId 와 동일한 '30505'(건물DB 의 '20171128DS00010' 같은 불일치 없음). level=all 이라 xlsx 도 함께 받지만 적재기는 CSV 만 읽으므로 무해하고, fileNo 하드코딩 대신 목록 자동조회를 써야 갱신분을 따라간다.",
+      "latest_check": {
+        "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30505&datPageSize=100",
+        "regex": "갱신일\\s*<em[^>]*>\\s*(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "max"
+      },
+      "collect": {
+        "method": "vworld_session",
+        "ds_id": "30505",
+        "level": "all",
+        "file_nos": []
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "staged/lawd_code_v2",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "boundary_ri",
+      "name": "VWorld 구역의 도형 — 리(LSMD_ADM_SECT_RI)",
+      "category": "행정경계",
+      "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "월",
+      "note": "법정리 경계. VWorld dsId=30602 「구역의 도형」 LSMD_ADM_SECT_RI_<시도>(시도별 SHP), EPSG:5186·CP949 — 읍면동(30603)과 같은 계열이라 boundary_legal 블록을 복제해 등록했다. 06-gen-areas.py --type legal-ri 로 areas 에 적재. 필드명(RI_NM/RI_CD)은 잠정값 — 반입 후 ogrinfo 로 확정할 것. 수동 업로드(boundary_legal·boundary_admin 과 동일하게 collect 미배선). 아직 한 번도 반입한 적이 없어 areas 에 legal-ri 행이 없다.",
+      "default_collect": false,
+      "build_input": {
+        "dest": "sources/boundary/ri",
+        "extract": "zip",
+        "into": "dir"
+      },
+      "latest_check": {
+        "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30602&datPageSize=100",
+        "regex": "갱신일<em[^>]*>(\\d{4}-\\d{2}-\\d{2})",
+        "pick": "max"
+      }
+    },
+    {
+      "key": "police",
+      "name": "경찰청_전국 지구대·파출소 주소 현황",
+      "category": "시설",
+      "url": "https://www.data.go.kr/data/15077036/fileData.do",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "연",
+      "note": "관서명+도로명주소(좌표無→지오코딩 단계서 채움). PostGIS public_facility(kind=police). 무인증 datago_filedown(fileDetailSn=1). 적재: load_facility.py --kind police. ※키워드검색의 15054711(폐PK) 사용금지.",
+      "collect": {
+        "method": "datago_filedown",
+        "publicDataPk": "15077036",
+        "fileDetailSn": "1"
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "staged/facility_src/police",
+        "extract": null,
+        "into": "dir"
+      }
+    },
+    {
+      "key": "fire_station",
+      "name": "소방청_119안전센터 현황",
+      "category": "시설",
+      "url": "https://www.data.go.kr/data/15065056/fileData.do",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "119안전센터명+주소. ZIP→연도별 CSV(load_facility 가 최신연도 선택). PostGIS public_facility(kind=fire_station). 무인증. ※소방관서현황 15033759(시·도 집계표)는 POI 아님—금지.",
+      "collect": {
+        "method": "datago_filedown",
+        "publicDataPk": "15065056",
+        "fileDetailSn": "1"
+      },
+      "default_collect": false,
+      "build_input": {
+        "dest": "staged/facility_src/fire_station",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "aed",
+      "name": "국립중앙의료원_전국 자동심장충격기(AED) 정보",
+      "category": "시설",
+      "url": "https://www.data.go.kr/data/15000652/openapi.do",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수시",
+      "note": "전국 AED(좌표有). E-Gen openAPI(apis.data.go.kr/B552657/AEDInfoInqireService, serviceKey 자동승인·페이지네이션). 파일 직다운 없음→키 발급 후 standalone collect_aed.py(예정)로 CSV 생성 → load_facility.py --kind aed. serviceKey 미보유라 자동수집 미배선. ※업로드분은 load-all.sh facility 단계가 디렉토리명→--kind aed 로 자동 적재(soft-wired).",
+      "build_input": {
+        "dest": "staged/facility_src/aed",
+        "extract": null,
+        "into": "dir"
+      }
+    },
+    {
+      "key": "style",
+      "name": "지도 스타일 (style.json — Style Studio 내보내기)",
+      "category": "스타일",
+      "url": "/style",
+      "period_fmt": "YYYY-MM-DD",
+      "cycle": "수동",
+      "note": "Style Studio 에서 '내보내기'로 받은 완성형 style.json(MapLibre 스타일 v8, layers 배열 포함) 을 업로드하면 패키징(폐쇄망 번들) 단계에서 그대로 사용한다. 업로드하지 않으면 기본 스타일을 자동 조립(style/base.json + layers/*.json + theme.json). 빌드 시 staged/style 로 적재되어 package.sh [1/4] 가 STYLE_IMPORT 로 인식.",
+      "build_input": {
+        "dest": "staged/style",
+        "extract": null,
+        "into": "file"
+      }
+    },
+    {
+      "key": "juso_entrance",
+      "name": "도로명주소 출입구 정보 (전체분)",
+      "category": "주소",
+      "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "default_collect": false,
+      "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명주소 기준 주(보조)출입구 좌표(집합건물 주소 단위). 내비DB 내장 match_rs_entrc 와의 중복성 판정 필요 — 판정 후 지오코딩 정밀화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+      "planned_build_input": {
+        "dest": "staged/juso_entrance",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "juso_building_shp",
+      "name": "도로명주소 건물 도형 (전체분)",
+      "category": "건물",
+      "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "default_collect": false,
+      "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). load_postgis(building 단계)가 load_building_juso_all.sh 로 소비한다(2026-08-31 편입 — AL_D010 신축 공백 패치, 건물군은 동 포함 시 제외). 도로명주소 건물 도형+출입구+연결선. VWorld AL_D010 의 신개발지구 신축 공백(과천지식정보타운 등) 보완 원천 — building 적재 병합이 1순위 편입 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+      "planned_build_input": {
+        "dest": "staged/juso_building_shp",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "juso_building_dong",
+      "name": "건물군 내 상세주소 동 도형 (전체분)",
+      "category": "건물",
+      "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "default_collect": false,
+      "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). load_postgis(building 단계)가 load_building_juso_all.sh 로 소비한다(2026-08-31 편입 — AL_D010 신축 공백 패치, 건물군은 동 포함 시 제외). 집합건물 내 동(棟) 단위 도형. 아파트 동 표시·상세주소 검색 고도화 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+      "planned_build_input": {
+        "dest": "staged/juso_building_dong",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "juso_thing_shp",
+      "name": "사물주소 시설 도형 (전체분)",
+      "category": "시설",
+      "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "default_collect": false,
+      "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 도로명+기초번호 기반 사물주소 시설 도형. facility 축 보강 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+      "planned_build_input": {
+        "dest": "staged/juso_thing_shp",
+        "extract": "zip",
+        "into": "dir"
+      }
+    },
+    {
+      "key": "juso_zone",
+      "name": "구역의 도형 (법정·행정·기초구역, 전체분)",
+      "category": "행정경계",
+      "url": "https://business.juso.go.kr/jsm/JsmAddressInfoAplyDetails?reqstGroup=46372",
+      "period_fmt": "YYYYMM",
+      "cycle": "월",
+      "default_collect": false,
+      "note": "2026-08-28 확보(기준월 202607·만료 2026-09-28·신청그룹 46372, 시도별 zip 16개). juso 다운로드 신청내역에서 수동 다운로드(인수확인·보안각서 필요). ★아직 어떤 빌드 타깃도 소비하지 않는다 — 편입은 후속 태스크. 법정구역·행정구역·기초구역(우편)·지점번호표기의무지역 경계. boundary_* 계열 보강 및 기초구역(우편번호) 폴리곤 신규 축 후보. ★build_input 은 편입 태스크에서 활성화(planned_build_input → build_input) — 전 소스 일괄 스테이징(prepare_sources keys=None)이 2.6GB→~7GB 해제로 디스크를 잠식하는 것을 막기 위해 비활성 등록.",
+      "planned_build_input": {
+        "dest": "staged/juso_zone",
+        "extract": "zip",
+        "into": "dir"
+      }
+    }
+  ]
 }

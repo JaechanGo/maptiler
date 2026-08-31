@@ -678,10 +678,15 @@ TFRESH = {
     #   빠뜨리면 새 경계를 올려도 fresh 판정으로 조용히 건너뛴다.
     "areas": {"src": ["boundary_legal", "boundary_admin", "boundary_ri"], "dep_art": ["geocode"],
               "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
-    "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility"],
+    # juso_building_shp/dong: AL_D010 이 놓친 신축(신개발지구) 패치 원천(2026-08 편입).
+    #   load-all.sh building 단계가 load_building_juso_all.sh 로 소비 — 원천/로더 갱신 시 stale.
+    "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility",
+                             "juso_building_shp", "juso_building_dong"],
                      "dep_art": ["geocode"],
                      "scripts": ["scripts/postgis/load-all.sh", "scripts/postgis/load_parcel.sh",
                                  "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py",
+                                 "scripts/postgis/load_building_juso.sh",
+                                 "scripts/postgis/load_building_juso_all.sh",
                                  # ── 지번 1급화(A3): 스키마·사전·백필 추적 → 개선 시 stale 인식(조용한 skip 방지) ──
                                  "scripts/postgis/schema/21-parcel-jibun.sql",
                                  "scripts/postgis/build_dong_dict.sql",
