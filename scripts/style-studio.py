@@ -876,7 +876,12 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity',theme:['donglabel']}};
  const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',rail:'철도',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
  const ovrKo=v=>OVRCLS[v]||v;
- let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[];
+ let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[], ovrEdit=null;
+ function ovrHex(v){ // paint 색값(#hex·hsl·rgb…) → #rrggbb (식이면 null)
+   if(typeof v!=='string')return null;
+   const ctx=ovrHex._c||(ovrHex._c=document.createElement('canvas').getContext('2d'));
+   ctx.fillStyle='#000'; ctx.fillStyle=v; const r=ctx.fillStyle;
+   return /^#[0-9a-f]{6}$/i.test(r)?r:null;}
  function ovrCondExpr(c){const g=['get',c.key];
    if(c.op==='any')return ['==',1,1];
    if(c.op==='prefix')return ['==',['slice',['coalesce',g,''],0,c.value.length],c.value];
@@ -914,8 +919,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      if(o.width!=null&&mm.width) map.setPaintProperty(cloneDef.id,mm.width,o.width);
      (clones[lid]=clones[lid]||[]).push(cloneDef.id); });
  }
- // 범위 옵션 — 시연 페이지와 동일 계층: 완전개별 → 객체그룹 → 유형그룹 → 전체.
- //  conds 형 = 오버라이드(부분), theme 형 = 기존 테마 색·투명도와 연동(색상 탭과 동일 대상).
+ // 범위 옵션 — 완전개별 → 객체그룹 → 유형그룹 → 전체(테마 연동)
  function ovrScopeOptions(f){const lid=f.layer.id,p=f.properties,mm=OVRMETA[lid],o=[];
    const push=(label,conds,tag)=>o.push({label,conds,tag});
    if(lid==='Building 3D'||lid==='building-2d'){
@@ -982,16 +986,59 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   '<div id=ovrTabs style="display:flex;gap:6px;flex-wrap:wrap"></div>'+
   '<div id=ovrInfo style="background:#0d1320;border-radius:8px;padding:7px 10px;color:#8d9bb5;font-size:11.5px;line-height:1.5;max-height:60px;overflow:auto"></div>'+
   '<div id=ovrScopes style="display:flex;flex-direction:column;gap:5px"></div>'+
-  '<div class=row><label style="flex:0 0 52px">색상</label><input type=color id=ovrColor value="#e64a3c"></div>'+
+  '<div class=row><label style="flex:0 0 52px">색상</label><input type=color id=ovrColor value="#808080"></div>'+
   '<div class=row><label style="flex:0 0 52px">투명도</label><input type=range id=ovrOp min=0 max=100 value=100 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrOpv>100%</span></div>'+
   '<div class=row id=ovrWrow style="display:none"><label style="flex:0 0 52px">굵기</label><input type=range id=ovrW min=1 max=120 value=10 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrWv>1.0</span></div>'+
-  '<div style="display:flex;gap:8px"><button id=ovrApply style="flex:1">추가</button><button id=ovrHide class=g style="flex:1">숨기기</button></div>'+
-  '<p class=hint id=ovrNote style="margin:0">노란 테두리 = 지금 선택된 적용 범위. ‘저장 &amp; 적용’ 시 영구 반영됩니다.</p></div>';
+  '<div style="display:flex;gap:8px"><button id=ovrApply style="flex:1">적용</button><button id=ovrHide class=g style="flex:1">숨기기</button></div>'+
+  '<p class=hint id=ovrNote style="margin:0">값을 바꾸면 미리보기에 즉시 반영 — [적용]=확정, ✕/다른 곳 클릭=원복. ‘저장 &amp; 적용’ 시 영구 반영.</p></div>';
  document.body.appendChild(ovrModal);
- $('#ovrX').onclick=()=>{ovrModal.style.display='none';ovrHLClear();};
- $('#ovrOp').oninput=e=>$('#ovrOpv').textContent=e.target.value+'%';
- $('#ovrW').oninput=e=>$('#ovrWv').textContent=(e.target.value/10).toFixed(1);
- function ovrOpenModal(f,pt){ovrCur=f;const mm=OVRMETA[f.layer.id];
+ // ── 편집 세션 — 현재값 표시 → 라이브 미리보기 → 적용(확정)/닫기(원복) ──
+ function ovrCurVals(op){ const lid=ovrCur.layer.id, mm=OVRMETA[lid];
+   if(op.theme){ const k=op.theme[0]; const c=$('#c_'+k), o2=$('#o_'+k);
+     return {color:(c&&c.value)||'#808080', opacity:o2?+o2.value:100, width:null, existing:null}; }
+   const ex=OVR.find(e=>e.layer===lid&&!e.hide&&JSON.stringify(e.conds)===JSON.stringify(op.conds));
+   const bc=ovrHex(map.getPaintProperty(lid,mm.color))||'#808080';
+   const bo=map.getPaintProperty(lid,mm.opacity); const bw=mm.width?map.getPaintProperty(lid,mm.width):null;
+   return {color:(ex&&ex.color)||bc,
+           opacity:ex&&ex.opacity!=null?Math.round(ex.opacity*100):(typeof bo==='number'?Math.round(bo*100):100),
+           width:mm.width?((ex&&ex.width!=null)?ex.width*10:(typeof bw==='number'?Math.max(1,Math.round(bw*10)):10)):null,
+           existing:ex||null}; }
+ function ovrBeginEdit(){ ovrCancelEdit();
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel){ovrEdit=null;return;}
+   const op=ovrOpts[+sel.value], v=ovrCurVals(op);
+   $('#ovrColor').value=v.color; $('#ovrOp').value=v.opacity; $('#ovrOpv').textContent=v.opacity+'%';
+   if(v.width!=null){$('#ovrW').value=v.width; $('#ovrWv').textContent=(v.width/10).toFixed(1);}
+   ovrEdit={op, lid:ovrCur.layer.id, touched:false,
+            entry:v.existing, isNew:!v.existing,
+            backup:v.existing?JSON.parse(JSON.stringify(v.existing)):null,
+            themeBackup:op.theme?op.theme.map(k=>({k, c:($('#c_'+k)||{}).value, o:($('#o_'+k)||{}).value})):null}; }
+ function ovrLive(){ if(!ovrEdit)return; ovrEdit.touched=true;
+   const e=ovrEdit, mm=OVRMETA[e.lid];
+   if(e.op.theme){ e.op.theme.forEach(k=>{const c=$('#c_'+k); if(c){c.value=$('#ovrColor').value; c.dispatchEvent(new Event('input'));}
+       const o2=$('#o_'+k); if(o2){o2.value=$('#ovrOp').value; o2.dispatchEvent(new Event('input'));}}); return;}
+   if(!e.entry){ e.entry={layer:e.lid,conds:e.op.conds,label:e.op.label}; OVR.push(e.entry); }
+   e.entry.color=$('#ovrColor').value; e.entry.opacity=+$('#ovrOp').value/100;
+   if(mm.width)e.entry.width=+$('#ovrW').value/10;
+   ovrRebuild(); }
+ function ovrCancelEdit(){ const e=ovrEdit; if(!e){return;} ovrEdit=null;
+   if(!e.touched)return;
+   if(e.op.theme){ (e.themeBackup||[]).forEach(b=>{const c=$('#c_'+b.k); if(c&&b.c!=null){c.value=b.c; c.dispatchEvent(new Event('input'));}
+       const o2=$('#o_'+b.k); if(o2&&b.o!=null){o2.value=b.o; o2.dispatchEvent(new Event('input'));}}); return;}
+   if(e.isNew&&e.entry){ const i=OVR.indexOf(e.entry); if(i>=0)OVR.splice(i,1); ovrRebuild(); }
+   else if(e.entry&&e.backup){ Object.keys(e.entry).forEach(k=>delete e.entry[k]); Object.assign(e.entry,e.backup); ovrRebuild(); } }
+ function ovrCommit(){ const e=ovrEdit; if(!e)return;
+   if(!e.touched){ $('#status').textContent='변경 없음'; ovrEdit=null; ovrCloseModal(); return; }
+   if(e.op.theme){ $('#status').textContent='전체 범위 — 테마('+e.op.theme.join('·')+') 변경, 저장 & 적용 시 영구 반영'; }
+   else { OVRdirty=true; renderOvrList();
+     $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영'; }
+   ovrEdit=null;   // 확정 — 원복 없이 세션 종료
+   ovrCloseModal(); }
+ function ovrCloseModal(){ ovrCancelEdit(); ovrModal.style.display='none'; ovrHLClear(); }
+ $('#ovrX').onclick=ovrCloseModal;
+ $('#ovrOp').oninput=e=>{$('#ovrOpv').textContent=e.target.value+'%'; ovrLive();};
+ $('#ovrW').oninput=e=>{$('#ovrWv').textContent=(e.target.value/10).toFixed(1); ovrLive();};
+ $('#ovrColor').oninput=ovrLive;
+ function ovrOpenModal(f,pt){ ovrCancelEdit(); ovrCur=f; const mm=OVRMETA[f.layer.id];
    $('#ovrTitle').textContent=mm.label;
    $('#ovrTabs').innerHTML='';
    ovrHits.forEach(h=>{const b=document.createElement('button');b.className='mini'+(h.layer.id===f.layer.id?'':' g');
@@ -1000,30 +1047,25 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    $('#ovrInfo').innerHTML=ks.length?ks.map(k=>'<b style="color:#5b9bd5">'+k+'</b>: '+String(p[k]).slice(0,36)).join('<br>'):'(속성 없음)';
    ovrOpts=ovrScopeOptions(f);
    $('#ovrScopes').innerHTML=ovrOpts.map((o,i)=>'<label style="display:flex;gap:8px;align-items:center;background:#0d1320;border:1px solid #26304a;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px"><input type=radio name=ovrscope value='+i+' '+(i===0?'checked':'')+'>'+o.label+'<small style="color:#5f6b80;margin-left:auto">'+o.tag+'</small></label>').join('');
-   document.querySelectorAll('input[name=ovrscope]').forEach(r=>r.onchange=ovrHLShow);
+   document.querySelectorAll('input[name=ovrscope]').forEach(r=>r.onchange=()=>{ovrBeginEdit();ovrHLShow();});
    $('#ovrWrow').style.display=mm.width?'flex':'none';
    ovrModal.style.display='block';
    ovrModal.style.left=Math.min(pt.x+14,innerWidth-320)+'px';
    ovrModal.style.top=Math.min(pt.y+60,innerHeight-460)+'px';
-   ovrHLShow();}
- function ovrPush(hide){ if(!ovrCur||!ovrOpts.length)return;
+   ovrBeginEdit(); ovrHLShow();}
+ function ovrPushHide(){ if(!ovrCur||!ovrOpts.length)return;
    const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
    const op=ovrOpts[+sel.value];
-   if(op.theme){ // 전체 범위 — 기존 테마(색상·투명도·표시 탭)와 연동
-     op.theme.forEach(k=>{
-       if(hide){const v=$('#v_'+k); if(v){v.checked=false; v.dispatchEvent(new Event('change'));} return;}
-       const c=$('#c_'+k); if(c){c.value=$('#ovrColor').value; c.dispatchEvent(new Event('input'));}
-       const o2=$('#o_'+k); if(o2){o2.value=$('#ovrOp').value; o2.dispatchEvent(new Event('input'));}});
-     $('#status').textContent='전체 범위 — 테마('+op.theme.join('·')+') 변경, 저장 & 적용 시 영구 반영';
-     ovrModal.style.display='none'; ovrHLClear(); return;}
-   const o={layer:ovrCur.layer.id,conds:op.conds,label:op.label};
-   if(hide)o.hide=true; else{o.color=$('#ovrColor').value;o.opacity=+$('#ovrOp').value/100;
-     if(OVRMETA[ovrCur.layer.id].width)o.width=+$('#ovrW').value/10;}
-   OVR.push(o);OVRdirty=true;renderOvrList();ovrRebuild();
+   ovrCancelEdit();   // 진행 중이던 라이브 편집 원복 후 숨김 확정
+   if(op.theme){ op.theme.forEach(k=>{const v=$('#v_'+k); if(v){v.checked=false; v.dispatchEvent(new Event('change'));}});
+     $('#status').textContent='전체 범위 — 표시 해제(데이터 탭과 동일), 저장 & 적용 시 영구 반영';
+     ovrCloseModal(); return;}
+   OVR.push({layer:ovrCur.layer.id,conds:op.conds,label:op.label,hide:true});
+   OVRdirty=true;renderOvrList();ovrRebuild();
    $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영';
-   ovrModal.style.display='none'; ovrHLClear();}
- $('#ovrApply').onclick=()=>ovrPush(false);
- $('#ovrHide').onclick=()=>ovrPush(true);
+   ovrCloseModal();}
+ $('#ovrApply').onclick=ovrCommit;
+ $('#ovrHide').onclick=ovrPushHide;
  // map 준비되면 부착(메인 fetch 콜백에서 map 생성됨)
  const ovrBoot=setInterval(()=>{ if(!map)return; clearInterval(ovrBoot);
    // 순서 중요: OVR 목록을 먼저 받아야 정밀 언랩이 가능하다(제외식 매칭 기반).
@@ -1032,7 +1074,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    map.isStyleLoaded()?init():map.once('idle',init);
    map.on('click',e=>{
      const fs=map.queryRenderedFeatures(e.point).filter(x=>OVRMETA[x.layer.id]&&!/^ovr-(preview-|hl)/.test(x.layer.id));
-     if(!fs.length){ovrModal.style.display='none';ovrHLClear();return;}
+     if(!fs.length){ovrCloseModal();return;}
      const seen=new Set();ovrHits=[];
      for(const x of fs){if(!seen.has(x.layer.id)){seen.add(x.layer.id);ovrHits.push(x);}if(ovrHits.length>=5)break;}
      ovrOpenModal(ovrHits[0],e.point);});
