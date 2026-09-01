@@ -49,6 +49,7 @@
   let routes = [];                   // 이번 응답의 경로들(대안 포함) — 선택 전환 시 재질의 없이 사용
   let routeIdx = 0;                  // 선택된 경로 인덱스
   let routePts = [];                 // 그 응답에 쓴 지점(출구 스냅 반영본) — 마커·출구 고지의 진실원
+  let routeWps = [];                 // OSRM waypoints — 지점이 도로망 어디로 스냅됐는지(접근선 표시용)
   // 회피 옵션 → OSRM exclude (그래프에 excludable 로 구워짐). 프로필별로 쓸 수 있는 클래스가 다르다.
   const avoid = { toll: false, motorway: false, steps: false };
   const AVOID_OPTS = {                       // 프로필 → [키, 라벨] 목록. 없는 프로필은 옵션 줄 자체를 숨김
@@ -292,6 +293,7 @@
   // ---- 경로 그리기 ----
   const SRC = 'cuvia-route';
   const ALT = 'cuvia-route-alt';     // 선택 안 된 대안 경로(회색) — 별도 소스라야 선택 전환이 즉시
+  const LNK = 'cuvia-route-link';    // 접근선 — 지점과 도로망 스냅 지점을 잇는 점선
   function clearRoute() {
     // ★ 인플라이트 질의 무효화 — 이게 없으면 응답 대기 중 지운 경로가 되살아난다.
     //   (출발지 텍스트 수정 → 슬롯 무효화+clearRoute → 새 질의는 안 나감(슬롯 미완성) →
@@ -304,7 +306,9 @@
     if (map.getSource(SRC)) map.removeSource(SRC);
     if (map.getLayer(ALT + '-line')) map.removeLayer(ALT + '-line');
     if (map.getSource(ALT)) map.removeSource(ALT);
-    routes = []; routeIdx = 0; routePts = [];
+    if (map.getLayer(LNK + '-line')) map.removeLayer(LNK + '-line');
+    if (map.getSource(LNK)) map.removeSource(LNK);
+    routes = []; routeIdx = 0; routePts = []; routeWps = [];
     panel.querySelector('#rt-routes').innerHTML = '';
     const sum = panel.querySelector('#rt-summary');
     sum.style.display = 'none'; sum.textContent = '';   // 내용까지 비움 — 남기면 다음 표시 때 낡은 값이 스친다
@@ -331,6 +335,19 @@
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-color': '#7d8aa0', 'line-width': 4, 'line-opacity': 0.55 } },
       map.getLayer(SRC + '-casing') ? SRC + '-casing' : undefined);
+  }
+  // 접근선 — 지점(공원 안 화장실, 건물 안쪽 등)이 통행 가능한 도로에서 떨어져 있으면 OSRM 은
+  // 가장 가까운 도로로 스냅해 거기서부터 경로를 낸다. 그 사이 구간은 경로에 없어서 경로선이
+  // 마커에 못 닿고 "길이 끊겼다"로 읽힌다(실측: 한아름어린이공원 화장실 — 차량 50.8m·도보 17.9m).
+  // 그 간격을 점선으로 이어 "여기서부터는 도로가 없다"를 눈에 보이게 만든다.
+  const LINK_MIN_M = 12;             // 이보다 가까우면 스냅 오차 수준 — 표시하지 않는다
+  function drawLinks(feats) {
+    const fc = { type: 'FeatureCollection', features: feats };
+    if (map.getSource(LNK)) { map.getSource(LNK).setData(fc); return; }
+    map.addSource(LNK, { type: 'geojson', data: fc });
+    map.addLayer({ id: LNK + '-line', type: 'line', source: LNK,
+      layout: { 'line-cap': 'round' },
+      paint: { 'line-color': '#e8b84a', 'line-width': 3, 'line-dasharray': [1.5, 1.5] } });
   }
   function drawRoute(geojson, pts) {
     if (map.getSource(SRC)) {
@@ -404,6 +421,16 @@
     drawRoute({ type: 'Feature', geometry: r0.geometry, properties: {} }, routePts);
     drawAlts(routes.filter((_, i) => i !== routeIdx)
       .map(r => ({ type: 'Feature', geometry: r.geometry, properties: {} })));
+    // 지점 ↔ 도로 스냅 지점 간격을 점선으로
+    const links = [];
+    routeWps.forEach((w, i) => {
+      const p = routePts[i];
+      if (!p || !w || !w.location) return;
+      if (havM(p.lon, p.lat, w.location[0], w.location[1]) < LINK_MIN_M) return;
+      links.push({ type: 'Feature', properties: {},
+        geometry: { type: 'LineString', coordinates: [[p.lon, p.lat], w.location] } });
+    });
+    drawLinks(links);
     if (fit) {
       const b = r0.geometry.coordinates.reduce((acc, c) => [
         Math.min(acc[0], c[0]), Math.min(acc[1], c[1]),
@@ -432,6 +459,21 @@
       ex.style.cssText = 'color:#8fd3a8;font-size:11px;margin-top:2px';
       ex.textContent = '출구 기준: ' + exitPts.map(p => p.label).join(' · ');
       sum.appendChild(ex);
+    }
+    // 도로에서 떨어진 지점 고지 — 점선 구간이 왜 생겼는지 글로도 알린다
+    const far = routeWps.map((w, i) => {
+      const p = routePts[i];
+      if (!p || !w || !w.location) return null;
+      const d = havM(p.lon, p.lat, w.location[0], w.location[1]);
+      return d >= LINK_MIN_M
+        ? (i === 0 ? '출발' : i === routeWps.length - 1 ? '도착' : '경유' + i) + ' ' + Math.round(d) + 'm'
+        : null;
+    }).filter(Boolean);
+    if (far.length) {
+      const fl = document.createElement('div');
+      fl.style.cssText = 'color:#e8b84a;font-size:11px;margin-top:2px';
+      fl.textContent = '도로까지 ' + far.join(' · ') + ' — 점선 구간은 도로 없음';
+      sum.appendChild(fl);
     }
     // 턴바이턴 목록
     stepsEl.innerHTML = '';
@@ -487,7 +529,7 @@
           sum.style.color = '#f87171';
           return;
         }
-        routes = d.routes; routeIdx = 0; routePts = pts;
+        routes = d.routes; routeIdx = 0; routePts = pts; routeWps = d.waypoints || [];
         renderRoutes();
         paintRoute(true);
       })
