@@ -83,6 +83,11 @@ const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`)
 
 OSRM 자체 호스팅(`osrm-car`·`osrm-foot`)을 게이트웨이가 프로필로 분기한다
 (`/route|/table|/trip|/nearest` 의 `v1/driving`→차량, `v1/walking`→도보 — OSRM/Mapbox Directions 표준 URL).
+도보 길찾기에서 역을 지점으로 지정하면 데모가 최적 출구로 좌표를 스냅한다
+(`demo/data/station-exits.json` — `scripts/08-gen-station-exits.py` 가 OSM `railway=subway_entrance` +
+출구번호 `ref` 를 추출, 전국 4,555개). 이웃 지점에 가장 가까운 출구를 골라 "상동역 8번 출구"로 안내한다.
+차량은 스냅하지 않는다(역 앞 도로 대표점이 관례).
+
 폐쇄망 전용 — 실시간 교통은 미반영. 소요시간은 한국 도심 보정 프로필(`scripts/route-profiles/{car,foot}.lua` — 차량: 등급별 실효속도·신호등 40s·회전/유턴 지연, 도보: 4.5km/h·신호 횡단 30s·계단 감속)로 상용 내비의 "평상시" 추정에 근사시킨 값이다.
 
 ```js

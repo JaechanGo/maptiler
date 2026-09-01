@@ -47,3 +47,20 @@ for profile in $PROFILES; do
 done
 
 echo "길찾기 그래프 생성 완료: route/{$(echo $PROFILES | tr ' ' ',')}"
+
+# ★ 실행 중인 osrm-routed 는 그래프를 mmap 으로 붙들고 있다. 이 스크립트의 대용량 I/O 는
+#   빌드 대상이 아닌 프로필의 컨테이너까지 그 뷰를 깨뜨린 사례가 있다(2026-09-01 실측:
+#   foot 빌드 중 실행 중이던 osrm-car 가 부천 좌표를 서울 '망우로'로 스냅, 3.2km→65km 오답.
+#   파일은 정상이었고 재시작만으로 복구 — 즉 런타임 상태 손상). 빌드 후 osrm 전체 재시작이 정답.
+if command -v docker >/dev/null 2>&1; then
+  RUNNING="$(docker ps --filter name=osrm --format '{{.Names}}' 2>/dev/null || true)"
+  if [ -n "$RUNNING" ]; then
+    echo "⚠ 실행 중인 osrm 컨테이너가 있습니다 — 그래프 교체 후 재시작해야 오답을 막습니다:"
+    echo "$RUNNING" | sed 's/^/    /'
+    if [ "${OSRM_AUTO_RESTART:-1}" = "1" ]; then
+      echo "  → 재시작 중 (건너뛰려면 OSRM_AUTO_RESTART=0)"
+      # shellcheck disable=SC2086
+      docker restart $RUNNING >/dev/null && echo "  ✓ 재시작 완료"
+    fi
+  fi
+fi

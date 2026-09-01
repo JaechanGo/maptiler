@@ -1,6 +1,8 @@
 // 길찾기 데모 — OSRM(osrm-car·osrm-foot) 게이트웨이 경유 호출. FEAT-007/ADR-009.
 // 출발/도착/경유지(geocode 자동완성 + 지도 클릭 지정) → /route/v1/{driving|walking} →
 // 경로선(GeoJSON)·총 시간/거리·구간(leg)·턴바이턴 목록 표시.
+// 도보 프로필에서 역(kind=station) 지점은 최적 출구로 스냅(data/station-exits.json —
+// scripts/08-gen-station-exits.py 산출, OSM subway_entrance+ref). 차량은 도로 대표점 그대로.
 // 기본 same-origin(게이트웨이 뒤면 포트 무관). 직접 띄웠으면 ?router=http://host:port 지정.
 // 주의: 소요시간은 도로등급 실효속도·신호/회전 지연 반영 추정(scripts/route-profiles/car.lua) — 실시간 교통 미반영.
 (function () {
@@ -160,7 +162,7 @@
               row.onmouseenter = () => { row.style.background = '#1c2530'; };
               row.onmouseleave = () => { row.style.background = ''; };
               row.onclick = () => {
-                slots[idx] = { lon: r.lon, lat: r.lat, label: (r.display && r.display.main) || r.name };
+                slots[idx] = { lon: r.lon, lat: r.lat, label: (r.display && r.display.main) || r.name, kind: r.kind };
                 input.value = slots[idx].label;
                 list.style.display = 'none';
                 route();
@@ -186,10 +188,51 @@
     fetch(GEOCODE + '/reverse?lon=' + lng + '&lat=' + lat + '&limit=1')
       .then(r => r.json()).then(d => {
         const n = (d.nearest || [])[0];
-        if (n && slots[i]) { slots[i].label = (n.display && n.display.main) || n.name; renderSlots(); }
+        if (n && slots[i]) { slots[i].label = (n.display && n.display.main) || n.name; slots[i].kind = n.kind; renderSlots(); }
       }).catch(() => {});
     route();
   });
+
+  // ---- 역 출구 스냅(도보 전용) ----
+  // scripts/08-gen-station-exits.py 산출물(OSM subway_entrance + ref, 전국 4,500여 개).
+  // 도보에서 역을 지점으로 잡으면 역 대표점(승강장 위) 대신 이웃 지점 방향의 최적 출구로
+  // 좌표를 바꿔 "N번 출구" 안내를 만든다. 파일이 없으면 조용히 비활성(기존 동작 유지).
+  let exitsList = null, exitsReq = null;
+  function loadExits() {
+    if (exitsList) return Promise.resolve(exitsList);
+    if (!exitsReq) exitsReq = fetch('data/station-exits.json')
+      .then(r => r.json()).then(d => { exitsList = d.exits || []; return exitsList; })
+      .catch(() => { exitsList = []; return exitsList; });
+    return exitsReq;
+  }
+  function havM(lon1, lat1, lon2, lat2) {
+    const R = 6371000, dLat = (lat2 - lat1) * Math.PI / 180, dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+  // pts(전 슬롯 확정 좌표) → 역 슬롯만 출구로 치환한 사본.
+  // 소속 판정: 출구의 역 좌표(slon/slat)가 슬롯과 150m 이내(좌표 귀속), 또는 역명 일치 +
+  // 출구 500m 이내(부천시청역처럼 OSM 에 역 '노드'가 없어 이름으로만 귀속된 경우).
+  function snapExits(pts) {
+    return loadExits().then(exits => pts.map((p, i) => {
+      if (p.kind !== 'station') return p;
+      const cand = exits.filter(e =>
+        (e.slon !== undefined && havM(e.slon, e.slat, p.lon, p.lat) < 150) ||
+        (e.station === p.label && havM(e.lon, e.lat, p.lon, p.lat) < 500));
+      if (!cand.length) return p;
+      const nb = [];                                  // 이웃 지점 방향으로 출구 선택
+      if (i > 0) nb.push(pts[i - 1]);
+      if (i < pts.length - 1) nb.push(pts[i + 1]);
+      let best = cand[0], bd = Infinity;
+      cand.forEach(e => {
+        const d = nb.reduce((s, q) => s + havM(e.lon, e.lat, q.lon, q.lat), 0);
+        if (d < bd) { bd = d; best = e; }
+      });
+      return { lon: best.lon, lat: best.lat, kind: p.kind,
+               label: p.label + (best.ref ? ' ' + best.ref + '번 출구' : ' 출구'), exit: true };
+    }));
+  }
 
   // ---- 경로 그리기 ----
   const SRC = 'cuvia-route';
@@ -212,7 +255,7 @@
       'justify-content:center;border:2px solid #0d1622;box-shadow:0 1px 4px rgba(0,0,0,.5)';
     return el;
   }
-  function drawRoute(geojson) {
+  function drawRoute(geojson, pts) {
     if (map.getSource(SRC)) {
       map.getSource(SRC).setData(geojson);
     } else {
@@ -232,7 +275,7 @@
         paint: { 'text-color': '#e8eef7', 'text-halo-color': '#0d1622', 'text-halo-width': 1.5 } });
     }
     markers.forEach(m => m.remove()); markers = [];
-    slots.filter(Boolean).forEach((s, i, arr) => {
+    pts.forEach((s, i, arr) => {    // 출구 스냅 시 마커도 출구 위치에 — 어느 출구인지 지도에서 보이게
       const last = i === arr.length - 1;
       const color = i === 0 ? '#4ade80' : last ? '#f87171' : '#e8b84a';
       const label = i === 0 ? '출' : last ? '도' : String(i);   // 출/1/2…/도 — 방문 순서 명시
@@ -243,10 +286,13 @@
 
   // ---- 경로 질의 ----
   function route() {
-    const pts = slots.filter(Boolean);
-    if (pts.length < 2 || slots.some(s => s === null)) return;   // 전 슬롯이 채워져야 질의
-    const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
+    const pts0 = slots.filter(Boolean);
+    if (pts0.length < 2 || slots.some(s => s === null)) return;   // 전 슬롯이 채워져야 질의
     const seq = ++routeSeq;   // 이 질의의 순번 — 응답 처리 시점에 최신인지 검사
+    // 도보만 출구 스냅(차량은 역 앞 도로 대표점이 관례). 스냅 대기 중 새 질의가 나가면 seq 가드가 무효화.
+    (profile === 'walking' ? snapExits(pts0) : Promise.resolve(pts0)).then(pts => {
+    if (seq !== routeSeq) return;
+    const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
     fetch(ROUTER + '/route/v1/' + profile + '/' + coords +
           '?steps=true&overview=full&geometries=geojson')
       .then(r => r.json()).then(d => {
@@ -262,7 +308,7 @@
           return;
         }
         const r0 = d.routes[0];
-        drawRoute({ type: 'Feature', geometry: r0.geometry, properties: {} });
+        drawRoute({ type: 'Feature', geometry: r0.geometry, properties: {} }, pts);
         // 화면을 경로 전체로 — 경로선 bbox 계산
         const cs = r0.geometry.coordinates;
         const b = cs.reduce((acc, c) => [
@@ -283,6 +329,13 @@
           legs.style.cssText = 'color:#7d8aa0;font-size:11px;margin-top:2px';
           legs.textContent = r0.legs.map((l, i) => '구간' + (i + 1) + ' ' + fmtDist(l.distance) + '/' + fmtDur(l.duration)).join(' · ');
           sum.appendChild(legs);
+        }
+        const exitPts = pts.filter(p => p.exit);   // 출구 스냅 결과 고지 — 어느 출구 기준인지
+        if (exitPts.length) {
+          const ex = document.createElement('div');
+          ex.style.cssText = 'color:#8fd3a8;font-size:11px;margin-top:2px';
+          ex.textContent = '출구 기준: ' + exitPts.map(p => p.label).join(' · ');
+          sum.appendChild(ex);
         }
         // 턴바이턴 목록
         stepsEl.innerHTML = '';
@@ -306,6 +359,7 @@
         sum.style.display = 'block'; sum.style.color = '#f87171';
         sum.textContent = '길찾기 서비스에 연결할 수 없습니다';
       });
+    });   // snapExits/Promise 체인 닫기
   }
   panel.querySelector('#rt-go').onclick = route;
 
