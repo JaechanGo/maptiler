@@ -105,7 +105,15 @@
   [['toll', '무료우선'], ['motorway', '고속도로 회피']].forEach(([key, label]) => {
     const b = document.createElement('button');
     b.className = 'rt-btn'; b.style.flex = '1'; b.textContent = label; b.dataset.opt = key;
-    b.onclick = () => { avoid[key] = !avoid[key]; paintOpts(); route(); };
+    // ★ 배타 선택 — OSRM 프로필의 excludable 이 단일 클래스 집합만 선언해서
+    //   exclude=toll,motorway 조합은 400 InvalidValue("Exclude flag combination is not supported").
+    //   조합을 쓰려면 car.lua excludable 에 Set{'toll','motorway'} 추가 + 그래프 재빌드가 필요하다.
+    b.onclick = () => {
+      const on = !avoid[key];
+      Object.keys(avoid).forEach(k => { avoid[k] = false; });
+      avoid[key] = on;
+      paintOpts(); route();
+    };
     optsEl.appendChild(b);
   });
   function paintOpts() {
@@ -218,13 +226,18 @@
     const { lng, lat } = e.lngLat;
     const i = pickIdx; pickIdx = -1;
     map.getCanvas().style.cursor = '';
-    slots[i] = { lon: lng, lat: lat, label: lng.toFixed(5) + ', ' + lat.toFixed(5) };
+    const slot = { lon: lng, lat: lat, label: lng.toFixed(5) + ', ' + lat.toFixed(5) };
+    slots[i] = slot;
     renderSlots();
     // 역지오코딩으로 사람이 읽을 라벨 보강(실패해도 좌표 라벨 유지)
     fetch(GEOCODE + '/reverse?lon=' + lng + '&lat=' + lat + '&limit=1')
       .then(r => r.json()).then(d => {
         const n = (d.nearest || [])[0];
-        if (n && slots[i]) { slots[i].label = (n.display && n.display.main) || n.name; slots[i].kind = n.kind; renderSlots(); }
+        // ★ 인덱스가 아니라 슬롯 객체 동일성으로 검사 — 응답 대기 중 경유지를 지우면
+        //   뒤 슬롯이 i 로 밀려와 엉뚱한 지점의 라벨·kind 를 덮어쓴다(kind='station' 이면
+        //   다음 도보 질의에서 무관한 역 출구로 스냅). 현재 위치를 다시 찾아 쓴다.
+        const at = slots.indexOf(slot);
+        if (n && at >= 0) { slot.label = (n.display && n.display.main) || n.name; slot.kind = n.kind; renderSlots(); }
       }).catch(() => {});
     route();
   });
@@ -274,6 +287,10 @@
   const SRC = 'cuvia-route';
   const ALT = 'cuvia-route-alt';     // 선택 안 된 대안 경로(회색) — 별도 소스라야 선택 전환이 즉시
   function clearRoute() {
+    // ★ 인플라이트 질의 무효화 — 이게 없으면 응답 대기 중 지운 경로가 되살아난다.
+    //   (출발지 텍스트 수정 → 슬롯 무효화+clearRoute → 새 질의는 안 나감(슬롯 미완성) →
+    //    먼저 나간 응답이 seq 가드를 통과해 지운 지점으로 경로·마커·요약을 전부 복원)
+    ++routeSeq;
     markers.forEach(m => m.remove()); markers = [];
     if (map.getLayer(SRC + '-arrows')) map.removeLayer(SRC + '-arrows');
     if (map.getLayer(SRC + '-line')) map.removeLayer(SRC + '-line');
@@ -283,7 +300,8 @@
     if (map.getSource(ALT)) map.removeSource(ALT);
     routes = []; routeIdx = 0; routePts = [];
     panel.querySelector('#rt-routes').innerHTML = '';
-    panel.querySelector('#rt-summary').style.display = 'none';
+    const sum = panel.querySelector('#rt-summary');
+    sum.style.display = 'none'; sum.textContent = '';   // 내용까지 비움 — 남기면 다음 표시 때 낡은 값이 스친다
     panel.querySelector('#rt-steps').innerHTML = '';
   }
   // 순서 뱃지 마커 — 색만으론 방문 순서가 안 읽힌다(왕복 겹침 경로에서 "도착 먼저 들렀다" 착시,
@@ -301,9 +319,12 @@
     const fc = { type: 'FeatureCollection', features: feats };
     if (map.getSource(ALT)) { map.getSource(ALT).setData(fc); return; }
     map.addSource(ALT, { type: 'geojson', data: fc });
+    // beforeId 로 선택 경로 casing 아래에 삽입 — 안 그러면 회색 대안이 파란 선택선과
+    // 진행방향 화살표를 덮는다(시종점 공유 구간에서 항상 겹침).
     map.addLayer({ id: ALT + '-line', type: 'line', source: ALT,
       layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': '#7d8aa0', 'line-width': 4, 'line-opacity': 0.55 } });
+      paint: { 'line-color': '#7d8aa0', 'line-width': 4, 'line-opacity': 0.55 } },
+      map.getLayer(SRC + '-casing') ? SRC + '-casing' : undefined);
   }
   function drawRoute(geojson, pts) {
     if (map.getSource(SRC)) {
@@ -425,7 +446,10 @@
   // ---- 경로 질의 ----
   function route() {
     const pts0 = slots.filter(Boolean);
-    if (pts0.length < 2 || slots.some(s => s === null)) return;   // 전 슬롯이 채워져야 질의
+    // 전 슬롯이 채워져야 질의. 못 하는 상태면 옛 결과를 지운다 — 안 지우면 프로필·옵션을
+    // 바꿨을 때 버튼만 새 상태로 바뀌고 지도·요약은 옛 프로필 결과가 남아 서로 어긋난다
+    // (예: 경유지 추가 후 차량 전환 → 차량 하이라이트인데 도보 경로 + "출구 기준" 표기 잔존).
+    if (pts0.length < 2 || slots.some(s => s === null)) { clearRoute(); return; }
     const seq = ++routeSeq;   // 이 질의의 순번 — 응답 처리 시점에 최신인지 검사
     // 도보만 출구 스냅(차량은 역 앞 도로 대표점이 관례). 스냅 대기 중 새 질의가 나가면 seq 가드가 무효화.
     (profile === 'walking' ? snapExits(pts0) : Promise.resolve(pts0)).then(pts => {
@@ -433,7 +457,9 @@
     const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
     // 대안 경로는 경유지가 없을 때만 OSRM 이 낸다(경유지가 있으면 무시). 회피 옵션은 차량 전용.
     const ex = profile === 'driving' ? Object.keys(avoid).filter(k => avoid[k]) : [];
-    const q = '?steps=true&overview=full&geometries=geojson&alternatives=3' +
+    // alternatives=true — 개수(3)를 박으면 서버의 --max-alternatives 를 낮췄을 때 전 질의가
+    // 실패한다("higher than current maximum"). true 는 서버 상한을 그대로 따른다.
+    const q = '?steps=true&overview=full&geometries=geojson&alternatives=true' +
       (ex.length ? '&exclude=' + ex.join(',') : '');
     // 계산 중 표시 — exclude(무료우선 등) 장거리 질의는 수 초가 걸린다. 표시가 없으면
     // 옛 결과가 그대로 보여 "옵션이 안 먹는다"고 오해한다(실측: 서울→밀양 exclude=toll 약 5초).

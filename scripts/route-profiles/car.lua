@@ -3,7 +3,7 @@
 --   기본 프로필은 자유주행 가정(신호 2초·secondary 55km/h·maxspeed 그대로)이라 도심에서 실측 대비
 --   약 2배 낙관(실측: 부천 춘의역→상동역 경유 4.8km 를 8.5분으로 계산, 네이버 17분).
 -- 교정 3축:
---   1) 신호등 지연 2s→30s (국내 신호주기 120~160s·녹색비 0.35~0.45 → 기대 대기 25~40s. OsmAnd 25s 와 동급)
+--   1) 신호등 지연 2s→40s (국내 신호주기 120~160s·녹색비 0.35~0.45 → 기대 대기 25~40s + OSM 신호 태깅 누락 보상)
 --   2) 회전 지연 — turn 7.5→15s·유턴 20→45s(신호연동)·turn_bias ↑(보호좌회전 반영)
 --   3) 주행속도 = 등급별 도심 실효속도로 하향, OSM maxspeed 태그는 "상한"으로만 사용(기본은 목표속도로 씀)
 -- 산출물 호환: osrm-extract 시점에 그래프로 구워짐 — 그래프 재생성(07-gen-route-graph.sh) 필수.
@@ -46,12 +46,27 @@ end
 -- 기본 WayHandlers.maxspeed 는 maxspeed 태그를 목표속도로 승격(×0.8)해 위 속도표를 무효화한다
 -- (예: 길주로 maxspeed=60 → 48km/h 로 역상승). 등급 실효속도를 "상한"으로 재적용해 캡만 남긴다.
 -- min 이므로 스쿨존(30) 등 태그가 더 낮으면 태그 쪽이 그대로 이긴다. highway 미해당(페리 등)은 불개입.
+-- ★ rate(경로선택 가중치)도 같이 깎아야 한다. 내장 WayHandlers.penalties 가 car.process_way
+--   안에서 rate = speed*penalty/3.6 을 이미 확정하므로, 여기서 speed 만 낮추면 ETA 는 교정되고
+--   최적화 가중치는 캡 전 속도로 남아 "표시 시간과 고르는 기준이 다른" 모델이 된다
+--   (maxspeed 태그된 간선이 태그 없는 병행도로보다 약 20% 싸 보여 과도 선호).
+--   speed 로 재계산하지 않고 비율만 곱하는 이유: penalties 의 service/width/sideroad 계수 보존.
 function process_way(profile, way, result, relations)
   car.process_way(profile, way, result, relations)
   local class_speed = KR_SPEEDS[way:get_value_by_key('highway')]
   if class_speed then
-    if result.forward_speed > class_speed then result.forward_speed = class_speed end
-    if result.backward_speed > class_speed then result.backward_speed = class_speed end
+    if result.forward_speed > class_speed then
+      if result.forward_rate and result.forward_rate > 0 then
+        result.forward_rate = result.forward_rate * (class_speed / result.forward_speed)
+      end
+      result.forward_speed = class_speed
+    end
+    if result.backward_speed > class_speed then
+      if result.backward_rate and result.backward_rate > 0 then
+        result.backward_rate = result.backward_rate * (class_speed / result.backward_speed)
+      end
+      result.backward_speed = class_speed
+    end
   end
 end
 

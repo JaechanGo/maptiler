@@ -140,7 +140,7 @@ def station_display(name):
 
 
 def main():
-    if not os.path.getsize(PBF):
+    if not os.path.exists(PBF) or not os.path.getsize(PBF):
         sys.exit(f"오류: OSM 추출본 없음: {PBF} — 01-download-data.sh 먼저 실행")
     entrances, stations = scan(PBF)
     print(f"추출: 출구 {len(entrances):,}개, 역 {len(stations):,}개")
@@ -174,6 +174,11 @@ def main():
                         "station": m.group(1)})
         else:
             orphan += 1
+    # ★ 가드는 반드시 쓰기 앞에 — 뒤에 두면 태깅 변화·부분 pbf 로 0건이 나왔을 때
+    #   정상 산출물을 빈 파일로 덮은 뒤 종료한다. 데모는 빈 배열을 "조용히 비활성"으로
+    #   처리하므로(routing.js loadExits) 화면에 오류 없이 출구 안내만 사라진다.
+    if not out:
+        sys.exit(f"오류: 출구 0건 — pbf/태깅 확인 필요 (기존 {OUT} 보존)")
     with_ref = sum(1 for e in out if e["ref"])
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     tmp = OUT + ".tmp"
@@ -183,8 +188,6 @@ def main():
     os.replace(tmp, OUT)
     kb = os.path.getsize(OUT) // 1024
     print(f"OK: {OUT} — 귀속 {len(out):,}개(ref 보유 {with_ref:,}, 이름귀속 {by_name}), 미귀속 제외 {orphan}, {kb}KB")
-    if not out:
-        sys.exit("오류: 출구 0건 — pbf/태깅 확인 필요")
 
 
 if __name__ == "__main__":
