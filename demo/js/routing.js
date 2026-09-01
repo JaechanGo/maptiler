@@ -497,6 +497,7 @@
   // 33m 더 먼 83.5m 스냅 시 350m/2.1분). 총 이동시간(주행 + 스냅지점에서 걸어갈 시간)이
   // 최소인 후보로 바꿔준다. 도로에서 충분히 떨어진 지점에만 적용해 평소 질의 수는 그대로.
   const SNAP_REFINE_M = 25;          // 이보다 가까우면 정제 불필요(바로 앞 도로)
+  const SNAP_MAX_M = 2000;           // 지점당 스냅 반경 상한(radiuses) — 바다·산속 오스냅 차단
   const WALK_M_PER_MIN = 75;         // 스냅지점→목적지 도보 환산(4.5km/h)
   async function betterSnap(pt, fromPt) {
     try {
@@ -564,7 +565,11 @@
     const ex = allowed.filter(k => avoid[k]);
     // alternatives=true — 개수(3)를 박으면 서버의 --max-alternatives 를 낮췄을 때 전 질의가
     // 실패한다("higher than current maximum"). true 는 서버 상한을 그대로 따른다.
-    const q = '?steps=true&overview=full&geometries=geojson&alternatives=true' +
+    // radiuses — 지점당 스냅 반경 상한. 없으면 OSRM 이 반경 무제한으로 붙여, 바다를 클릭하면
+    // 12~29km 떨어진 섬 도로(가거도길·태하길)로 스냅된 엉뚱한 경로가 나온다(실측).
+    // 2km 는 정상 지점에 영향이 없을 만큼 관대하다(공원 안 50m 스냅도 그대로 통과).
+    const rad = pts.map(() => SNAP_MAX_M).join(';');
+    const q = '?steps=true&overview=full&geometries=geojson&alternatives=true&radiuses=' + rad +
       (ex.length ? '&exclude=' + ex.join(',') : '');
     // 계산 중 표시 — exclude(무료우선 등) 장거리 질의는 수 초가 걸린다. 표시가 없으면
     // 옛 결과가 그대로 보여 "옵션이 안 먹는다"고 오해한다(실측: 서울→밀양 exclude=toll 약 5초).
@@ -578,8 +583,10 @@
         if (d.code !== 'Ok' || !d.routes || !d.routes.length) {
           clearRoute();
           sum.style.display = 'block';
-          sum.textContent = '경로를 찾을 수 없습니다' + (d.code && d.code !== 'Ok' ? ' (' + d.code + ')' : '') +
-            (ex.length ? ' — 회피 옵션을 끄고 다시 시도해보세요' : ' — 지점을 도로 근처로 옮겨보세요');
+          sum.textContent = d.code === 'NoSegment'
+            ? '지점 근처 ' + (SNAP_MAX_M / 1000) + 'km 안에 도로가 없습니다 — 도로 가까이로 옮겨보세요'
+            : '경로를 찾을 수 없습니다' + (d.code && d.code !== 'Ok' ? ' (' + d.code + ')' : '') +
+              (ex.length ? ' — 회피 옵션을 끄고 다시 시도해보세요' : ' — 지점을 도로 근처로 옮겨보세요');
           sum.style.color = '#f87171';
           return;
         }
