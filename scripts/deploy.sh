@@ -27,7 +27,7 @@ fi
 # 그대로 반입되면, tileserver/geocode 컨테이너 내부 사용자(uid≠빌드호스트)가 bind 마운트
 # (demo/style/glyphs/tiles/geocode)를 못 읽어 EACCES 로 기동 실패한다(/styles.json=[] 증상).
 # 모든 사용자에 읽기 + 디렉토리 진입(a+rX)만 부여(쓰기 미부여 → 안전·멱등). SELinux 는 호스트 정책으로 별도.
-for _d in demo style vendor tiles geocode; do
+for _d in demo style vendor tiles geocode route; do   # route = OSRM 길찾기 그래프(osrm-car/foot ro 마운트)
   [ -e "$ROOT/$_d" ] && chmod -R a+rX "$ROOT/$_d" 2>/dev/null || true
 done
 
@@ -40,6 +40,19 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
     exit 1
   fi
 done
+
+# 길찾기 그래프(route/{car,foot}) — compose 의 osrm-car/osrm-foot 가 south-korea.osrm 고정 참조.
+# 없으면 osrm 컨테이너가 crash-loop 하고 데모 길찾기가 실패한다 — 배포 시점에 차단.
+# 길찾기 제외 번들(package.sh SKIP_ROUTE=1)을 의도적으로 반입한 경우만 SKIP_ROUTE=1 로 우회.
+if [ -z "${SKIP_ROUTE:-}" ]; then
+  for rp in car foot; do
+    if [ ! -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ]; then
+      echo "오류: route/$rp/south-korea.osrm.mldgr 가 없거나 0바이트 — 길찾기 그래프 미포함 번들." >&2
+      echo "  → 빌드호스트에서 scripts/07-gen-route-graph.sh 후 재패키징하거나, 길찾기 없이 배포하려면 SKIP_ROUTE=1 로 재실행." >&2
+      exit 1
+    fi
+  done
+fi
 
 # geocode 서비스용 지오코딩 인덱스 — compose 의 geocode 컨테이너가 참조한다.
 if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then

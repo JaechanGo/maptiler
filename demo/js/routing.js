@@ -40,6 +40,7 @@
   let markers = [];                  // 지점 마커
   let pickIdx = -1;                  // 지도 클릭 지정 대기 중인 슬롯(-1=없음)
   let ac = null;                     // 자동완성 fetch 취소용
+  let routeSeq = 0;                  // 경로 응답 레이스 가드 — 늦게 도착한 이전 질의(프로필 전환 등)가 최신 화면을 덮는 것 차단
 
   // ---- UI 골격 (다크 테마 — search.js 와 동일 팔레트) ----
   const btn = document.createElement('button');
@@ -92,6 +93,8 @@
     return i === 0 ? '출발지 검색 (또는 📍 후 지도 클릭)' : i === slots.length - 1 ? '도착지 검색' : '경유지 검색';
   }
   function renderSlots() {
+    // 재렌더 = 행 인덱스 재배열 — 대기 중이던 📍 지정은 무효(삭제/추가로 밀린 인덱스에 오기록 방지)
+    if (pickIdx >= 0) { pickIdx = -1; map.getCanvas().style.cursor = ''; }
     slotsEl.innerHTML = '';
     slots.forEach((v, i) => {
       const row = document.createElement('div');
@@ -243,9 +246,11 @@
     const pts = slots.filter(Boolean);
     if (pts.length < 2 || slots.some(s => s === null)) return;   // 전 슬롯이 채워져야 질의
     const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
+    const seq = ++routeSeq;   // 이 질의의 순번 — 응답 처리 시점에 최신인지 검사
     fetch(ROUTER + '/route/v1/' + profile + '/' + coords +
           '?steps=true&overview=full&geometries=geojson')
       .then(r => r.json()).then(d => {
+        if (seq !== routeSeq) return;   // 이후 질의가 이미 나감(프로필 전환·지점 변경) — 낡은 응답 폐기
         const sum = panel.querySelector('#rt-summary');
         const stepsEl = panel.querySelector('#rt-steps');
         if (d.code !== 'Ok' || !d.routes || !d.routes.length) {
@@ -264,7 +269,9 @@
           Math.min(acc[0], c[0]), Math.min(acc[1], c[1]),
           Math.max(acc[2], c[0]), Math.max(acc[3], c[1])
         ], [Infinity, Infinity, -Infinity, -Infinity]);
-        map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 60, left: 60, right: 340 } });
+        // 패널 몫 340px 은 좁은 화면(모바일)에서 캔버스 폭을 초과해 fitBounds 가 throw → 폭 40%로 클램프
+        const padR = Math.min(340, Math.floor(map.getContainer().clientWidth * 0.4));
+        map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 60, left: 60, right: padR } });
         // 요약: 총 시간·거리 (+구간 수)
         sum.style.display = 'block'; sum.style.color = '#e8eef7';
         sum.innerHTML = '';
@@ -280,7 +287,6 @@
         // 턴바이턴 목록
         stepsEl.innerHTML = '';
         r0.legs.forEach(leg => leg.steps.forEach(s => {
-          if (s.maneuver && s.maneuver.type === 'arrive' && s.distance === 0) { /* 도착도 표시 */ }
           const row = document.createElement('div');
           row.style.cssText = 'padding:5px 2px;border-top:1px solid #222b38;font-size:12px;color:#cdd6e3';
           row.textContent = stepText(s);
@@ -294,6 +300,7 @@
         }));
       })
       .catch(e => {
+        if (seq !== routeSeq) return;   // 낡은 질의의 실패 — 최신 화면을 오류로 덮지 않음
         console.warn('route 호출 실패:', e);
         const sum = panel.querySelector('#rt-summary');
         sum.style.display = 'block'; sum.style.color = '#f87171';

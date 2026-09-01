@@ -48,7 +48,10 @@ for rp in car foot; do
        [ "$ROOT/route/$rp/south-korea.osrm.mldgr" -nt "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ]; }; then
     echo "  ↪ route 통합: route/$rp → $ROUTE_DIR/$rp"
     rm -rf "$ROUTE_DIR/$rp"; mkdir -p "$ROUTE_DIR"
-    cp -Rc "$ROOT/route/$rp" "$ROUTE_DIR/$rp" 2>/dev/null || cp -R "$ROOT/route/$rp" "$ROUTE_DIR/$rp" \
+    # clonefile(-c) 실패 시(타 볼륨) 부분 생성된 목적지가 남는다 — 그대로 cp -R 하면
+    # 기존 디렉토리 '안으로' 복사돼 route/car/car 중첩이 생기므로 반드시 지우고 폴백.
+    cp -Rc "$ROOT/route/$rp" "$ROUTE_DIR/$rp" 2>/dev/null \
+      || { rm -rf "$ROUTE_DIR/$rp"; cp -R "$ROOT/route/$rp" "$ROUTE_DIR/$rp"; } \
       || { echo "오류: route 통합 복사 실패: route/$rp" >&2; exit 1; }
   fi
 done
