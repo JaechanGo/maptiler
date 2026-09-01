@@ -17,7 +17,7 @@
 | 산봉우리 (이름·표고) | OpenStreetMap | `natural=peak` + `ele` | korea / mountain_peak | peak-label |
 | **건물 2D/3D** (footprint·높이) | **OpenStreetMap** | `building=*` 폴리곤 + `height`/`building:levels` | korea / building (`render_height`/`render_min_height`) | building-2d, **Building 3D** |
 | **아파트 동(棟) 라벨** (101동 …) | OpenStreetMap 건물 `name`/`ref` → 자체 추출 | scripts/04 정규식(`\d+동`·아파트 숫자형·문자동) | **dong** / dong | dong-dot, dong-label |
-| **길찾기 경로(차량·도보)** | **OpenStreetMap** 도로망 → OSRM 그래프(scripts/07) | `highway=*`·`oneway`·`maxspeed`·`traffic_signals`·turn restriction — car 는 한국 도심 보정 프로필(scripts/route-profiles) | **route**/{car,foot} (OSRM MLD — 타일 아님) | 데모 routing.js 경로선 |
+| **길찾기 경로(차량·도보)** | **OpenStreetMap** 도로망 → OSRM 그래프(scripts/07) | `highway=*`·`oneway`·`maxspeed`·`traffic_signals`·turn restriction — car·foot 은 한국 도심 보정 프로필(scripts/route-profiles) | **route**/{car,foot} (OSRM MLD — 타일 아님) | 데모 routing.js 경로선 |
 | **지형 (3D 터레인)** | **NASA SRTM 30m** (AWS Open Data `elevation-tiles-prod`) | skadi `.hgt` (N33~38, E124~131) | **terrain** / raster-dem (Terrain-RGB) | `map.setTerrain` 소스 |
 | 바다·호수·하천 | OSM + osmdata.openstreetmap.de 수역 폴리곤 + Natural Earth(저줌) | `natural=water`, water-polygons-split-3857 | korea / water, waterway | water, waterway |
 | 글꼴(글리프) | Google Noto Sans (openmaptiles/fonts 빌드) | `style/glyphs/KlokanTech Noto Sans *` | — | 모든 symbol 레이어 |
