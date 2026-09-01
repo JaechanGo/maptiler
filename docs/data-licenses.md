@@ -15,6 +15,7 @@
 |---|---|---|---|---|
 | 지도 데이터(도로·건물·지명·POI·역) | OpenStreetMap (Geofabrik 추출본) | **ODbL 1.0** | ✅ | 출처표시 필수, §3 참조 |
 | 동(棟) 라벨 (dong.mbtiles) | OSM에서 자체 추출(scripts/04·05) | **ODbL 1.0** (파생DB) | ✅ | §3.2 참조 |
+| 길찾기 도로망 그래프 (route/) | OSM에서 OSRM 추출(scripts/07) | **ODbL 1.0** (파생DB) | ✅ | §3.2 참조 — 기존 OSM 표기에 포함, 신규 의무 없음 |
 | 수역 폴리곤 | osmdata.openstreetmap.de | ODbL 1.0 | ✅ | OSM 표기에 포함 |
 | 국경·주기(보조) | Natural Earth | **퍼블릭 도메인** | ✅ | 없음 |
 | 호수 중심선 | openmaptiles/lake_centerline | OSM 파생(ODbL) | ✅ | OSM 표기에 포함 |
@@ -27,6 +28,7 @@
 |---|---|---|
 | Planetiler (+ planetiler-openmaptiles 프로파일) | Apache-2.0 / BSD | 고지 보존 |
 | TileServer-GL (-light) | BSD-2-Clause | 고지 보존 |
+| OSRM (osrm-backend) | BSD-2-Clause | 고지 보존 |
 | MapLibre GL JS | BSD-3-Clause | 고지 보존 |
 | Maputnik (내부 편집 도구) | MIT | 고지 보존 |
 | KlokanTech/Noto 글리프 폰트 | **SIL OFL 1.1** | 고지 보존, 폰트 단독 재판매 금지 |

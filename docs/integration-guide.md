@@ -56,6 +56,8 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 | 글리프 | `http://<서버>:8080/fonts/{fontstack}/{range}.pbf` |
 | **지오코딩** | `http://<서버>:8082/geocode?q=증미역` |
 | **역지오코딩** | `http://<서버>:8082/reverse?lon=126.86&lat=37.55` |
+| **길찾기(차량)** | `http://<서버>/route/v1/driving/{lon},{lat};{lon},{lat}` (게이트웨이 경유) |
+| **길찾기(도보)** | `http://<서버>/route/v1/walking/{lon},{lat};{lon},{lat}` (게이트웨이 경유) |
 | 데모 | `http://<서버>:8081/demo/` |
 | Maputnik(스타일 편집) | `http://<서버>:8081/vendor/maputnik/dist/` |
 
@@ -76,6 +78,30 @@ const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`)
 
 - 검색 대상: 역(전국 ~1,400) · 지명 · 아파트 동 · 도로명 · POI 등 약 67만 건(OSM 기반). 국가 상가정보 CSV(`--poi-csv`)·행정경계 GeoJSON(`--areas-geojson`)로 확장.
 - 데모 상단 검색창(`demo/js/search.js`) 참고. CORS 허용(`Access-Control-Allow-Origin: *`).
+
+## 4.3 길찾기 (차량·도보)
+
+OSRM 자체 호스팅(`osrm-car`·`osrm-foot`)을 게이트웨이가 프로필로 분기한다
+(`/route|/table|/trip|/nearest` 의 `v1/driving`→차량, `v1/walking`→도보 — OSRM/Mapbox Directions 표준 URL).
+폐쇄망 전용 — 실시간 교통은 미반영(도로등급·제한속도 기반 추정 시간).
+
+```js
+// 경로: 출발;경유지;도착 (lon,lat 순서 주의) — steps=턴바이턴, geometries=geojson 권장
+const r = await fetch(`/route/v1/driving/126.9877,37.4292;126.9769,37.4009;126.9169,37.4017` +
+                      `?steps=true&overview=full&geometries=geojson`).then(r=>r.json());
+// r.code === 'Ok'
+// r.routes[0].distance(m) · duration(s) · geometry(GeoJSON LineString — 지도에 그대로 addSource)
+// r.routes[0].legs[i]     — 경유지 구간별 distance/duration/steps
+// legs[i].steps[j]        — { maneuver:{type,modifier}, name:'과천대로', distance, duration } 턴바이턴
+// r.waypoints             — 입력좌표의 도로 스냅 결과 { name, location, distance(스냅거리 m) }
+
+// 매트릭스(N×N 소요시간/거리): 가까운 지점 찾기 등
+const t = await fetch(`/table/v1/driving/${coords}?annotations=duration,distance`).then(r=>r.json());
+// 다중지점 방문 순서 최적화: /trip/v1/driving/{coords}?roundtrip=true
+```
+
+- 데모 우상단 '길찾기' 패널(`demo/js/routing.js`) 참고 — geocode 검색 연동·지도 클릭 지정·경유지 포함 예제.
+- 그래프는 `scripts/07-gen-route-graph.sh` 산출물(`route/{car,foot}`) — OSM 갱신 시 재생성(프로필당 약 3분).
 
 ## 4.1 스타일 내장 라벨 레이어 (토글용 id)
 

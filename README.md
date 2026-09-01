@@ -14,6 +14,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 - 통합 지오코더: 전국 도로명주소(내비DB) + OSM 이름 + 소상공인 상가 + LOCALDATA 인허가
   → FTS5+R-tree 단일 인덱스. 결과에 전체주소·지번·우편번호·전화·업종대분류(cat1) 동반
 - 상가·시설 라벨: 지오코더 시설(biz) → 별도 벡터타일(poi.mbtiles, 업종 색상 도트+상호 라벨)
+- 길찾기(차량·도보): OSRM 자체 호스팅(osrm-car·foot) — 경유지·턴바이턴·시간/거리, 데모 풀 패널(geocode 연동)
 
 ## 설계 문서
 
@@ -29,6 +30,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/01-download-data.sh    # OSM/글리프/MapLibre/Maputnik
 ./scripts/02-gen-vector.sh       # 벡터 타일 (korea.mbtiles)
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
+./scripts/07-gen-route-graph.sh  # 길찾기 그래프 (OSRM car·foot → route/)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
 ./scripts/postgis/load-all.sh    # 3D 건물 → PostGIS building (STEPS=building, GIS건물통합 SHP)
@@ -71,7 +73,7 @@ STUDIO_TOKEN=$(openssl rand -hex 12) ./scripts/start-style-studio.sh   # → htt
 ### 단일 도메인 게이트웨이 (공개망 권장)
 
 `server/docker-compose.yml` 의 `gateway`(nginx) 가 모든 서비스를 한 포트로 통합한다:
-`/` `/info`→연동 가이드(demo/guide.html) · `/demo/`→인터랙티브 데모 · `/styles /data /fonts /sprites /files`→tileserver · `/geocode /reverse`→geocode · `/dyn`→martin. 데모 JS는 게이트웨이
+`/` `/info`→연동 가이드(demo/guide.html) · `/demo/`→인터랙티브 데모 · `/styles /data /fonts /sprites /files`→tileserver · `/geocode /reverse`→geocode · `/route /table /trip /nearest`→osrm-car/foot(길찾기) · `/dyn`→martin. 데모 JS는 게이트웨이
 경유(80/443/8088 포트)면 자동으로 same-origin(상대경로)으로 호출하므로 CORS·다중포트 노출이 불필요하다.
 
 ```bash
