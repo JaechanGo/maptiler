@@ -491,6 +491,43 @@
     }));
   }
 
+  // ---- 도로 스냅 정제 ----
+  // OSRM 은 지점을 '직선거리로 가장 가까운' 도로에 붙인다. 그 도로가 막다른 길이면
+  // 실제 주행은 크게 돌아간다(실측: 한아름어린이공원 화장실 — 50.8m 스냅 시 490m/3.2분,
+  // 33m 더 먼 83.5m 스냅 시 350m/2.1분). 총 이동시간(주행 + 스냅지점에서 걸어갈 시간)이
+  // 최소인 후보로 바꿔준다. 도로에서 충분히 떨어진 지점에만 적용해 평소 질의 수는 그대로.
+  const SNAP_REFINE_M = 25;          // 이보다 가까우면 정제 불필요(바로 앞 도로)
+  const WALK_M_PER_MIN = 75;         // 스냅지점→목적지 도보 환산(4.5km/h)
+  async function betterSnap(pt, fromPt) {
+    try {
+      const nr = await fetch(ROUTER + '/nearest/v1/' + profile + '/' + pt.lon + ',' + pt.lat + '?number=8')
+        .then(r => r.json());
+      if (nr.code !== 'Ok' || !nr.waypoints || nr.waypoints.length < 2) return null;
+      // 좌표 중복 제거(OSRM 은 같은 지점을 방향별로 여러 번 낸다)
+      const seen = new Set(), cands = [];
+      nr.waypoints.forEach(w => {
+        const k = w.location.join(',');
+        if (seen.has(k)) return;
+        seen.add(k); cands.push(w);
+      });
+      if (cands.length < 2 || cands[0].distance < SNAP_REFINE_M) return null;
+      // 출발지 → 각 후보의 주행시간을 한 번에(table). sources=0, destinations=1..N
+      const coords = [fromPt.lon + ',' + fromPt.lat].concat(cands.map(c => c.location.join(','))).join(';');
+      const dests = cands.map((_, i) => i + 1).join(';');
+      const tb = await fetch(ROUTER + '/table/v1/' + profile + '/' + coords + '?sources=0&destinations=' + dests)
+        .then(r => r.json());
+      if (tb.code !== 'Ok' || !tb.durations || !tb.durations[0]) return null;
+      let best = null, bestCost = Infinity;
+      tb.durations[0].forEach((sec, i) => {
+        if (sec === null) return;
+        const cost = sec / 60 + cands[i].distance / WALK_M_PER_MIN;   // 주행분 + 도보환산분
+        if (cost < bestCost) { bestCost = cost; best = cands[i]; }
+      });
+      if (!best || best.location.join(',') === cands[0].location.join(',')) return null;
+      return { lon: best.location[0], lat: best.location[1] };
+    } catch (e) { return null; }   // 정제는 부가기능 — 실패하면 원래 좌표로 진행
+  }
+
   // ---- 경로 질의 ----
   function route() {
     const pts0 = slots.filter(Boolean);
@@ -500,9 +537,26 @@
     if (pts0.length < 2 || slots.some(s => s === null)) { clearRoute(); return; }
     const seq = ++routeSeq;   // 이 질의의 순번 — 응답 처리 시점에 최신인지 검사
     // 도보만 출구 스냅(차량은 역 앞 도로 대표점이 관례). 스냅 대기 중 새 질의가 나가면 seq 가드가 무효화.
-    (profile === 'walking' ? snapExits(pts0) : Promise.resolve(pts0)).then(pts => {
+    (profile === 'walking' ? snapExits(pts0) : Promise.resolve(pts0))
+      // 출발·도착이 도로에서 멀면 진입 도로 후보를 총 이동시간 기준으로 재선택(via 에 기록).
+      // 마커·점선은 원래 좌표(lon/lat)를 그대로 쓰고, 질의만 via 로 나간다.
+      .then(pts0 => {
+        // 슬롯 원본을 건드리지 않도록 복사본에만 via 를 단다. 원본에 남기면 프로필을 바꿨을 때
+        // (차량→도보) 옛 프로필용 진입점이 그대로 재사용되고, 경유지 추가로 도착지가 중간으로
+        // 밀렸을 때도 낡은 via 가 따라간다.
+        const pts = pts0.map(p => Object.assign({}, p, { via: undefined }));
+        if (seq !== routeSeq || pts.length < 2) return pts;
+        const first = pts[0], last = pts[pts.length - 1];
+        return Promise.all([betterSnap(last, first), betterSnap(first, last)])
+          .then(([viaLast, viaFirst]) => {
+            if (viaLast) last.via = viaLast;
+            if (viaFirst) first.via = viaFirst;
+            return pts;
+          });
+      })
+      .then(pts => {
     if (seq !== routeSeq) return;
-    const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
+    const coords = pts.map(p => (p.via || p).lon + ',' + (p.via || p).lat).join(';');
     // 대안 경로는 경유지가 없을 때만 OSRM 이 낸다(경유지가 있으면 무시). 회피 옵션은 차량 전용.
     // 현재 프로필이 지원하는 옵션만 보낸다 — 프로필 전환 후 남은 켜짐 상태를 그대로 실으면
     // 그 프로필에 없는 클래스라 400 InvalidValue 로 경로가 통째로 실패한다.
