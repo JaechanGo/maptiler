@@ -268,8 +268,12 @@ echo "[4/4] 산출물 번들"
 # geocode.sqlite 만 geocode/ 하위 레이아웃으로 스테이징(APFS clonefile=즉시·무추가공간)한 뒤 묶는다.
 STAGE="$BUILD_HOME/.pkg-stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE/geocode"
+# APFS clonefile(-c) → 하드링크 → 일반 복사 순 폴백. 리눅스(ext4/xfs)는 -c 가 없어 곧장 7.2GB 를
+# 복사하는데, 디스크가 빠듯한 배포호스트에서 이것만으로 패키징이 실패한다(.244 실측: 여유 17GB).
+# 하드링크는 같은 파일시스템이면 0바이트·즉시이고, tar 는 STAGE 안의 유일한 참조를 일반 파일로 담는다.
 cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
-  || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # clonefile 불가 시(타 볼륨) 일반 복사 폴백
+  || ln "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
+  || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # 타 볼륨이면 일반 복사 폴백
 
 # WITH_POSTGIS: PostGIS 데이터 덤프(동적 레이어·지오코더 backbone) → postgis/cuvia.dump (pg_dump -Fc)
 STAGE_POSTGIS=""

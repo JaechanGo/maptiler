@@ -606,6 +606,41 @@ def nonaddr_structure(r, pip=None):
     }
 
 
+# ── 코드→지역명 보강(비-addr display) 캐시 ─────────────────────────
+# to_regclass 로 존재를 먼저 확인한다 — 없는 테이블에 SELECT 를 날리면 psycopg 트랜잭션이 abort 되어
+# 이후 nearest/areas 질의가 전부 InFailedSqlTransaction 으로 죽는다(이 파일 parcel PIP 주석의 실측).
+# 법정동코드↔명칭은 불변이라 프로세스 캐시가 안전하다(코드 개편 시 컨테이너 재시작으로 갱신).
+_REGION_TBL_OK = None
+_SGG_NAME_CACHE = {}
+_SIDO_NAME_CACHE = {}
+
+
+def _region_tables_ok(cur):
+    global _REGION_TBL_OK
+    if _REGION_TBL_OK is None:
+        cur.execute("SELECT (to_regclass('public.lawd_sigungu') IS NOT NULL "
+                    "AND to_regclass('public.lawd_code') IS NOT NULL) AS ok")
+        row = cur.fetchone()
+        _REGION_TBL_OK = bool(row and (row["ok"] if isinstance(row, dict) else row[0]))
+    return _REGION_TBL_OK
+
+
+def _sgg_name(cur, sgg_cd):
+    if sgg_cd not in _SGG_NAME_CACHE:
+        cur.execute("SELECT sigungu_nm FROM lawd_sigungu WHERE sigungu_cd = %s", (sgg_cd,))
+        row = cur.fetchone()
+        _SGG_NAME_CACHE[sgg_cd] = (row["sigungu_nm"] if isinstance(row, dict) else row[0]) if row else None
+    return _SGG_NAME_CACHE[sgg_cd]
+
+
+def _sido_name_by_code(cur, sido_cd):
+    if sido_cd not in _SIDO_NAME_CACHE:
+        cur.execute("SELECT name FROM lawd_code WHERE bcode = %s", (sido_cd + "00000000",))
+        row = cur.fetchone()
+        _SIDO_NAME_CACHE[sido_cd] = (row["name"] if isinstance(row, dict) else row[0]) if row else None
+    return _SIDO_NAME_CACHE[sido_cd]
+
+
 def area_pip(cur, lon, lat):
     """좌표 → admin_boundary ST_Contains 로 sido/sigungu/emd 명칭 + emd 법정동코드 취득(X6).
     GiST 가속·소수행. admin_boundary 0행/미적재 시 빈 dict(graceful).
@@ -631,6 +666,20 @@ def area_pip(cur, lon, lat):
             #   80/80 일치 — 대응표와 같은 코드축이다. 길이·숫자·'28' 접두 검증은 소비 측
             #   remap_sigungu 가 하므로 여기서는 원값을 그대로 싣는다(기형 code 는 거기서 걸린다).
             out["bcode"] = a["code"]
+    # ★ 시도·시군구 폴리곤이 없는 배포본 보강 — admin_boundary 에 emd/adm_dong 만 적재된 환경이
+    #   실재한다([실측 2026-09-01 .244] level 분포 adm_dong 3,559 · emd 5,373, sido/sigungu 0건).
+    #   그러면 비-addr(station/poi/biz)의 sido·sigungu 가 비어 display.secondary 가 '지하철역'처럼
+    #   지역 없이 나가고, 동명이지역(부천 상동역 vs 밀양 상동역)을 사용자가 구분할 수 없다.
+    #   → emd 폴리곤이 준 법정동코드로 코드 테이블에서 채운다. **좌표-폴리곤이 준 코드**를 PK 로
+    #   조회하는 것이라 P1(명칭 조인 금지)을 지킨다. 테이블 부재·미스는 원상 유지(fail-open).
+    bc = out.get("bcode")
+    if bc and _region_tables_ok(cur) and not (out.get("sido") and out.get("sigungu")):
+        if not out.get("sigungu"):
+            sgg = _sgg_name(cur, bc[:5])
+            if sgg: out["sigungu"] = sgg
+        if not out.get("sido"):
+            sd = _sido_name_by_code(cur, bc[:2])
+            if sd: out["sido"] = sd
     return out
 
 
