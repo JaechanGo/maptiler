@@ -41,7 +41,7 @@
   // ---- 상태 ----
   // slots: [출발, …경유지, 도착] — {lon,lat,label} 또는 null. UI 행과 1:1.
   let slots = [null, null];
-  let profile = 'driving';           // driving | walking (OSRM 관례 URL)
+  let profile = 'driving';           // driving | walking | cycling (OSRM 관례 URL — 게이트웨이가 분기)
   let markers = [];                  // 지점 마커
   let pickIdx = -1;                  // 지도 클릭 지정 대기 중인 슬롯(-1=없음)
   let ac = null;                     // 자동완성 fetch 취소용
@@ -49,7 +49,13 @@
   let routes = [];                   // 이번 응답의 경로들(대안 포함) — 선택 전환 시 재질의 없이 사용
   let routeIdx = 0;                  // 선택된 경로 인덱스
   let routePts = [];                 // 그 응답에 쓴 지점(출구 스냅 반영본) — 마커·출구 고지의 진실원
-  const avoid = { toll: false, motorway: false };   // 차량 경로 옵션 → OSRM exclude (그래프에 excludable 로 구움)
+  // 회피 옵션 → OSRM exclude (그래프에 excludable 로 구워짐). 프로필별로 쓸 수 있는 클래스가 다르다.
+  const avoid = { toll: false, motorway: false, steps: false };
+  const AVOID_OPTS = {                       // 프로필 → [키, 라벨] 목록. 없는 프로필은 옵션 줄 자체를 숨김
+    driving: [['toll', '무료우선'], ['motorway', '고속도로 회피']],
+    walking: [['steps', '계단회피']],
+    cycling: []
+  };
 
   // ---- UI 골격 (다크 테마 — search.js 와 동일 팔레트) ----
   const btn = document.createElement('button');
@@ -85,7 +91,7 @@
 
   // 프로필 토글(차량/도보)
   const modes = panel.querySelector('#rt-modes');
-  [['driving', '🚗 차량'], ['walking', '🚶 도보']].forEach(([key, label]) => {
+  [['driving', '🚗 차량'], ['walking', '🚶 도보'], ['cycling', '🚲 자전거']].forEach(([key, label]) => {
     const b = document.createElement('button');
     b.className = 'rt-btn'; b.style.flex = '1'; b.textContent = label; b.dataset.key = key;
     b.onclick = () => { profile = key; paintModes(); if (slots.filter(Boolean).length >= 2) route(); };
@@ -96,34 +102,34 @@
       b.style.background = b.dataset.key === profile ? '#2b5c8f' : '#1a2029';
       b.style.color = b.dataset.key === profile ? '#e8eef7' : '#cdd6e3';
     });
-    optsEl.style.display = profile === 'driving' ? 'flex' : 'none';   // 회피 옵션은 차량 전용
+    renderOpts();   // 프로필이 바뀌면 회피 옵션 구성도 바뀐다(차량 통행료/고속도로, 도보 계단)
   }
 
-  // 경로 옵션(차량) — OSRM exclude 플래그. 프로필의 excludable(toll·motorway·ferry)만 가능하고
-  // 그래프 빌드 시점에 구워지므로 여기서 켜고 끄는 건 재질의만으로 즉시 반영된다.
+  // 경로 회피 옵션 — OSRM exclude 플래그. 프로필의 excludable 에 선언된 클래스만 쓸 수 있고
+  // 그래프 빌드 시점에 구워지므로, 켜고 끄는 건 재질의만으로 즉시 반영된다.
   const optsEl = panel.querySelector('#rt-opts');
-  [['toll', '무료우선'], ['motorway', '고속도로 회피']].forEach(([key, label]) => {
-    const b = document.createElement('button');
-    b.className = 'rt-btn'; b.style.flex = '1'; b.textContent = label; b.dataset.opt = key;
-    // ★ 배타 선택 — OSRM 프로필의 excludable 이 단일 클래스 집합만 선언해서
-    //   exclude=toll,motorway 조합은 400 InvalidValue("Exclude flag combination is not supported").
-    //   조합을 쓰려면 car.lua excludable 에 Set{'toll','motorway'} 추가 + 그래프 재빌드가 필요하다.
-    b.onclick = () => {
-      const on = !avoid[key];
-      Object.keys(avoid).forEach(k => { avoid[k] = false; });
-      avoid[key] = on;
-      paintOpts(); route();
-    };
-    optsEl.appendChild(b);
-  });
-  function paintOpts() {
-    optsEl.querySelectorAll('button').forEach(b => {
-      const on = avoid[b.dataset.opt];
+  function renderOpts() {
+    const opts = AVOID_OPTS[profile] || [];
+    optsEl.innerHTML = '';
+    optsEl.style.display = opts.length ? 'flex' : 'none';
+    opts.forEach(([key, label]) => {
+      const b = document.createElement('button');
+      b.className = 'rt-btn'; b.style.flex = '1'; b.textContent = label; b.dataset.opt = key;
+      const on = avoid[key];
       b.style.background = on ? '#2b5c8f' : '#1a2029';
       b.style.color = on ? '#e8eef7' : '#cdd6e3';
+      // ★ 배타 선택 — 프로필의 excludable 이 단일 클래스 집합만 선언해서 exclude=toll,motorway
+      //   같은 조합은 400 InvalidValue("Exclude flag combination is not supported").
+      b.onclick = () => {
+        const next = !avoid[key];
+        Object.keys(avoid).forEach(k => { avoid[k] = false; });
+        avoid[key] = next;
+        renderOpts(); route();
+      };
+      optsEl.appendChild(b);
     });
   }
-  paintOpts();
+  renderOpts();
   paintModes();
 
   // ---- 슬롯 행 렌더 ----
@@ -456,7 +462,10 @@
     if (seq !== routeSeq) return;
     const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
     // 대안 경로는 경유지가 없을 때만 OSRM 이 낸다(경유지가 있으면 무시). 회피 옵션은 차량 전용.
-    const ex = profile === 'driving' ? Object.keys(avoid).filter(k => avoid[k]) : [];
+    // 현재 프로필이 지원하는 옵션만 보낸다 — 프로필 전환 후 남은 켜짐 상태를 그대로 실으면
+    // 그 프로필에 없는 클래스라 400 InvalidValue 로 경로가 통째로 실패한다.
+    const allowed = (AVOID_OPTS[profile] || []).map(o => o[0]);
+    const ex = allowed.filter(k => avoid[k]);
     // alternatives=true — 개수(3)를 박으면 서버의 --max-alternatives 를 낮췄을 때 전 질의가
     // 실패한다("higher than current maximum"). true 는 서버 상한을 그대로 따른다.
     const q = '?steps=true&overview=full&geometries=geojson&alternatives=true' +

@@ -41,11 +41,11 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
   fi
 done
 
-# 길찾기 그래프(route/{car,foot}) — compose 의 osrm-car/osrm-foot 가 south-korea.osrm 고정 참조.
+# 길찾기 그래프(route/{car,foot,bicycle}) — compose 의 osrm-car/foot/bike 가 south-korea.osrm 고정 참조.
 # 없으면 osrm 컨테이너가 crash-loop 하고 데모 길찾기가 실패한다 — 배포 시점에 차단.
 # 길찾기 제외 번들(package.sh SKIP_ROUTE=1)을 의도적으로 반입한 경우만 SKIP_ROUTE=1 로 우회.
 if [ -z "${SKIP_ROUTE:-}" ]; then
-  for rp in car foot; do
+  for rp in car foot bicycle; do
     if [ ! -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ]; then
       echo "오류: route/$rp/south-korea.osrm.mldgr 가 없거나 0바이트 — 길찾기 그래프 미포함 번들." >&2
       echo "  → 빌드호스트에서 scripts/07-gen-route-graph.sh 후 재패키징하거나, 길찾기 없이 배포하려면 SKIP_ROUTE=1 로 재실행." >&2

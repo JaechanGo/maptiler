@@ -39,10 +39,10 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
   fi
 done
 
-# route 통합 — 길찾기 그래프(FEAT-007). 07 이 repo route/{car,foot} 에 쓰므로 tiles 와 동일하게
+# route 통합 — 길찾기 그래프(FEAT-007). 07 이 repo route/{car,foot,bicycle} 에 쓰므로 tiles 와 동일하게
 # BUILD_HOME/route 로 모은다(번들 정본). customize 완주 마커(.mldgr)가 더 최신일 때만 교체.
 ROUTE_DIR="$BUILD_HOME/route"
-for rp in car foot; do
+for rp in car foot bicycle; do
   if [ -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ] && \
      { [ ! -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || \
        [ "$ROOT/route/$rp/south-korea.osrm.mldgr" -nt "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ]; }; then
@@ -55,13 +55,13 @@ for rp in car foot; do
       || { echo "오류: route 통합 복사 실패: route/$rp" >&2; exit 1; }
   fi
 done
-# 길찾기 그래프 게이트 — compose osrm-car/foot 가 ../route/{car,foot}/south-korea.osrm 고정 참조.
+# 길찾기 그래프 게이트 — compose osrm-car/foot/bike 가 ../route/{car,foot,bicycle}/south-korea.osrm 고정 참조.
 # 없는 채 반출하면 폐쇄망에서 osrm 컨테이너 crash-loop + 데모 길찾기 실패. 레거시(길찾기 제외) 번들은 SKIP_ROUTE=1.
 ROUTE_BUNDLE=""
 if [ -n "${SKIP_ROUTE:-}" ]; then
   echo "  (건너뜀) 길찾기 그래프 — SKIP_ROUTE=1 (osrm 서비스는 폐쇄망에서 기동 실패 상태로 남음)"
 else
-  for rp in car foot; do
+  for rp in car foot bicycle; do
     [ -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || {
       echo "오류: $ROUTE_DIR/$rp/south-korea.osrm.mldgr 없음 — 길찾기 그래프 미빌드." >&2
       echo "  → scripts/07-gen-route-graph.sh 실행(또는 Build Studio '길찾기 그래프' 단계) 후 재패키징." >&2

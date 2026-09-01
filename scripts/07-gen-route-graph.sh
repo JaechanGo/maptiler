@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/versions.sh"   # OSRM_IMAGE 버전 핀(compose 와 동일 태그 — 드리프트 금지)
 
 PBF="${PBF:-$ROOT/data/osm/south-korea.osm.pbf}"
-PROFILES="${PROFILES:-car foot}"     # 프로필 추가(예: bicycle)는 여기 + compose 서비스 1개
+PROFILES="${PROFILES:-car foot bicycle}"   # 프로필 추가는 여기 + compose 서비스 1개 + 게이트웨이 분기
 THREADS="${OSRM_THREADS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
 [ -s "$PBF" ] || { echo "오류: OSM 추출본 없음: $PBF — 01-download-data.sh 먼저 실행" >&2; exit 1; }

@@ -13,6 +13,11 @@ local KR_STEPS_SPEED   = 3.5        -- 계단
 function setup()
   local profile = foot.setup()
   profile.properties.traffic_light_penalty = 30
+  -- 계단회피 옵션(exclude=steps) — 휠체어·유모차·캐리어. 내장 foot 프로필은 classes 를
+  -- 아예 선언하지 않아(핸들러 목록에도 WayHandlers.classes 없음) 여기서 클래스를 신설하고
+  -- process_way 에서 직접 부여한다. excludable 은 그래프 빌드 시점에 구워진다.
+  profile.classes = Sequence { 'steps' }
+  profile.excludable = Sequence { Set { 'steps' } }
   -- speeds 는 그룹(highway/railway/amenity/…) 중첩 테이블 — 기본 보행속도(5)만 일괄 치환.
   -- 5 외 값(예: ferry 등 route_speeds)은 건드리지 않는다.
   for _, group in pairs(profile.speeds) do
@@ -25,9 +30,20 @@ function setup()
   return profile
 end
 
+-- highway=steps 에 'steps' 클래스를 달아 exclude=steps 로 걸러낼 수 있게 한다.
+-- 지하보도·육교 계단이 대표 대상. 클래스만 부여하고 속도·통행 가능 여부는 건드리지 않는다
+-- (옵션을 안 켜면 지금까지와 동일한 경로가 나와야 하므로).
+function process_way(profile, way, result, relations)
+  foot.process_way(profile, way, result, relations)
+  if way:get_value_by_key('highway') == 'steps' then
+    result.forward_classes['steps'] = true
+    result.backward_classes['steps'] = true
+  end
+end
+
 return {
   setup = setup,
-  process_way = foot.process_way,
+  process_way = process_way,
   process_node = foot.process_node,
   process_turn = foot.process_turn,
 }
