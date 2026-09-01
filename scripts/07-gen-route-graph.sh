@@ -53,14 +53,21 @@ echo "길찾기 그래프 생성 완료: route/{$(echo $PROFILES | tr ' ' ',')}"
 #   foot 빌드 중 실행 중이던 osrm-car 가 부천 좌표를 서울 '망우로'로 스냅, 3.2km→65km 오답.
 #   파일은 정상이었고 재시작만으로 복구 — 즉 런타임 상태 손상). 빌드 후 osrm 전체 재시작이 정답.
 if command -v docker >/dev/null 2>&1; then
-  RUNNING="$(docker ps --filter name=osrm --format '{{.Names}}' 2>/dev/null || true)"
-  if [ -n "$RUNNING" ]; then
-    echo "⚠ 실행 중인 osrm 컨테이너가 있습니다 — 그래프 교체 후 재시작해야 오답을 막습니다:"
-    echo "$RUNNING" | sed 's/^/    /'
+  # -a 로 '정지된' 컨테이너까지 잡는다 — 배포 절차가 빌드 전에 docker stop 을 하는 경우가 흔한데,
+  # 실행 중만 재시작하면 그 컨테이너가 Exited 로 방치돼 길찾기가 통째로 죽는다(2026-09-01 실측).
+  OSRM_ALL="$(docker ps -a --filter name=osrm --format '{{.Names}}' 2>/dev/null || true)"
+  if [ -n "$OSRM_ALL" ]; then
+    echo "⚠ osrm 컨테이너 — 그래프 교체 후 재시작해야 오답(mmap 손상)·정지 방치를 막습니다:"
+    echo "$OSRM_ALL" | sed 's/^/    /'
     if [ "${OSRM_AUTO_RESTART:-1}" = "1" ]; then
       echo "  → 재시작 중 (건너뛰려면 OSRM_AUTO_RESTART=0)"
+      # restart 는 정지 상태에서도 기동한다(= start 겸용). 실패해도 빌드 성공은 유지.
       # shellcheck disable=SC2086
-      docker restart $RUNNING >/dev/null && echo "  ✓ 재시작 완료"
+      if docker restart $OSRM_ALL >/dev/null 2>&1; then
+        echo "  ✓ 재시작 완료"
+      else
+        echo "  ⚠ 재시작 실패 — 수동으로 'docker start <이름>' 확인 필요" >&2
+      fi
     fi
   fi
 fi
