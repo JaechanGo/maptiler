@@ -99,6 +99,29 @@ fi
 
 echo
 echo "── [4/5] 빌드 툴체인(GDAL·tippecanoe) 설치 ──────"
+# 패키지 설치가 불가능한 호스트(EOL 배포판 등)를 위한 **도커 래퍼 폴백**.
+#   [실측 2026-09-01 .244/CentOS 7] yum 미러가 EOL 로 사망해 gdal·tippecanoe 를 못 깐다.
+#   이미 psql·ogr2ogr 가 같은 방식(컨테이너 실행)으로 대체돼 동작 중이라, 나머지 도구도 동일 규약으로 만든다.
+#   호출부(스크립트)는 무수정 — PATH 의 실행파일처럼 보이고 cwd·/home 마운트가 유지된다.
+GDAL_IMAGE="${GDAL_IMAGE:-ghcr.io/osgeo/gdal:alpine-small-latest}"
+TIPPE_IMAGE="${TIPPE_IMAGE:-naxgrp/tippecanoe:latest}"   # ghcr.io/felt/* 는 익명 pull 거부(실측)
+BUILD_ROOT_MOUNT="${BUILD_ROOT_MOUNT:-${BUILD_HOME:-$HOME}}"   # 컨테이너에 그대로 마운트할 작업 루트
+mk_docker_wrapper() {   # $1=명령명 $2=이미지 — 마운트 경로는 생성 시점에 확정해 박는다
+  _bin="/usr/local/bin/$1"
+  $SUDO sh -c "cat > '$_bin'" <<WRAP
+#!/bin/sh
+# $1 도커 래퍼 — setup-build-host.sh 가 생성(패키지 설치 불가 호스트 폴백).
+# -i: gdaltransform 처럼 **stdin 으로 입력받는** 도구가 있어 항상 붙인다. 없으면 입력이 컨테이너에
+#     닿지 않아 조용히 빈 출력을 내고, 호출부는 0건으로 흘러간다(실측: localdata '유지 0 · 제외 225만').
+exec docker run --rm -i --network host \\
+  -v $BUILD_ROOT_MOUNT:$BUILD_ROOT_MOUNT \\
+  -w "\$(pwd)" \\
+  $2 $1 "\$@"
+WRAP
+  $SUDO chmod +x "$_bin"
+  echo "  ↪ 도커 래퍼 생성: $1 ($2, 마운트 $BUILD_ROOT_MOUNT)"
+}
+
 # GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·load_building.sh 변환에 필수.
 if have gdaltransform && have ogr2ogr; then
   echo "✓ 이미 설치됨: GDAL ($(command -v ogr2ogr))"
@@ -112,6 +135,12 @@ elif have brew; then
   echo "→ brew: gdal"; brew install gdal
 else
   echo "✗ 패키지 매니저 미발견 — GDAL 수동 설치 필요"
+fi
+if ! (have gdaltransform && have ogr2ogr) && have docker; then
+  echo "→ GDAL 패키지 설치 실패 → 도커 래퍼로 폴백 ($GDAL_IMAGE)"
+  for _g in ogr2ogr gdaltransform gdalbuildvrt gdalwarp gdal_translate gdaladdo gdalinfo; do
+    have "$_g" || mk_docker_wrapper "$_g" "$GDAL_IMAGE"
+  done
 fi
 if have gdaltransform && have ogr2ogr; then echo "✓ GDAL 사용 가능"; else echo "✗ GDAL 여전히 없음 — localdata/buildings 빌드 불가(권한/네트워크 확인)"; fi
 
@@ -160,6 +189,12 @@ elif have git && have make; then
   else echo "✗ tippecanoe 소스 클론 실패(네트워크?)"; fi
 else
   echo "✗ tippecanoe 설치 불가 — brew 또는 git+make 필요. 수동: git clone https://github.com/felt/tippecanoe && make -j && $SUDO make install"
+fi
+if ! (have tippecanoe && have tile-join) && have docker; then
+  echo "→ tippecanoe 설치 실패 → 도커 래퍼로 폴백 ($TIPPE_IMAGE)"
+  for _t in tippecanoe tile-join; do
+    have "$_t" || mk_docker_wrapper "$_t" "$TIPPE_IMAGE"
+  done
 fi
 if have tippecanoe && have tile-join; then echo "✓ tippecanoe 사용 가능"; else echo "✗ tippecanoe 여전히 없음 — buildings/poi 타일 빌드 불가"; fi
 

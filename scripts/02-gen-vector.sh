@@ -29,7 +29,11 @@ if ! printf '%s' "$JV" | grep -qE 'version "(2[1-9]|[3-9][0-9])'; then
 fi
 echo "Java: $JV  ($JAVA_BIN)"
 # -Xmx: 한국 규모는 12g면 충분. 더 큰 지역(대륙/행성)은 머신 RAM에 맞춰 상향할 것.
-"$JAVA_BIN" -Xmx12g -jar planetiler/planetiler.jar \
+# ★ PLANETILER_XMX 로 재정의 — 12g 고정은 **다른 서비스가 함께 도는 호스트에서 OOM-kill** 을 부른다
+#   ([실측 2026-09-01 .244] RAM 15GB 에 osrm-car/foot 3.1GB·PostGIS·tileserver 상주 상태에서
+#    anon-rss 11.5GB 까지 커진 뒤 커널이 SIGKILL → 종료코드 137, korea.mbtiles 부분파일로 남음).
+#   빌드 전용 호스트는 종전대로 12g, 겸용 호스트는 PLANETILER_XMX=6g 처럼 낮춰 쓴다.
+"$JAVA_BIN" "-Xmx${PLANETILER_XMX:-12g}" -jar planetiler/planetiler.jar \
   --osm_path="data/osm/south-korea.osm.pbf" \
   --output="tiles/korea.mbtiles" \
   --download --force
