@@ -30,6 +30,9 @@
     return t + (s.name ? ' — ' + s.name : '');
   }
   const fmtDist = m => m >= 1000 ? (m / 1000).toFixed(1) + 'km' : Math.round(m) + 'm';
+  // 도보 걸음 수 — 보폭 0.64m. 상용 내비 표기(349m=545걸음·502m=785걸음)에서 역산한 값과 일치.
+  const STRIDE_M = 0.64;
+  const fmtSteps = m => Math.round(m / STRIDE_M).toLocaleString('ko-KR') + '걸음';
   const fmtDur = s => {
     const min = Math.round(s / 60);
     return min >= 60 ? Math.floor(min / 60) + '시간 ' + (min % 60) + '분' : min + '분';
@@ -43,6 +46,10 @@
   let pickIdx = -1;                  // 지도 클릭 지정 대기 중인 슬롯(-1=없음)
   let ac = null;                     // 자동완성 fetch 취소용
   let routeSeq = 0;                  // 경로 응답 레이스 가드 — 늦게 도착한 이전 질의(프로필 전환 등)가 최신 화면을 덮는 것 차단
+  let routes = [];                   // 이번 응답의 경로들(대안 포함) — 선택 전환 시 재질의 없이 사용
+  let routeIdx = 0;                  // 선택된 경로 인덱스
+  let routePts = [];                 // 그 응답에 쓴 지점(출구 스냅 반영본) — 마커·출구 고지의 진실원
+  const avoid = { toll: false, motorway: false };   // 차량 경로 옵션 → OSRM exclude (그래프에 excludable 로 구움)
 
   // ---- UI 골격 (다크 테마 — search.js 와 동일 팔레트) ----
   const btn = document.createElement('button');
@@ -59,10 +66,13 @@
     '<div id="rt-modes" style="display:flex;gap:6px;margin-bottom:8px"></div>' +
     '<div id="rt-slots"></div>' +
     '<div style="display:flex;gap:6px;margin-top:8px">' +
+    '  <button id="rt-swap" class="rt-btn" title="출발↔도착 바꾸기">⇅</button>' +
     '  <button id="rt-add" class="rt-btn" style="flex:1">+ 경유지</button>' +
     '  <button id="rt-go" class="rt-btn" style="flex:2;background:#2b5c8f;color:#e8eef7">길찾기</button>' +
     '  <button id="rt-clear" class="rt-btn" style="flex:1">지우기</button>' +
     '</div>' +
+    '<div id="rt-opts" style="display:flex;gap:6px;margin-top:6px"></div>' +
+    '<div id="rt-routes" style="margin-top:8px"></div>' +
     '<div id="rt-summary" style="margin-top:8px;display:none"></div>' +
     '<div id="rt-steps" style="margin-top:6px;max-height:240px;overflow-y:auto"></div>' +
     '<div style="margin-top:8px;color:#5b6878;font-size:11px">시간은 도로등급·신호 지연 기반 추정 — 실시간 교통 미반영</div>';
@@ -86,7 +96,26 @@
       b.style.background = b.dataset.key === profile ? '#2b5c8f' : '#1a2029';
       b.style.color = b.dataset.key === profile ? '#e8eef7' : '#cdd6e3';
     });
+    optsEl.style.display = profile === 'driving' ? 'flex' : 'none';   // 회피 옵션은 차량 전용
   }
+
+  // 경로 옵션(차량) — OSRM exclude 플래그. 프로필의 excludable(toll·motorway·ferry)만 가능하고
+  // 그래프 빌드 시점에 구워지므로 여기서 켜고 끄는 건 재질의만으로 즉시 반영된다.
+  const optsEl = panel.querySelector('#rt-opts');
+  [['toll', '무료우선'], ['motorway', '고속도로 회피']].forEach(([key, label]) => {
+    const b = document.createElement('button');
+    b.className = 'rt-btn'; b.style.flex = '1'; b.textContent = label; b.dataset.opt = key;
+    b.onclick = () => { avoid[key] = !avoid[key]; paintOpts(); route(); };
+    optsEl.appendChild(b);
+  });
+  function paintOpts() {
+    optsEl.querySelectorAll('button').forEach(b => {
+      const on = avoid[b.dataset.opt];
+      b.style.background = on ? '#2b5c8f' : '#1a2029';
+      b.style.color = on ? '#e8eef7' : '#cdd6e3';
+    });
+  }
+  paintOpts();
   paintModes();
 
   // ---- 슬롯 행 렌더 ----
@@ -135,6 +164,13 @@
     renderSlots();
   };
   panel.querySelector('#rt-clear').onclick = () => { slots = [null, null]; renderSlots(); clearRoute(); };
+  // 출발↔도착 스왑 — 왕복 경로가 일방통행·회전제한 때문에 대칭이 아니라(차량) 되짚기 질의가 잦다.
+  // 경유지는 순서를 뒤집어야 "역순 방문"이 된다(중간을 그대로 두면 왕복 순서가 어긋남).
+  panel.querySelector('#rt-swap').onclick = () => {
+    slots.reverse();
+    renderSlots();
+    if (slots.every(Boolean)) route(); else clearRoute();
+  };
 
   // geocode 자동완성 — search.js 와 동일 계약(display 우선·debounce·이전 요청 취소).
   function wireAutocomplete(input, list, idx) {
@@ -236,12 +272,17 @@
 
   // ---- 경로 그리기 ----
   const SRC = 'cuvia-route';
+  const ALT = 'cuvia-route-alt';     // 선택 안 된 대안 경로(회색) — 별도 소스라야 선택 전환이 즉시
   function clearRoute() {
     markers.forEach(m => m.remove()); markers = [];
     if (map.getLayer(SRC + '-arrows')) map.removeLayer(SRC + '-arrows');
     if (map.getLayer(SRC + '-line')) map.removeLayer(SRC + '-line');
     if (map.getLayer(SRC + '-casing')) map.removeLayer(SRC + '-casing');
     if (map.getSource(SRC)) map.removeSource(SRC);
+    if (map.getLayer(ALT + '-line')) map.removeLayer(ALT + '-line');
+    if (map.getSource(ALT)) map.removeSource(ALT);
+    routes = []; routeIdx = 0; routePts = [];
+    panel.querySelector('#rt-routes').innerHTML = '';
     panel.querySelector('#rt-summary').style.display = 'none';
     panel.querySelector('#rt-steps').innerHTML = '';
   }
@@ -254,6 +295,15 @@
       ';color:#0d1622;font-weight:700;font-size:12px;display:flex;align-items:center;' +
       'justify-content:center;border:2px solid #0d1622;box-shadow:0 1px 4px rgba(0,0,0,.5)';
     return el;
+  }
+  // 대안 경로(선택 안 된 것) — 선택 경로 아래에 회색으로. 클릭 유도는 패널 카드가 담당.
+  function drawAlts(feats) {
+    const fc = { type: 'FeatureCollection', features: feats };
+    if (map.getSource(ALT)) { map.getSource(ALT).setData(fc); return; }
+    map.addSource(ALT, { type: 'geojson', data: fc });
+    map.addLayer({ id: ALT + '-line', type: 'line', source: ALT,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#7d8aa0', 'line-width': 4, 'line-opacity': 0.55 } });
   }
   function drawRoute(geojson, pts) {
     if (map.getSource(SRC)) {
@@ -284,6 +334,94 @@
     });
   }
 
+  // 경로의 주요 경유 도로 — 이름별 거리 합 상위 3개("길주로 2.5km → 계남로 1.0km").
+  // 턴바이턴 20여 줄로는 "어느 길로 가는지"가 안 읽힌다(상용 내비가 경로 카드에 이걸 쓰는 이유).
+  function summarizeRoads(r) {
+    const agg = new Map();
+    (r.legs || []).forEach(leg => (leg.steps || []).forEach(s => {
+      if (s.name) agg.set(s.name, (agg.get(s.name) || 0) + s.distance);
+    }));
+    return [...agg.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([n, d]) => n + ' ' + fmtDist(d)).join(' → ');
+  }
+
+  // 대안 경로 카드 목록 — 클릭하면 재질의 없이 선택만 전환.
+  function renderRoutes() {
+    const el = panel.querySelector('#rt-routes');
+    el.innerHTML = '';
+    if (routes.length < 2) return;            // 대안이 없으면 목록 자체를 숨김(요약이 이미 같은 정보)
+    routes.forEach((r, i) => {
+      const card = document.createElement('div');
+      const on = i === routeIdx;
+      card.style.cssText = 'padding:6px 8px;margin-top:4px;border-radius:6px;cursor:pointer;font-size:12px;' +
+        'border:1px solid ' + (on ? '#2b5c8f' : '#2c3542') + ';background:' + (on ? '#1a2c40' : '#161c25');
+      const head = document.createElement('div');
+      head.style.cssText = 'color:' + (on ? '#e8eef7' : '#cdd6e3');
+      head.textContent = (i === 0 ? '추천 ' : '대안 ' + i + ' ') + fmtDur(r.duration) + ' · ' + fmtDist(r.distance) +
+        (profile === 'walking' ? ' · ' + fmtSteps(r.distance) : '');
+      const via = document.createElement('div');
+      via.style.cssText = 'color:#7d8aa0;font-size:11px;margin-top:2px';
+      via.textContent = summarizeRoads(r);
+      card.appendChild(head); card.appendChild(via);
+      card.onclick = () => { routeIdx = i; renderRoutes(); paintRoute(true); };
+      el.appendChild(card);
+    });
+  }
+
+  // 선택된 경로를 지도·요약·턴바이턴에 반영. fit=true 면 화면도 맞춘다(최초 응답·카드 클릭 시).
+  function paintRoute(fit) {
+    const r0 = routes[routeIdx];
+    if (!r0) return;
+    const sum = panel.querySelector('#rt-summary');
+    const stepsEl = panel.querySelector('#rt-steps');
+    drawRoute({ type: 'Feature', geometry: r0.geometry, properties: {} }, routePts);
+    drawAlts(routes.filter((_, i) => i !== routeIdx)
+      .map(r => ({ type: 'Feature', geometry: r.geometry, properties: {} })));
+    if (fit) {
+      const b = r0.geometry.coordinates.reduce((acc, c) => [
+        Math.min(acc[0], c[0]), Math.min(acc[1], c[1]),
+        Math.max(acc[2], c[0]), Math.max(acc[3], c[1])
+      ], [Infinity, Infinity, -Infinity, -Infinity]);
+      // 패널 몫 340px 은 좁은 화면(모바일)에서 캔버스 폭을 초과해 fitBounds 가 throw → 폭 40%로 클램프
+      const padR = Math.min(340, Math.floor(map.getContainer().clientWidth * 0.4));
+      map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 60, left: 60, right: padR } });
+    }
+    // 요약: 총 시간·거리 (+구간·출구)
+    sum.style.display = 'block'; sum.style.color = '#e8eef7';
+    sum.innerHTML = '';
+    const strong = document.createElement('b');
+    strong.textContent = fmtDur(r0.duration) + ' · ' + fmtDist(r0.distance) +
+      (profile === 'walking' ? ' · ' + fmtSteps(r0.distance) : '');
+    sum.appendChild(strong);
+    if (r0.legs.length > 1) {
+      const legs = document.createElement('div');
+      legs.style.cssText = 'color:#7d8aa0;font-size:11px;margin-top:2px';
+      legs.textContent = r0.legs.map((l, i) => '구간' + (i + 1) + ' ' + fmtDist(l.distance) + '/' + fmtDur(l.duration)).join(' · ');
+      sum.appendChild(legs);
+    }
+    const exitPts = routePts.filter(p => p.exit);   // 출구 스냅 결과 고지 — 어느 출구 기준인지
+    if (exitPts.length) {
+      const ex = document.createElement('div');
+      ex.style.cssText = 'color:#8fd3a8;font-size:11px;margin-top:2px';
+      ex.textContent = '출구 기준: ' + exitPts.map(p => p.label).join(' · ');
+      sum.appendChild(ex);
+    }
+    // 턴바이턴 목록
+    stepsEl.innerHTML = '';
+    r0.legs.forEach(leg => leg.steps.forEach(s => {
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:5px 2px;border-top:1px solid #222b38;font-size:12px;color:#cdd6e3';
+      row.textContent = stepText(s);
+      if (s.distance > 0) {
+        const d2 = document.createElement('span');
+        d2.style.cssText = 'color:#7d8aa0;font-size:11px';
+        d2.textContent = ' ' + fmtDist(s.distance);
+        row.appendChild(d2);
+      }
+      stepsEl.appendChild(row);
+    }));
+  }
+
   // ---- 경로 질의 ----
   function route() {
     const pts0 = slots.filter(Boolean);
@@ -293,64 +431,30 @@
     (profile === 'walking' ? snapExits(pts0) : Promise.resolve(pts0)).then(pts => {
     if (seq !== routeSeq) return;
     const coords = pts.map(p => p.lon + ',' + p.lat).join(';');
-    fetch(ROUTER + '/route/v1/' + profile + '/' + coords +
-          '?steps=true&overview=full&geometries=geojson')
+    // 대안 경로는 경유지가 없을 때만 OSRM 이 낸다(경유지가 있으면 무시). 회피 옵션은 차량 전용.
+    const ex = profile === 'driving' ? Object.keys(avoid).filter(k => avoid[k]) : [];
+    const q = '?steps=true&overview=full&geometries=geojson&alternatives=3' +
+      (ex.length ? '&exclude=' + ex.join(',') : '');
+    // 계산 중 표시 — exclude(무료우선 등) 장거리 질의는 수 초가 걸린다. 표시가 없으면
+    // 옛 결과가 그대로 보여 "옵션이 안 먹는다"고 오해한다(실측: 서울→밀양 exclude=toll 약 5초).
+    const busy = panel.querySelector('#rt-summary');
+    busy.style.display = 'block'; busy.style.color = '#7d8aa0';
+    busy.textContent = '경로 계산 중…';
+    fetch(ROUTER + '/route/v1/' + profile + '/' + coords + q)
       .then(r => r.json()).then(d => {
         if (seq !== routeSeq) return;   // 이후 질의가 이미 나감(프로필 전환·지점 변경) — 낡은 응답 폐기
         const sum = panel.querySelector('#rt-summary');
-        const stepsEl = panel.querySelector('#rt-steps');
         if (d.code !== 'Ok' || !d.routes || !d.routes.length) {
           clearRoute();
           sum.style.display = 'block';
           sum.textContent = '경로를 찾을 수 없습니다' + (d.code && d.code !== 'Ok' ? ' (' + d.code + ')' : '') +
-            ' — 지점을 도로 근처로 옮겨보세요';
+            (ex.length ? ' — 회피 옵션을 끄고 다시 시도해보세요' : ' — 지점을 도로 근처로 옮겨보세요');
           sum.style.color = '#f87171';
           return;
         }
-        const r0 = d.routes[0];
-        drawRoute({ type: 'Feature', geometry: r0.geometry, properties: {} }, pts);
-        // 화면을 경로 전체로 — 경로선 bbox 계산
-        const cs = r0.geometry.coordinates;
-        const b = cs.reduce((acc, c) => [
-          Math.min(acc[0], c[0]), Math.min(acc[1], c[1]),
-          Math.max(acc[2], c[0]), Math.max(acc[3], c[1])
-        ], [Infinity, Infinity, -Infinity, -Infinity]);
-        // 패널 몫 340px 은 좁은 화면(모바일)에서 캔버스 폭을 초과해 fitBounds 가 throw → 폭 40%로 클램프
-        const padR = Math.min(340, Math.floor(map.getContainer().clientWidth * 0.4));
-        map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 60, left: 60, right: padR } });
-        // 요약: 총 시간·거리 (+구간 수)
-        sum.style.display = 'block'; sum.style.color = '#e8eef7';
-        sum.innerHTML = '';
-        const strong = document.createElement('b');
-        strong.textContent = fmtDur(r0.duration) + ' · ' + fmtDist(r0.distance);
-        sum.appendChild(strong);
-        if (r0.legs.length > 1) {
-          const legs = document.createElement('div');
-          legs.style.cssText = 'color:#7d8aa0;font-size:11px;margin-top:2px';
-          legs.textContent = r0.legs.map((l, i) => '구간' + (i + 1) + ' ' + fmtDist(l.distance) + '/' + fmtDur(l.duration)).join(' · ');
-          sum.appendChild(legs);
-        }
-        const exitPts = pts.filter(p => p.exit);   // 출구 스냅 결과 고지 — 어느 출구 기준인지
-        if (exitPts.length) {
-          const ex = document.createElement('div');
-          ex.style.cssText = 'color:#8fd3a8;font-size:11px;margin-top:2px';
-          ex.textContent = '출구 기준: ' + exitPts.map(p => p.label).join(' · ');
-          sum.appendChild(ex);
-        }
-        // 턴바이턴 목록
-        stepsEl.innerHTML = '';
-        r0.legs.forEach(leg => leg.steps.forEach(s => {
-          const row = document.createElement('div');
-          row.style.cssText = 'padding:5px 2px;border-top:1px solid #222b38;font-size:12px;color:#cdd6e3';
-          row.textContent = stepText(s);
-          if (s.distance > 0) {
-            const d2 = document.createElement('span');
-            d2.style.cssText = 'color:#7d8aa0;font-size:11px';
-            d2.textContent = ' ' + fmtDist(s.distance);
-            row.appendChild(d2);
-          }
-          stepsEl.appendChild(row);
-        }));
+        routes = d.routes; routeIdx = 0; routePts = pts;
+        renderRoutes();
+        paintRoute(true);
       })
       .catch(e => {
         if (seq !== routeSeq) return;   // 낡은 질의의 실패 — 최신 화면을 오류로 덮지 않음
