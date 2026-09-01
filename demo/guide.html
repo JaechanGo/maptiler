@@ -162,6 +162,8 @@ map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));</pre
       <tr><td>글리프(폰트)</td><td class="mono">/fonts/{fontstack}/{range}.pbf</td></tr>
       <tr><td>지오코딩(검색)</td><td class="mono">/geocode?q=증미역 <span class="note">· 게이트웨이 경유</span></td></tr>
       <tr><td>역지오코딩</td><td class="mono">/reverse?lon=126.86&amp;lat=37.55 <span class="note">· 게이트웨이 경유</span></td></tr>
+      <tr><td>길찾기(차량)</td><td class="mono">/route/v1/driving/{lon},{lat};{lon},{lat}?steps=true&amp;geometries=geojson <span class="note">· 게이트웨이 경유 · 경유지는 ; 로 연결</span></td></tr>
+      <tr><td>길찾기(도보)</td><td class="mono">/route/v1/walking/{lon},{lat};{lon},{lat} <span class="note">· /table /trip /nearest 도 동일 분기</span></td></tr>
     </tbody>
   </table>
 
