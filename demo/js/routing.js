@@ -137,6 +137,10 @@
     input.addEventListener('input', () => {
       clearTimeout(timer);
       const q = input.value.trim();
+      // ★ 텍스트가 확정 지점 라벨과 달라지면 슬롯 즉시 무효화 + 경로 제거.
+      //   없으면 입력을 지워도 옛 좌표로 계속 경로를 그려 "경유지 뺐는데 시간이 그대로" 착오 발생
+      //   (실측: 경유지 텍스트 삭제 후에도 요약이 경유 포함 9분 유지 → 직행 4.5분과 혼동).
+      if (slots[idx] && q !== slots[idx].label) { slots[idx] = null; clearRoute(); }
       if (q.length < 1) { list.style.display = 'none'; return; }
       timer = setTimeout(() => {
         if (ac) ac.abort();
