@@ -76,6 +76,15 @@ AL_D010 은 신개발지구 신축이 수년 늦다(과천지식정보타운 실
   기본 config 에는 satellite 항목이 없다.
 - **활성화**: 데모의 '위성' 버튼은 `/data/satellite.json` 프로브로 자동 활성화(코드 수정 불요).
   위성 모드는 하이브리드 — 영상 위에 도로·라벨·필지·경계는 유지, 면(녹지·물·건물)만 숨김.
+- **⚠ NGII 다운로드 함정 실측(2026-09-01, 미해결로 보류)**: 국토정보플랫폼 다운로드는 Innorix
+  전용 에이전트 필수. ①설치 안내 페이지(`nlippd…/install/install.html`)에 Apple Silicon 분기
+  버그(`macMchipInstallFileURL` 미정의 ReferenceError) — 맥 설치파일은
+  `nlippd.ngii.go.kr/nlippd/install/INNORIX-Agent.pkg` 직링크로 수동 확보(Apple 공증본)
+  ②CA를 크롬 실행 중 설치하면 신뢰 미반영 — 크롬 완전 재시작 필요 ③신청서 제출(팝업 차단
+  해제 필수) 후 팝업(innorixdownLoad.do)에 파일 목록·[전체 다운로드]까지 뜨는 것 확인했으나
+  에이전트 전송 큐(~/.INNORIX/innorixas/transferInfo)에 작업이 등록되지 않아 실전송 실패.
+  신청분은 마이페이지 > 신청내역관리 > 정사영상에서 재다운로드 가능(만료 전). 재시도 시
+  Windows PC 가 가장 무난. 저줌 대안: Copernicus Sentinel-2(10m·재배포 가능, z13 이하용).
 
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
