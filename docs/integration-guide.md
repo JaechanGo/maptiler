@@ -83,7 +83,7 @@ const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`)
 
 OSRM 자체 호스팅(`osrm-car`·`osrm-foot`)을 게이트웨이가 프로필로 분기한다
 (`/route|/table|/trip|/nearest` 의 `v1/driving`→차량, `v1/walking`→도보 — OSRM/Mapbox Directions 표준 URL).
-폐쇄망 전용 — 실시간 교통은 미반영(도로등급·제한속도 기반 추정 시간).
+폐쇄망 전용 — 실시간 교통은 미반영. 소요시간은 한국 도심 보정 프로필(`scripts/route-profiles/car.lua` — 등급별 실효속도·신호등 30s·회전/유턴 지연)로 상용 내비의 "평상시" 추정에 근사시킨 값이다.
 
 ```js
 // 경로: 출발;경유지;도착 (lon,lat 순서 주의) — steps=턴바이턴, geometries=geojson 권장

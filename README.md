@@ -30,7 +30,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 ./scripts/01-download-data.sh    # OSM/글리프/MapLibre/Maputnik
 ./scripts/02-gen-vector.sh       # 벡터 타일 (korea.mbtiles)
 ./scripts/03-gen-terrain.sh      # 지형 타일 (terrain.mbtiles)
-./scripts/07-gen-route-graph.sh  # 길찾기 그래프 (OSRM car·foot → route/)
+./scripts/07-gen-route-graph.sh  # 길찾기 그래프 (OSRM car·foot → route/, car 는 한국 도심 보정 프로필)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
 ./scripts/postgis/load-all.sh    # 3D 건물 → PostGIS building (STEPS=building, GIS건물통합 SHP)

@@ -23,9 +23,18 @@ for profile in $PROFILES; do
   # osrm-extract 는 pbf 와 같은 디렉토리에 산출물을 쓴다 → 프로필 디렉토리에 pbf 복사 후 추출.
   # (하드링크는 도커 볼륨 경계·타 볼륨에서 깨질 수 있어 일반 복사. 286MB — 부담 없음)
   cp "$PBF" "$OUT/$BASENAME"
-  # 프로필 lua 는 이미지 내장(/opt/car.lua·foot.lua). MLD 3단계: extract→partition→customize.
-  docker run --rm -v "$OUT:/data" "$OSRM_IMAGE" \
-    osrm-extract -p "/opt/$profile.lua" -t "$THREADS" "/data/$BASENAME"
+  # 프로필: 저장소 보정 프로필(scripts/route-profiles/<profile>.lua — 한국 도심 계수) 우선,
+  # 없으면 이미지 내장(/opt/car.lua·foot.lua). 보정 프로필은 내장 프로필을 require 하므로
+  # /opt/<profile>.lua 를 덮지 않는 별도 이름(kr-*)으로 마운트. MLD 3단계: extract→partition→customize.
+  KR_PROFILE="$ROOT/scripts/route-profiles/$profile.lua"
+  if [ -f "$KR_PROFILE" ]; then
+    echo "  보정 프로필 사용: scripts/route-profiles/$profile.lua"
+    docker run --rm -v "$KR_PROFILE:/opt/kr-$profile.lua:ro" -v "$OUT:/data" "$OSRM_IMAGE" \
+      osrm-extract -p "/opt/kr-$profile.lua" -t "$THREADS" "/data/$BASENAME"
+  else
+    docker run --rm -v "$OUT:/data" "$OSRM_IMAGE" \
+      osrm-extract -p "/opt/$profile.lua" -t "$THREADS" "/data/$BASENAME"
+  fi
   docker run --rm -v "$OUT:/data" "$OSRM_IMAGE" \
     osrm-partition "/data/$OSRM_BASE"
   docker run --rm -v "$OUT:/data" "$OSRM_IMAGE" \

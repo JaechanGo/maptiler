@@ -2,7 +2,7 @@
 // 출발/도착/경유지(geocode 자동완성 + 지도 클릭 지정) → /route/v1/{driving|walking} →
 // 경로선(GeoJSON)·총 시간/거리·구간(leg)·턴바이턴 목록 표시.
 // 기본 same-origin(게이트웨이 뒤면 포트 무관). 직접 띄웠으면 ?router=http://host:port 지정.
-// 주의: 소요시간은 도로등급·제한속도 기반 추정 — 실시간 교통 미반영(패널 하단 고지).
+// 주의: 소요시간은 도로등급 실효속도·신호/회전 지연 반영 추정(scripts/route-profiles/car.lua) — 실시간 교통 미반영.
 (function () {
   const map = window.cuviaMap;
   if (!map) { console.warn('routing.js: cuviaMap 미초기화'); return; }
@@ -63,7 +63,7 @@
     '</div>' +
     '<div id="rt-summary" style="margin-top:8px;display:none"></div>' +
     '<div id="rt-steps" style="margin-top:6px;max-height:240px;overflow-y:auto"></div>' +
-    '<div style="margin-top:8px;color:#5b6878;font-size:11px">시간은 도로등급 기반 추정 — 실시간 교통 미반영</div>';
+    '<div style="margin-top:8px;color:#5b6878;font-size:11px">시간은 도로등급·신호 지연 기반 추정 — 실시간 교통 미반영</div>';
   document.body.appendChild(panel);
   const style = document.createElement('style');
   style.textContent = '.rt-btn{padding:7px 8px;background:#1a2029;color:#cdd6e3;border:1px solid #2c3542;' +
