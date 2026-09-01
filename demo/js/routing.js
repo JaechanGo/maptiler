@@ -188,11 +188,22 @@
   const SRC = 'cuvia-route';
   function clearRoute() {
     markers.forEach(m => m.remove()); markers = [];
+    if (map.getLayer(SRC + '-arrows')) map.removeLayer(SRC + '-arrows');
     if (map.getLayer(SRC + '-line')) map.removeLayer(SRC + '-line');
     if (map.getLayer(SRC + '-casing')) map.removeLayer(SRC + '-casing');
     if (map.getSource(SRC)) map.removeSource(SRC);
     panel.querySelector('#rt-summary').style.display = 'none';
     panel.querySelector('#rt-steps').innerHTML = '';
+  }
+  // 순서 뱃지 마커 — 색만으론 방문 순서가 안 읽힌다(왕복 겹침 경로에서 "도착 먼저 들렀다" 착시,
+  // 실측: 춘의역→상동로196(경유)→상동역 — 경유지행이 도착지 코앞을 스쳐 왕복). 출/1/2…/도 명시.
+  function badge(text, color) {
+    const el = document.createElement('div');
+    el.textContent = text;
+    el.style.cssText = 'width:22px;height:22px;border-radius:50%;background:' + color +
+      ';color:#0d1622;font-weight:700;font-size:12px;display:flex;align-items:center;' +
+      'justify-content:center;border:2px solid #0d1622;box-shadow:0 1px 4px rgba(0,0,0,.5)';
+    return el;
   }
   function drawRoute(geojson) {
     if (map.getSource(SRC)) {
@@ -205,11 +216,21 @@
       map.addLayer({ id: SRC + '-line', type: 'line', source: SRC,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': '#3d8bfd', 'line-width': 5 } });
+      // 진행방향 화살표 — 왕복 겹침 구간에서 순서 판독의 유일한 단서. '>' 는 glyphs 확실 보장 문자.
+      map.addLayer({ id: SRC + '-arrows', type: 'symbol', source: SRC,
+        layout: { 'symbol-placement': 'line', 'symbol-spacing': 90, 'text-field': '>',
+                  'text-font': ['KlokanTech Noto Sans Regular'], 'text-size': 14,
+                  'text-keep-upright': false, 'text-allow-overlap': true,
+                  'text-rotation-alignment': 'map' },
+        paint: { 'text-color': '#e8eef7', 'text-halo-color': '#0d1622', 'text-halo-width': 1.5 } });
     }
     markers.forEach(m => m.remove()); markers = [];
     slots.filter(Boolean).forEach((s, i, arr) => {
-      const color = i === 0 ? '#4ade80' : i === arr.length - 1 ? '#f87171' : '#e8b84a';
-      markers.push(new maplibregl.Marker({ color }).setLngLat([s.lon, s.lat]).addTo(map));
+      const last = i === arr.length - 1;
+      const color = i === 0 ? '#4ade80' : last ? '#f87171' : '#e8b84a';
+      const label = i === 0 ? '출' : last ? '도' : String(i);   // 출/1/2…/도 — 방문 순서 명시
+      markers.push(new maplibregl.Marker({ element: badge(label, color) })
+        .setLngLat([s.lon, s.lat]).addTo(map));
     });
   }
 
