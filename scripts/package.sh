@@ -39,6 +39,34 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
   fi
 done
 
+# route 통합 — 길찾기 그래프(FEAT-007). 07 이 repo route/{car,foot} 에 쓰므로 tiles 와 동일하게
+# BUILD_HOME/route 로 모은다(번들 정본). customize 완주 마커(.mldgr)가 더 최신일 때만 교체.
+ROUTE_DIR="$BUILD_HOME/route"
+for rp in car foot; do
+  if [ -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ] && \
+     { [ ! -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || \
+       [ "$ROOT/route/$rp/south-korea.osrm.mldgr" -nt "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ]; }; then
+    echo "  ↪ route 통합: route/$rp → $ROUTE_DIR/$rp"
+    rm -rf "$ROUTE_DIR/$rp"; mkdir -p "$ROUTE_DIR"
+    cp -Rc "$ROOT/route/$rp" "$ROUTE_DIR/$rp" 2>/dev/null || cp -R "$ROOT/route/$rp" "$ROUTE_DIR/$rp" \
+      || { echo "오류: route 통합 복사 실패: route/$rp" >&2; exit 1; }
+  fi
+done
+# 길찾기 그래프 게이트 — compose osrm-car/foot 가 ../route/{car,foot}/south-korea.osrm 고정 참조.
+# 없는 채 반출하면 폐쇄망에서 osrm 컨테이너 crash-loop + 데모 길찾기 실패. 레거시(길찾기 제외) 번들은 SKIP_ROUTE=1.
+ROUTE_BUNDLE=""
+if [ -n "${SKIP_ROUTE:-}" ]; then
+  echo "  (건너뜀) 길찾기 그래프 — SKIP_ROUTE=1 (osrm 서비스는 폐쇄망에서 기동 실패 상태로 남음)"
+else
+  for rp in car foot; do
+    [ -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || {
+      echo "오류: $ROUTE_DIR/$rp/south-korea.osrm.mldgr 없음 — 길찾기 그래프 미빌드." >&2
+      echo "  → scripts/07-gen-route-graph.sh 실행(또는 Build Studio '길찾기 그래프' 단계) 후 재패키징." >&2
+      echo "    길찾기 없이 반출하려면 SKIP_ROUTE=1 로 재실행." >&2; exit 1; }
+  done
+  ROUTE_BUNDLE="route"
+fi
+
 # Build Studio 로 가져온 style.json(staged/style) 이 있으면 그대로 사용, 없으면 기본 조립.
 echo "[1/4] 스타일 조립(최신화)"
 STYLE_STAGED="$(ls -1 "$BUILD_HOME/staged/style/"*.json 2>/dev/null | head -n1 || true)"
@@ -176,7 +204,7 @@ echo "[3/4] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 TAGS=()
 while IFS= read -r _tag; do
   TAGS+=("$_tag")
-done < <(grep -E '^\s+image:' "$ROOT/server/docker-compose.yml" | awk '{print $2}')
+done < <(grep -E '^\s+image:' "$ROOT/server/docker-compose.yml" | awk '{print $2}' | sort -u)   # osrm-car/foot 동일 태그 중복 제거
 
 # W2: compose 파일에서 이미지 태그를 하나도 파싱하지 못한 경우는 이후 처리가 무의미하다.
 if [ "${#TAGS[@]}" -eq 0 ]; then
@@ -299,7 +327,7 @@ COPYFILE_DISABLE=1 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
                    scripts/build-style.sh scripts/start-style-studio.sh \
                    docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
                    THIRD-PARTY-NOTICES.md \
-  -C "$BUILD_HOME" tiles \
+  -C "$BUILD_HOME" tiles $ROUTE_BUNDLE \
   -C "$STAGE"      geocode $STAGE_POSTGIS \
   || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"

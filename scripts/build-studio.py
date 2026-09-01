@@ -595,6 +595,8 @@ def TARGETS():
             cmd=["bash", "-c", f'python3 "{ROOT/"scripts/04-gen-dong-labels.py"}" && python3 "{ROOT/"scripts/05-gen-dong-tiles.py"}"']),
         "terrain": dict(label="지형 음영 타일 (terrain.mbtiles)", dep=None,
             cmd=["bash", str(ROOT/"scripts/03-gen-terrain.sh")]),   # SRTM30m→Terrain-RGB(온라인·정적). 반입본 있으면 freshness=fresh 로 스킵
+        "route_graph": dict(label="길찾기 그래프 (OSRM car·foot)", dep=None,
+            cmd=["bash", str(ROOT/"scripts/07-gen-route-graph.sh")]),   # data/osm pbf → route/{car,foot} MLD 그래프 (FEAT-007)
         "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
@@ -641,7 +643,7 @@ def TARGETS():
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "route_graph", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
 
 
 def _deps(t):
@@ -667,6 +669,9 @@ TFRESH = {
              "out": [ROOT / "tiles/dong.mbtiles"]},
     "terrain": {"out_only": True, "scripts": ["scripts/03-gen-terrain.sh"],
                 "out": [ROOT / "tiles/terrain.mbtiles"]},   # 정적 SRTM 산출물 — 파일 존재=최신(반입본 보존·재다운로드 방지)
+    "route_graph": {"src": ["osm"], "scripts": ["scripts/07-gen-route-graph.sh"],
+                    "out": [ROOT / "route/car/south-korea.osrm.mldgr",
+                            ROOT / "route/foot/south-korea.osrm.mldgr"]},   # customize 완주해야 생김 — 부분 산출물은 stale
     "localdata": {"src": ["localdata"], "scripts": ["scripts/11-build-localdata.py"],
                   "out": [BUILD_HOME / "poi-all/localdata_clean.csv"]},
     "facility": {"src": ["facility"], "scripts": ["scripts/11b-build-facility.py"],
