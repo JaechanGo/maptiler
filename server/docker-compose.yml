@@ -67,6 +67,32 @@ services:
     networks:
       - cuvia
 
+  # ── OSRM 길찾기 (차량·도보) — FEAT-007/ADR-009 ───────────────────
+  # route/{car,foot} 그래프(07-gen-route-graph.sh 산출)를 MLD 로 서빙. 프로필당 인스턴스 1개
+  # (osrm-routed 는 단일 그래프만 로드 — URL 의 profile 문자열은 무시되므로 분기는 게이트웨이가 담당).
+  # 호스트 포트 비노출 — 외부는 게이트웨이 /route|/table|/trip|/nearest 경유만.
+  # 이미지 태그는 scripts/versions.sh OSRM_IMAGE 와 반드시 일치(그래프 파일 포맷이 버전 결합).
+  # healthcheck 없음 — 이미지에 curl/wget/node 부재(martin 과 동일 취급). 그래프 파일 없으면 기동 실패가 신호.
+  osrm-car:
+    image: osrm/osrm-backend:v5.25.0
+    platform: linux/amd64
+    restart: unless-stopped
+    volumes:
+      - ../route/car:/data:ro
+    command: ["osrm-routed", "--algorithm", "mld", "/data/south-korea.osrm"]
+    networks:
+      - cuvia
+
+  osrm-foot:
+    image: osrm/osrm-backend:v5.25.0
+    platform: linux/amd64
+    restart: unless-stopped
+    volumes:
+      - ../route/foot:/data:ro
+    command: ["osrm-routed", "--algorithm", "mld", "/data/south-korea.osrm"]
+    networks:
+      - cuvia
+
   # ── PostGIS 지오코더 (Phase 5 — 5b shadow / 5c 전환) ─────────────
   # SQLite 지오코더(geocode:8082)와 병행. 8092 로 노출해 질의 parity 측정(scripts/13d-geocode-parity.py).
   # 5c 전환 시 게이트웨이 /geocode·/reverse upstream 을 geocode-pg:8082 로 바꾼다.
