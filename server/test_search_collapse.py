@@ -104,5 +104,38 @@ class TestNamePathSql(unittest.TestCase):
         self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
 
 
+class TestNarrowByRegion(unittest.TestCase):
+    """지역 좁힘 — 인천 개편(신 코드 DB) 실측 회귀 (2026-09-03)."""
+    CDS = ["28155103", "11140101", "27110101", "26110101"]   # 인천 영종구 운서동(신), 서울 중구, 대구 중구, 부산 중구 동
+
+    def test_old_gu_name_with_sido_falls_back_to_sido(self):
+        # '인천 중구 운서동': 2단이 타도시 중구로 좁혀 비면 → 시도(28)만으로 폴백
+        out = M.narrow_by_region(self.CDS, set(), {"11140", "27110", "26110"}, {"28"})
+        self.assertEqual(out, ["28155103"])
+
+    def test_remap_bidirectional_without_sido(self):
+        # '중구 운서동': 대응표(old 28110147 ∪ new 28155103) 로 인천 동을 특정
+        out = M.narrow_by_region(self.CDS, {"28110147", "28155103"}, {"11140", "27110", "26110"}, set())
+        self.assertEqual(out, ["28155103"])
+
+    def test_other_city_gu_not_hijacked_by_incheon_remap(self):
+        # '대구 중구 동인동': 대응표(인천)에 걸려도 시도 27 과 교차해 비면 → 2단 시군구∧시도 → 대구 중구
+        out = M.narrow_by_region(self.CDS, {"28110147", "28155103"}, {"11140", "27110", "26110"}, {"27"})
+        self.assertEqual(out, ["27110101"])
+
+    def test_no_sido_gu_ambiguous_uses_sgg(self):
+        # '중구 동인동'(시도 없음): 1단(인천) 비면 → 2단 시군구 전부
+        cds = ["11140101", "27110101"]
+        out = M.narrow_by_region(cds, {"28110147"}, {"11140", "27110"}, set())
+        self.assertEqual(out, ["11140101", "27110101"])
+
+    def test_no_dictionary_hit_keeps_all(self):
+        self.assertEqual(M.narrow_by_region(self.CDS, set(), set(), set()), self.CDS)
+
+    def test_all_empty_when_region_hit_but_no_match(self):
+        # 지정 시도에 그 동이 없음 → [] (타지역 혼입 차단)
+        self.assertEqual(M.narrow_by_region(["11140101"], set(), set(), {"28"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

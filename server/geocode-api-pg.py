@@ -192,6 +192,27 @@ def _near_m(a, b):
     return math.hypot(dx, dy)
 
 
+def narrow_by_region(cds, emd8_hit, sgg_hit, sido_hit):
+    """읍면동 코드 후보(cds)를 지역 토큰으로 좁힌다 — specific→broad 순 첫 비어있지 않은 후보.
+    1단 개편 대응표 8자리(신·구 양방향) → 2단 시군구 5자리 → 3단 시도 2자리. 1·2단은 시도 토큰과 교차한다.
+    어느 사전에도 안 걸린 지역 토큰뿐이면 좁히지 않고(현행), 걸렸는데 전부 비면 [](타지역 동명 혼입 차단)."""
+    def in_sido(c):
+        return (not sido_hit) or c[:2] in sido_hit
+    cands = []
+    if emd8_hit:
+        cands.append([c for c in cds if c[:8] in emd8_hit and in_sido(c)])
+    if sgg_hit:
+        cands.append([c for c in cds if c[:5] in sgg_hit and in_sido(c)])
+    if sido_hit:
+        cands.append([c for c in cds if c[:2] in sido_hit])
+    if not cands:
+        return cds
+    for cand in cands:
+        if cand:
+            return cand
+    return []
+
+
 def _name_path_sql(conds, short_prefix):
     """이름 경로 SQL. 2자↓ prefix('강남%') 는 MATERIALIZED CTE 로 감싼다.
     [실측 2026-09-03 .244] 플래너가 '강남%' 를 112,071행으로 추정(실제 6,194)해 LIMIT 400 과 결합하면
@@ -1315,11 +1336,28 @@ def geocode(cur, q, limit, meta=None):
         #
         # fail-open: 표 미적재(_HAS_SGG_REMAP=False)거나 매칭 0이면 emd8_hit 이 비어 2단이 현행과
         #            100% 동일하게 동작한다. 옛 구명('중구'·'서구')은 그 2단이 계속 처리한다.
+        # ── 지역 좁힘 [2026-09-03 재설계] ─────────────────────────────────────────────
+        # [실측] DB 가 인천 개편 **신 코드**(운서동=28155103 영종구, lawd_sigungu 에 제물포·영종·서해·검단구)로
+        # 재빌드된 뒤, 옛 구명 질의 '인천 중구 운서동 2850' 이 0건이 됐다: 2단이 시군구 사전의 타 도시 '중구'
+        # (서울·부산·대구·대전·울산)로 좁혀 인천 동이 전부 탈락했고, 시도 토큰 '인천'은 3단(else)에서만 쓰여
+        # 교차되지 않았다. 또 1단은 신 구명→옛 8자리(T026 안 A: DB 불변 전제)라 신 코드 DB 에선 방향이 반대다.
+        # 규칙: ① 시도 토큰은 모든 단계에 교차한다 ② 대응표는 신·구 양방향(old_emd8 ∪ new_emd8) ③ 좁힘 후보를
+        #       specific→broad 순으로 시도해 **첫 비어있지 않은 것**을 택한다(옛 명칭·개편 전후 어느 쪽이든 0건 회귀 없음).
+        #       사전에 걸린 지역 토큰이 있는데 모든 후보가 비면 [] (타지역 동명 혼입 차단, 현행 유지).
+        sido_hit = {code for t in region for code, names in SIDO_NM.items()
+                    if any(t.startswith(n) for n in names)}
+        # §B-3 입력 역치환: '12'(전남광주통합특별시)는 DB 에 없는 코드다. 여기서 46·29 로 되돌리지
+        #   않으면 신 시도명으로 검색한 사용자가 0건을 받는다. '전남광주…'는 '전남'으로도 접두매칭돼
+        #   {12,46} 이 되므로, 확장 없이는 광주 소재 동이 전부 탈락한다(부분적 0건 = 더 나쁜 회귀).
+        for _new, _olds in SIDO_ALIAS_CODES.items():
+            if _new in sido_hit:
+                sido_hit.discard(_new); sido_hit.update(_olds)
         emd8_hit = set()
         if region and cds and _HAS_SGG_REMAP:
-            cur.execute("SELECT btrim(old_emd8) AS o FROM lawd_sgg_remap "   # char(8) 공백패딩 제거
-                        "WHERE new_sgg_nm = ANY(%s::text[])", (region,))
-            emd8_hit = {r["o"] for r in cur.fetchall()}
+            cur.execute("SELECT btrim(old_emd8) AS o, btrim(new_emd8) AS n FROM lawd_sgg_remap "   # char(8) 공백패딩 제거
+                        "WHERE new_sgg_nm = ANY(%s::text[]) OR old_sgg_nm = ANY(%s::text[])", (region, region))
+            for r in cur.fetchall():
+                emd8_hit.add(r["o"]); emd8_hit.add(r["n"])
         sgg_hit = set()
         if region:
             conds = " OR ".join(["(sigungu_nm LIKE %s || '%%' OR sigungu_nm LIKE '%% ' || %s)"] * len(region))
@@ -1328,21 +1366,7 @@ def geocode(cur, q, limit, meta=None):
                 sa += [t, t]
             cur.execute("SELECT sigungu_cd FROM lawd_sigungu WHERE " + conds, sa)
             sgg_hit = {r["sigungu_cd"] for r in cur.fetchall()}
-        if emd8_hit:                                    # 1단 우선(가장 specific — 8자리)
-            cds = [c for c in cds if c[:8] in emd8_hit]
-        elif sgg_hit:                                   # 2단 [현행 유지] 옛 구명 → 5자리
-            cds = [c for c in cds if c[:5] in sgg_hit]
-        else:                                           # 3단 [현행 유지] 시도명 → 2자리 폴백
-            sido_hit = {code for t in region for code, names in SIDO_NM.items()
-                        if any(t.startswith(n) for n in names)}
-            # §B-3 입력 역치환: '12'(전남광주통합특별시)는 DB 에 없는 코드다. 여기서 46·29 로 되돌리지
-            #   않으면 신 시도명으로 검색한 사용자가 0건을 받는다. '전남광주…'는 '전남'으로도 접두매칭돼
-            #   {12,46} 이 되므로, 확장 없이는 광주 소재 동이 전부 탈락한다(부분적 0건 = 더 나쁜 회귀).
-            for _new, _olds in SIDO_ALIAS_CODES.items():
-                if _new in sido_hit:
-                    sido_hit.discard(_new); sido_hit.update(_olds)
-            if sido_hit:
-                cds = [c for c in cds if c[:2] in sido_hit]
+        cds = narrow_by_region(cds, emd8_hit, sgg_hit, sido_hit)
         # 리(里) 좁힘 — 시도/시군구 좁힘 뒤, sido_cds 산출 전에 수행한다(cds 를 재정의하므로 순서 고정).
         # R-6 게이팅: p["ri"] 는 dong 이 먼저 잡힌 질의에서만 채워진다(parse()).
         # R-9 fail-open: 사전 미구축(_HAS_LAWD_RI=False) 또는 사전에 없는 리명이면 아무것도 하지 않고
