@@ -14,18 +14,55 @@
   3) 그래도 못 살리면 원천이 함께 준 개방자치단체코드(시도 단위 6xx0000)로만 복구한다.
   4) 그것도 없으면 **빈값** — 동 이름을 시도로 올리느니 비워 둔다. 비-addr 은 API 가 좌표 PIP 로 채운다.
 """
-import json, os, re, unicodedata
+import csv, json, os, re, unicodedata
 
 _N = lambda s: unicodedata.normalize("NFC", s or "").strip()
 
-CANON_SIDO = frozenset({
+# ── 시도 집합의 기준 원천 = 법정동코드(신구대응) ───────────────────────────────────────
+# 수집 항목 lawd_code_v2(VWorld dsId=30505) → staged/lawd_code_v2/LSCT_LAWDCD.csv → PostGIS lawd_code.
+# 시도 레벨은 코드 XX00000000 행이고 DEL_DT(폐지일)가 비면 현행, 있으면 폐지다. 명칭을 코드에 박지 않고
+# 이 파일에서 읽는 이유: 하드코딩은 개편(2026 전남광주 통합, 2023~24 특별자치도)마다 여러 파일이
+# 제각각 표류한다 — [실측 2026-09-02] 원천은 '광주광역시'를 폐지(exist=f)로 두는데 코드엔 현행으로 박혀 있었다.
+# 파일이 없으면(폐쇄망 QC 등) 아래 폴백 집합을 쓰되, 그 경우도 원천 스냅샷과 같은 값이다.
+_FALLBACK_CANON = frozenset({
     "서울특별시", "부산광역시", "대구광역시", "인천광역시", "대전광역시", "울산광역시",
     "세종특별자치시", "경기도", "강원특별자치도", "충청북도", "충청남도",
     "전북특별자치도", "전남광주통합특별시", "경상북도", "경상남도", "제주특별자치도",
-    "광주광역시",   # 통합 이전 코드체계(6290000)·원천에 여전히 실림 — 현행 취급(API 가 표시 치환)
 })
-# 개편 전 명칭 — 원천에 잔존. 유효로 인정하되 CANON 과는 분리(집합 겹침 금지 — 테스트가 고정).
-LEGACY_SIDO = frozenset({"전라남도", "전라북도", "강원도", "제주도", "세종시"})
+_FALLBACK_LEGACY = frozenset({
+    "광주광역시", "전라남도", "전라북도", "강원도", "제주도",
+    "부산직할시", "대구직할시", "인천직할시", "광주직할시", "대전직할시",
+})
+
+
+def _lawd_csv_path():
+    env = os.environ.get("LAWD_CODE_CSV")
+    if env: return env
+    home = os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build")
+    return os.path.join(home, "staged", "lawd_code_v2", "LSCT_LAWDCD.csv")
+
+
+def load_sido_sets(path=None):
+    """(현행 시도 집합, 폐지 시도 집합, 출처) — 원천 CSV 를 읽고, 없으면 폴백. 양쪽 다 frozenset."""
+    path = path or _lawd_csv_path()
+    canon, legacy = set(), set()
+    try:
+        with open(path, encoding="cp949", newline="", errors="strict") as f:
+            for r in csv.DictReader(f):
+                code = (r.get("LAWD_CD") or "").strip()
+                if len(code) != 10 or not code.endswith("00000000"): continue   # 시도 레벨만
+                nm = _N(r.get("SIDO_NM"))
+                if not nm: continue
+                (legacy if (r.get("DEL_DT") or "").strip() else canon).add(nm)
+    except (OSError, UnicodeDecodeError):
+        return _FALLBACK_CANON, _FALLBACK_LEGACY, "fallback"
+    if not canon:                                   # 파일은 있는데 시도 행이 없음 — 형식 변경 의심, 폴백
+        return _FALLBACK_CANON, _FALLBACK_LEGACY, "fallback"
+    legacy -= canon                                 # 같은 이름이 양쪽에 있으면 현행 우선(집합 겹침 금지)
+    return frozenset(canon), frozenset(legacy), path
+
+
+CANON_SIDO, LEGACY_SIDO, SIDO_SOURCE = load_sido_sets()
 VALID_SIDO = CANON_SIDO | LEGACY_SIDO
 
 # 약칭·변형 → 정규/구명칭. 약칭의 뜻은 원천이 쓴 당시 명칭이므로 구명칭으로 편다(전남→전라남도).
@@ -33,7 +70,7 @@ SIDO_ALIAS = {
     "서울": "서울특별시", "서울시": "서울특별시", "부산": "부산광역시", "부산시": "부산광역시",
     "대구": "대구광역시", "대구시": "대구광역시", "인천": "인천광역시", "인천시": "인천광역시",
     "광주": "광주광역시", "대전": "대전광역시", "대전시": "대전광역시", "울산": "울산광역시",
-    "울산시": "울산광역시", "세종": "세종특별자치시", "경기": "경기도", "강원": "강원특별자치도",
+    "울산시": "울산광역시", "세종": "세종특별자치시", "세종시": "세종특별자치시", "경기": "경기도", "강원": "강원특별자치도",
     "충북": "충청북도", "충남": "충청남도", "전북": "전북특별자치도", "전남": "전라남도",
     "경북": "경상북도", "경남": "경상남도", "제주": "제주특별자치도", "전남광주": "전남광주통합특별시",
     "경상북": "경상북도", "강원특별자": "강원특별자치도",   # 절단 잔재(실측 facility)
@@ -105,5 +142,5 @@ def parse_region_kr(*addrs, org_code=None):
     return "", "", ""
 
 
-__all__ = ["CANON_SIDO", "LEGACY_SIDO", "VALID_SIDO", "SIDO_ALIAS", "ORG2SIDO",
+__all__ = ["CANON_SIDO", "LEGACY_SIDO", "VALID_SIDO", "SIDO_SOURCE", "SIDO_ALIAS", "ORG2SIDO", "load_sido_sets",
            "is_valid_sido", "parse_region_kr"]

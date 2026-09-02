@@ -6,7 +6,7 @@ QC 시도 커버리지는 '< 16 이면 FAIL' 한쪽만 봐서 종류가 늘어�
 """
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common.region import parse_region_kr, is_valid_sido, CANON_SIDO, LEGACY_SIDO  # noqa: E402
+from _common.region import parse_region_kr, is_valid_sido, CANON_SIDO, LEGACY_SIDO, SIDO_SOURCE, load_sido_sets  # noqa: E402
 
 
 class ValidSido(unittest.TestCase):
@@ -22,6 +22,18 @@ class ValidSido(unittest.TestCase):
 
     def test_canon_legacy_disjoint(self):
         self.assertFalse(CANON_SIDO & LEGACY_SIDO)
+
+    def test_sets_follow_lawd_source_when_present(self):
+        # 기준 원천 = 법정동코드(신구대응). 파일이 있으면 그 판정을 따른다 — 하드코딩 표류 방지.
+        if SIDO_SOURCE == "fallback":
+            self.skipTest("staged/lawd_code_v2/LSCT_LAWDCD.csv 없음 — 폴백 집합 사용 중")
+        self.assertIn("전남광주통합특별시", CANON_SIDO)
+        self.assertIn("광주광역시", LEGACY_SIDO)        # 원천 DEL_DT 有 = 폐지
+        self.assertGreaterEqual(len(CANON_SIDO), 16)
+
+    def test_fallback_when_file_missing(self):
+        canon, legacy, src = load_sido_sets("/nonexistent/LSCT_LAWDCD.csv")
+        self.assertEqual(src, "fallback"); self.assertIn("전남광주통합특별시", canon); self.assertIn("광주광역시", legacy)
 
 
 class ParseRegion(unittest.TestCase):

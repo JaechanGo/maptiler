@@ -682,12 +682,12 @@ TFRESH = {
                             ROOT / "route/foot/south-korea.osrm.mldgr",
                             ROOT / "route/bicycle/south-korea.osrm.mldgr",   # 하나라도 없으면 stale
                             ROOT / "demo/data/station-exits.json"]},         # customize 완주해야 생김 — 부분 산출물은 stale
-    "localdata": {"src": ["localdata"], "scripts": ["scripts/11-build-localdata.py"],
+    "localdata": {"src": ["localdata", "lawd_code_v2"], "scripts": ["scripts/11-build-localdata.py", "scripts/_common/region.py"],   # 시도 검증 파서가 법정동코드 원천을 읽는다
                   "out": [BUILD_HOME / "poi-all/localdata_clean.csv"]},
-    "facility": {"src": ["facility"], "scripts": ["scripts/11b-build-facility.py"],
+    "facility": {"src": ["facility", "lawd_code_v2"], "scripts": ["scripts/11b-build-facility.py", "scripts/_common/region.py"],
                  "out": [BUILD_HOME / "poi-all/facility_clean.csv"]},
-    "geocode": {"src": ["juso_navi", "sangga"], "dep_art": ["osm_sqlite", "localdata", "facility"],
-                "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py"],
+    "geocode": {"src": ["juso_navi", "sangga", "lawd_code_v2"], "dep_art": ["osm_sqlite", "localdata", "facility"],
+                "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py", "scripts/_common/region.py"],   # 09 유입 게이트도 원천 집합 사용
                 "out": [BUILD_HOME / "geocode.sqlite"]},
     # boundary_ri: 리 SHP 를 새로 올리거나 교체하면 areas 가 stale 로 떨어져 재적재된다.
     #   빠뜨리면 새 경계를 올려도 fresh 판정으로 조용히 건너뛴다.

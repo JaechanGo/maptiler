@@ -102,6 +102,14 @@ def check_db_scan(db):
     _top = " · ".join(f"{sd!r}×{c:,}" for sd, c in sorted(_bad, key=lambda x: -x[1])[:5])
     rec("FAIL" if _nbad else "PASS", "시도명 정규성(biz·facility)",
         f"비정규 {_nbad:,}행/{len(_bad)}종 — {_top}" if _nbad else "정규 집합 외 0건")
+    # 빈 시도 비율 — 유입 게이트(09)는 미지의 명칭을 **비워서** 통과시킨다(추정 금지). 원천(예: 상가 CSV)이
+    # 우리 법정동코드보다 새로운 개편 명칭을 쓰면 그 행들이 여기로 몰린다 → 비율이 튀면 lawd_code_v2 재수집 신호.
+    # 평시엔 시도 자체가 없는 원천 주소(장전동 ***번지 류)만 남아 소수. 임계 0.5% 는 재정제 실측(4/2.34M·754/96,580)에 여유를 둔 값.
+    _bf = db.execute("SELECT count(*), sum(CASE WHEN sido IS NULL OR sido='' THEN 1 ELSE 0 END) FROM places WHERE kind IN ('biz','facility')").fetchone()
+    if _bf and _bf[0]:
+        _blank_r = (_bf[1] or 0) / _bf[0]
+        rec("WARN" if _blank_r > 0.005 else "PASS", "시도 빈값 비율(biz·facility)",
+            f"{_blank_r*100:.2f}% ({(_bf[1] or 0):,}/{_bf[0]:,})" + (" — 원천 명칭이 법정동코드(lawd_code_v2)보다 새로운지 확인" if _blank_r > 0.005 else ""))
     biz_n = K.get("biz", (None, 0))[1]
     if biz_n:
         cr = K["biz"][5] / biz_n
