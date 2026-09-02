@@ -111,6 +111,7 @@ DO $gate$
 DECLARE
   n_total bigint; n_fb bigint; n_ex bigint; n_emd bigint;
   n_dupname bigint; n_dupcode bigint; n_orphan bigint; n_yuga bigint;
+  n_legacy bigint;
   bad_sido text;
 BEGIN
   SELECT count(*) INTO n_total FROM lawd_ri_new;
@@ -118,11 +119,19 @@ BEGIN
   SELECT count(*) INTO n_ex    FROM lawd_ri_new WHERE exist;
   SELECT count(DISTINCT emd_cd) INTO n_emd FROM lawd_ri_new WHERE exist;
 
-  RAISE NOTICE '총량 % (기대 17,896) / 폴백 % (기대 2,687) / 존재 % (기대 15,209) / 존재 읍면 % (기대 1,411)',
-               n_total, n_fb, n_ex, n_emd;
+  -- 폐지 폴백은 DB 가 46/29(전남·광주 구코드) 읍면동을 실제로 쓸 때만 생긴다. 2026-08 통합(전남광주통합특별시=12)
+  -- 이후 address/lawd_dong 이 12 코드만 쓰면 폴백 0 이 **정답**이다([실측 2026-09-03] lawd_dong 46/29 = 0행,
+  -- 12 = 622행 · lawd_code 12 존재코드 3,204행 → 존재 15,209 만 남음). 기대값을 lawd_dong 상태에 조건부로 건다.
+  SELECT count(*) INTO n_legacy FROM lawd_dong WHERE left(emd_cd,2) IN ('46','29');
+  RAISE NOTICE '총량 % (기대 %) / 폴백 % (기대 %) / 존재 % (기대 15,209) / 존재 읍면 % (기대 1,411) · lawd_dong 46/29=%',
+               n_total, CASE WHEN n_legacy > 0 THEN '17,896' ELSE '15,209(폴백 없음)' END,
+               n_fb,    CASE WHEN n_legacy > 0 THEN '2,687'  ELSE '0' END, n_ex, n_emd, n_legacy;
 
-  IF abs(n_total - 17896) > 50 THEN
+  IF n_legacy > 0 AND abs(n_total - 17896) > 50 THEN
     RAISE EXCEPTION '총량 % 이 기대 17,896 ± 50 을 벗어났다. 원본 갱신 또는 CTE 오작성 — S1 검증부터 재확인하라.', n_total;
+  END IF;
+  IF n_legacy = 0 AND abs(n_ex - 15209) > 50 THEN
+    RAISE EXCEPTION '존재 티어 % 이 기대 15,209 ± 50 을 벗어났다(폴백 없는 통합 코드 상태). 원본 갱신 또는 CTE 오작성.', n_ex;
   END IF;
 
   -- 폴백이 46 밖으로 새면 목적 외 코드가 사전에 들어간다. 초판이 실제로 낸 사고 형태다.
@@ -131,8 +140,11 @@ BEGIN
   IF bad_sido IS NOT NULL THEN
     RAISE EXCEPTION '폐지 폴백에 시도 46 외가 섞였다: %. 폴백 필터가 새는 중이다 — 즉시 중단.', bad_sido;
   END IF;
-  IF n_fb < 2600 THEN
+  IF n_legacy > 0 AND n_fb < 2600 THEN
     RAISE EXCEPTION '폴백 % 행 — 2,600 미만이다. lawd_dong 의 46/29 분(기대 622행)을 먼저 확인하라.', n_fb;
+  END IF;
+  IF n_legacy = 0 AND n_fb <> 0 THEN
+    RAISE EXCEPTION '폴백 % 행 — lawd_dong 이 46/29 를 안 쓰는데 폐지 폴백이 생겼다. 폴백 필터가 새는 중이다.', n_fb;
   END IF;
 
   -- 존재 티어 유일성: 한 이름에 복수 코드 / 한 코드에 복수 이름 둘 다 0 이어야 한다.
@@ -182,7 +194,7 @@ COMMIT;
 ANALYZE lawd_ri;
 
 -- ── 5. 교체 후 확인 ─────────────────────────────────────────────────────
-SELECT count(*) AS "신 lawd_ri 행수 (기대 17,896)" FROM lawd_ri;
+SELECT count(*) AS "신 lawd_ri 행수 (기대 17,896 · 통합코드 상태면 15,209)" FROM lawd_ri;
 SELECT ri_cd, ri FROM lawd_ri WHERE emd_cd = '27710259' ORDER BY ri_cd;
 --   기대: 21음리 22양리 23용리 24봉리 25쌍계리 26초곡리 27상리
 --         28금리 29유곡리 30도의리 31가태리 32한정리 33본말리  (13행)
