@@ -44,9 +44,9 @@ BEGIN
     RAISE EXCEPTION 'lawd_code 행수 % — 기대 53,387. 원본이 갱신됐다면 아래 가드 기대값도 재산정해야 한다.', n;
   END IF;
 
-  IF to_regclass('public.lawd_ri_old_20260810') IS NOT NULL THEN
-    RAISE EXCEPTION '교체가 이미 완료된 상태다(lawd_ri_old_20260810 존재). 재실행하면 백업이 신 사전으로 덮어써진다. 롤백 후 재시도하라.';
-  END IF;
+  -- (구) 1회성 이관 가드 "교체가 이미 완료된 상태(lawd_ri_old_20260810 존재)면 중단" 은 제거 — 이 스크립트는
+  -- load-all.sh lawd 단계에서 **매 빌드** 실행되며 §4 교체가 멱등(구본 타임스탬프 보관·최신 1개 유지)이다.
+  -- 최초 백업(lawd_ri_bak_20260810)은 부재 시에만 생성되므로 재실행이 백업을 덮어쓰지 않는다.
   IF to_regclass('public.lawd_ri') IS NULL THEN
     RAISE EXCEPTION 'lawd_ri 가 없다 — 교체 대상이 없다. 상태를 먼저 확인하라.';
   END IF;
@@ -177,11 +177,25 @@ END $gate$;
 -- ALTER TABLE ... RENAME 은 **인덱스 이름을 바꾸지 않는다**(테이블·인덱스가 pg_class 네임스페이스
 -- 를 공유). 구 테이블이 lawd_ri_ri_emd_idx 를 계속 점유한 채로 동명 인덱스를 만들면
 -- `already exists` 로 확정 실패한다. 그래서 인덱스 이름을 먼저 비운다.
+-- [실측 2026-09-03] 구 lawd_ri 는 이 스크립트의 지난 실행이 만든 세 번째 인덱스(lawd_ri_emd_cd_idx)까지 갖고 있어
+-- 고정 2개만 비우던 판은 재실행에서 `lawd_ri_emd_cd_idx already exists` 로 죽었다. 날짜 고정 이름(…_20260810)도
+-- 세 번째 실행부터 충돌한다. → 구 테이블의 **모든** 인덱스를 카탈로그에서 읽어 타임스탬프 접미로 비우고,
+-- 직전 롤백 보관본(lawd_ri_old_*)은 하나만 남긴다(멱등·재실행 안전).
 BEGIN;
-  ALTER INDEX lawd_ri_pkey       RENAME TO lawd_ri_old_20260810_pkey;
-  ALTER INDEX lawd_ri_ri_emd_idx RENAME TO lawd_ri_old_20260810_ri_emd_idx;
-
-  ALTER TABLE lawd_ri            RENAME TO lawd_ri_old_20260810;
+  DO $swap$
+  DECLARE r record; suf text := to_char(clock_timestamp(), 'YYYYMMDD_HH24MISS');
+  BEGIN
+    FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname LIKE 'lawd\_ri\_old\_%' LOOP
+      EXECUTE format('DROP TABLE %I', r.relname);      -- 직전 롤백 보관본 정리(최신 1개만 유지)
+    END LOOP;
+    FOR r IN SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'lawd_ri' LOOP
+      EXECUTE format('ALTER INDEX %I RENAME TO %I', r.indexname,
+                     'lawd_ri_old_' || suf || '_' || substr(r.indexname, length('lawd_ri_') + 1));
+    END LOOP;
+    EXECUTE format('ALTER TABLE lawd_ri RENAME TO %I', 'lawd_ri_old_' || suf);
+    RAISE NOTICE '구 lawd_ri → lawd_ri_old_% (롤백 보관본)', suf;
+  END $swap$;
   ALTER TABLE lawd_ri_new        RENAME TO lawd_ri;
 
   ALTER INDEX lawd_ri_new_pkey   RENAME TO lawd_ri_pkey;
@@ -205,8 +219,9 @@ SELECT ri_cd, ri FROM lawd_ri WHERE emd_cd = '27710259' ORDER BY ri_cd;
 --   DROP INDEX IF EXISTS lawd_ri_emd_cd_idx;
 --   ALTER INDEX lawd_ri_pkey RENAME TO lawd_ri_new_pkey;
 --   ALTER TABLE lawd_ri      RENAME TO lawd_ri_new;
---   ALTER TABLE lawd_ri_old_20260810 RENAME TO lawd_ri;
---   ALTER INDEX lawd_ri_old_20260810_pkey       RENAME TO lawd_ri_pkey;
---   ALTER INDEX lawd_ri_old_20260810_ri_emd_idx RENAME TO lawd_ri_ri_emd_idx;
+--   ALTER TABLE lawd_ri_old_<접미> RENAME TO lawd_ri;          -- 접미는 교체 시 NOTICE 로 출력된 타임스탬프
+--   ALTER INDEX lawd_ri_old_<접미>_pkey       RENAME TO lawd_ri_pkey;
+--   ALTER INDEX lawd_ri_old_<접미>_ri_emd_idx RENAME TO lawd_ri_ri_emd_idx;
+--   ALTER INDEX lawd_ri_old_<접미>_emd_cd_idx RENAME TO lawd_ri_emd_cd_idx;
 -- COMMIT;
 -- 최후 수단은 lawd_ri_bak_20260810 에서 재적재.
