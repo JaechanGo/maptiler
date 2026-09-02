@@ -16,6 +16,11 @@ THREADS="${OSRM_THREADS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 BASENAME="$(basename "$PBF")"                 # south-korea.osm.pbf
 OSRM_BASE="${BASENAME%.osm.pbf}.osrm"         # south-korea.osrm (compose command 가 이 이름 고정 참조)
 
+# 중단 시 pbf 사본(286MB) 정리 — set -e 로 죽으면 아래 rm 까지 못 가서 실패한 프로필 디렉토리에
+# 사본이 그대로 남는다(실측: docker 데몬 정지로 extract 실패 → route/bicycle 에 286MB 잔재).
+# OUT 은 루프마다 갱신되므로 EXIT 시점의 값 = 실패한 프로필의 디렉토리다.
+trap 'rm -f "${OUT:-}/${BASENAME}" 2>/dev/null || true' EXIT
+
 for profile in $PROFILES; do
   OUT="$ROOT/route/$profile"
   mkdir -p "$OUT"

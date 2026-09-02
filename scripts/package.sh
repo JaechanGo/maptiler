@@ -330,6 +330,7 @@ fi
 #   build_style 이 UnicodeDecodeError 로 죽는다(2026-08-31 .244 실측, 595개 유입).
 COPYFILE_DISABLE=1 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   -C "$ROOT"       style demo vendor server scripts/deploy.sh scripts/13-qc-check.py \
+                   scripts/13i-route-qc.py \
                    scripts/style-studio.py scripts/style_objects.py scripts/build_style.py \
                    scripts/build-style.sh scripts/start-style-studio.sh \
                    docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
