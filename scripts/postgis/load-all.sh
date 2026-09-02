@@ -102,10 +102,24 @@ fi
 if has geocode; then
   GDB="$BUILD_HOME/geocode.sqlite"
   if [ -f "$GDB" ]; then
-    run python3 "$HERE/load_geocode.py" --db "$GDB" \
-      || { echo "  ✗ geocode 적재 실패 — address/poi 미완 가능. 재실행: STEPS=geocode $0" >&2; fail=1; }
-    run python3 "$HERE/backfill_poi_tier.py" \
-      || { echo "  ✗ backfill_poi_tier 실패 — tier_minzoom 미갱신. 재실행: STEPS=geocode $0" >&2; fail=1; }
+    # [T049 swap 계약] --mode swap(기본)은 --phase address|poi 필수 — 한 번에 한 테이블, address 먼저.
+    #   ★ 종전 호출은 --phase 없이 불러 **항상 즉시 실패**했고(2026-09-03 실측 "✗ --mode swap 은 --phase 가 필수다"),
+    #     fail=1 만 남긴 채 다음 단계로 흘러 PostGIS 의 address/poi 가 옛 판으로 남았다 — 13-qc 는 sqlite 만 보고
+    #     package.sh 게이트는 parcel/building 만 세어 옛 address/poi 가 pg_dump 로 번들에 실렸다(package.sh 게이트 보강 병행).
+    #   phase 마다 swap(적재·인덱스·검증·RENAME) → finalize(_old DROP·정식명 환원)로 닫는다: 디스크 피크를 한 테이블분으로
+    #   묶고, 다음 스왑의 "_old 가 이미 있다" 거부를 막는다. 롤백 경로는 geocode.sqlite 재적재(원천 보존).
+    gc_ok=1
+    for ph in address poi; do
+      run python3 "$HERE/load_geocode.py" --db "$GDB" --mode swap --phase "$ph" \
+        && run python3 "$HERE/load_geocode.py" --db "$GDB" --mode swap --phase "$ph" --finalize \
+        || { echo "  ✗ geocode 적재 실패(phase=$ph) — ${ph}_new/${ph}_old 잔재 확인 후 재실행: STEPS=geocode $0" >&2; fail=1; gc_ok=0; break; }
+    done
+    if [ "$gc_ok" = 1 ]; then
+      run python3 "$HERE/backfill_poi_tier.py" \
+        || { echo "  ✗ backfill_poi_tier 실패 — tier_minzoom 미갱신. 재실행: STEPS=geocode $0" >&2; fail=1; }
+    else
+      echo "  (건너뜀) backfill_poi_tier — geocode 적재 실패 상태에서 옛 poi 에 tier 를 덧씌우지 않는다" >&2
+    fi
   else
     echo "  (건너뜀) geocode.sqlite 없음: $GDB (09-gen-geocode.py 먼저)"
   fi

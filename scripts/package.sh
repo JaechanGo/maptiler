@@ -308,8 +308,26 @@ if [ -n "${WITH_POSTGIS:-}" ]; then
   [ "$pcnt" -ge "$PARCEL_MIN" ]   || { echo "오류: parcel 행수 $pcnt < 임계 $PARCEL_MIN — 적재 미완 의심(STEPS=parcel 재적재). 우회=PARCEL_MIN=0" >&2; pg_gate=1; }
   [ "$bcnt" -ge "$BUILDING_MIN" ] || { echo "오류: building 행수 $bcnt < 임계 $BUILDING_MIN — 적재 미완 의심(STEPS=building). 우회=BUILDING_MIN=0" >&2; pg_gate=1; }
   [ "$vidx" -eq 3 ]               || { echo "오류: parcel/building 핵심 인덱스 유효 $vidx/3 — --fresh 적재가 인덱스 재생성 전 중단된 정황. load_parcel/building.sh 재실행 필요." >&2; pg_gate=1; }
+  # ── address/poi 신선도 게이트 ── [실측 2026-09-03] load-all.sh 가 load_geocode.py 를 --phase 없이 불러 상시 실패했는데
+  #   13-qc 는 sqlite 만 보고 위 게이트는 parcel/building 만 세어, 옛 address/poi(시도 오염·시설명 오매핑 포함)가
+  #   pg_dump 로 번들에 실렸다. 적재는 sqlite 전량 복사라 행수가 **정확히** 같아야 한다(load_geocode 의 검증과 동일 기준).
+  #   부분/지역 번들 등 의도적 불일치는 PG_GEOCODE_MATCH=0 으로 우회.
+  if [ "${PG_GEOCODE_MATCH:-1}" = 1 ] && [ -f "$GEOCODE_DB" ]; then
+    acnt=$(pg_psql "SELECT count(*) FROM address" 2>/dev/null | tr -dc 0-9 || true); acnt=${acnt:-0}
+    ocnt=$(pg_psql "SELECT count(*) FROM poi" 2>/dev/null | tr -dc 0-9 || true); ocnt=${ocnt:-0}
+    read -r exp_a exp_p < <(python3 - "$GEOCODE_DB" <<'PYEOF'
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+a = c.execute("SELECT count(*) FROM places").fetchone()[0]
+p = c.execute("SELECT count(*) FROM places WHERE kind IN ('biz','facility') AND lon IS NOT NULL AND lat IS NOT NULL").fetchone()[0]
+print(a, p)
+PYEOF
+)
+    [ "$acnt" = "$exp_a" ] || { echo "오류: PostGIS address $acnt ≠ geocode.sqlite places $exp_a — load_geocode(swap) 미반영·옛 판. 재실행: STEPS=geocode scripts/postgis/load-all.sh (우회=PG_GEOCODE_MATCH=0)" >&2; pg_gate=1; }
+    [ "$ocnt" = "$exp_p" ] || { echo "오류: PostGIS poi $ocnt ≠ geocode.sqlite biz/facility(좌표有) $exp_p — 위와 동일" >&2; pg_gate=1; }
+  fi
   [ "$pg_gate" = 0 ] || { echo "✗ PostGIS 무결성 게이트 실패 — 손상 DB 번들링 차단." >&2; exit 1; }
-  echo "  ✓ PostGIS 무결성 OK — parcel $pcnt · building $bcnt · 핵심 인덱스 3/3 유효"
+  echo "  ✓ PostGIS 무결성 OK — parcel $pcnt · building $bcnt · 핵심 인덱스 3/3 유효 · address/poi = sqlite (${acnt:-미검} / ${ocnt:-미검})"
 
   echo "  PostGIS 덤프(pg_dump -Fc → postgis/cuvia.dump)"
   if [ "$PG_MODE" = container ]; then
