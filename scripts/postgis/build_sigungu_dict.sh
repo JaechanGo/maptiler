@@ -25,8 +25,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 # 기존 호출규약 보존: 7z 경로가 위치인자 $2(=POS[1]) 였음 → 옵션 미지정 시 위치인자 폴백.
-F="${SEVENZ_OPT:-${POS[1]:-$HOME/geocode-build/sources/juso_navi/202605_내비게이션용DB_전체분.7z}}"
-STAGED="${STAGED_OPT:-${NAVI_STAGED:-$HOME/geocode-build/staged/navi}}"
+# 기본 경로는 BUILD_HOME 기준(빌드 스튜디오 계약). $HOME 은 systemd(User= 미지정) 환경에 없을 수 있어
+# set -u 아래서 "HOME: unbound variable" 로 죽는다 — [실측 2026-09-03 .244] lawd_sigungu 갱신이 통째로 빠짐.
+_BH="${BUILD_HOME:-${HOME:-/root}/geocode-build}"
+F="${SEVENZ_OPT:-${POS[1]:-$_BH/sources/juso_navi/202605_내비게이션용DB_전체분.7z}}"
+STAGED="${STAGED_OPT:-${NAVI_STAGED:-$_BH/staged/navi}}"
 
 # ── 소스 부재 시 skip 가드(비치명) ──
 # "소스 없음"은 정상 skip(exit 0 — load-all 에서 fail 누적 안 함),

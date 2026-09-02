@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/_pg-env.sh" 
 
 CTN="${CTN:-server-postgis-1}"
 LOCK_KEY=911001
-BK_DIR="${BK_DIR:-$HOME/geocode-build/backups}"
+BK_DIR="${BK_DIR:-${BUILD_HOME:-${HOME:-/root}/geocode-build}/backups}"   # HOME 없는 systemd 환경 대비(set -u)
 
 # 락 보유 세션/임시자원 상태(트랩 정리용)
 LOCK_PID=""; FIFO=""; LOCK_OUT=""; OUT=""

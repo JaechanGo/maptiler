@@ -224,6 +224,24 @@ elif have dnf;     then echo "→ dnf: postgresql"; $SUDO dnf install -y --disab
 elif have yum;     then echo "→ yum: postgresql"; $SUDO yum install -y --disablerepo='pgdg*' postgresql
 elif have brew;    then echo "→ brew: libpq(psql)"; brew install libpq && brew link --force libpq 2>/dev/null || true
 else echo "✗ 패키지 매니저 미발견 — psql 수동 설치 필요"; fi
+# EOL 호스트 폴백: 패키지로 못 깔면 psql 도 도커 래퍼로(compose 의 postgis 이미지 재사용). 세 가지가 반드시 들어간다 —
+#   PG* 환경 전달(호스트포트 5433 기본), 작업루트 마운트(-f 파일·\copy), **/tmp 마운트**(로더가 tempfile 로 만든
+#   load.sql 을 컨테이너가 못 보면 "No such file" — [실측 2026-09-03 .244] lawd_code 적재 2종이 이걸로 실패).
+if ! have psql && have docker; then
+  PG_IMAGE="${PG_IMAGE:-postgis/postgis:17-3.5}"
+  echo "→ psql 도커 래퍼 폴백: $PG_IMAGE (/usr/local/bin/psql)"
+  $SUDO sh -c "cat > /usr/local/bin/psql" <<WRAP
+#!/bin/sh
+# psql 도커 래퍼(setup-build-host.sh 생성) — 이미지 $PG_IMAGE. PG* 환경 전달 + 작업루트·/tmp 마운트.
+exec docker run --rm -i --network host \\
+  -v $BUILD_ROOT_MOUNT:$BUILD_ROOT_MOUNT -v /tmp:/tmp -w "\$(pwd)" \\
+  -e PGHOST="\${PGHOST:-localhost}" -e PGPORT="\${PGPORT:-5433}" \\
+  -e PGUSER="\${PGUSER:-cuvia}" -e PGDATABASE="\${PGDATABASE:-cuvia}" \\
+  -e PGPASSWORD="\${PGPASSWORD:-cuvia}" \\
+  $PG_IMAGE psql "\$@"
+WRAP
+  $SUDO chmod +x /usr/local/bin/psql
+fi
 if have psql; then echo "✓ psql 사용 가능"; else echo "✗ psql 없음 — PostGIS 스키마/적재 불가"; fi
 echo
 if have osm2pgsql; then echo "✓ 이미 설치됨: osm2pgsql ($(command -v osm2pgsql))"
