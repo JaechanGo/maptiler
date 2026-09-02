@@ -355,12 +355,21 @@ class TestApproxMatch(_Base):
         self.assertIn("substr(parcel.pnu,9,2)", sql)      # 리 페어 제약 유지
 
     def test_missing_main_stays_empty(self):
-        """★ S2 는 빈 결과가 정답이다 — 근사하면 전혀 다른 필지를 정답처럼 내놓는다."""
-        cur = GeoCursor(parcel_exact=[], parcel_approx=[parcel_row(638, 1)])
+        """★ S2 는 빈 결과가 정답이다 — 본번은 절대 근사하지 않는다.
+
+        ADR-008(f22af8b) 이후 계약: 부번 미명시 질의에도 근사 조회는 **발행**하되, WHERE 가 본번을
+        정확 제약(`parcel.ji_main = %s`)하므로 없는 본번(90638)은 DB 에서 0행 → 빈 결과.
+        종전 이 테스트는 '근사 조회를 아예 던지지 않는다'를 가정했고, 가짜 커서가 파라미터를 무시하고
+        행을 돌려주는 탓에 운영에선 성립하는 빈 결과를 오답처럼 보였다([실측 2026-09-02] 세션 이전
+        커밋 ecab565 에서도 동일 실패 = 코드 결함이 아니라 테스트가 ADR-008 을 반영하지 못한 것).
+        그래서 DB 상태를 정직하게 모델링한다: 본번 90638 필지는 없다(parcel_approx=[]).
+        """
+        cur = GeoCursor(parcel_exact=[], parcel_approx=[])
         out, meta = self.go(cur, Q_S2)
         self.assertEqual(out, [])
-        self.assertEqual(cur.count("parcel_approx"), 0,
-                         "부번을 명시하지 않은 질의에 근사 질의를 던졌다(본번 근사 위험)")
+        self.assertEqual(cur.count("parcel_approx"), 1, "부번 미명시 질의는 근사 조회를 1회 발행한다(ADR-008)")
+        sql, params = next((s, p) for s, p in cur.executed if "parcel.ji_main = %s" in s and "parcel.ji_sub = %s" not in s)
+        self.assertTrue(any(str(v) == "90638" for v in (params or ())), f"본번 90638 이 바인딩돼야 한다: {params}")
 
     def test_no_approx_when_exact_hits(self):
         cur = GeoCursor(parcel_exact=[parcel_row(638, 1)])
