@@ -14,7 +14,7 @@ import argparse, collections, io, json, math, os, pathlib, pwd, re, sqlite3, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
 from _common.textnorm import biznrm_nfc as biznrm, norm, rnorm        # noqa: E402
-from _common.region import is_valid_sido                                # noqa: E402  시도 유입 게이트
+from _common.region import is_valid_sido, SIDO_SOURCE                   # noqa: E402  시도 유입 게이트
 _bad_sido = collections.Counter()   # 유입 게이트가 비운 시도값 집계(요약 출력용)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -413,9 +413,11 @@ def add_biz(db, csvdir, state):
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     _flush(db,pb,fb,rb)
     print(f"  biz: +{pid-n0:,}  ({time.time()-st:.1f}s)", file=sys.stderr); state["pid"]=pid
-    if _bad_sido:
-        _top = " · ".join(f"{k!r}×{v:,}" for k, v in _bad_sido.most_common(5))
-        print(f"  [sido 게이트] 비정규 시도 {sum(_bad_sido.values()):,}행/{len(_bad_sido)}종 → 시도·시군구 비움(좌표 PIP 위임): {_top}", file=sys.stderr)
+    # 항상 한 줄 남긴다 — 게이트가 '무엇을 기준으로' 판정했는지(원천 CSV vs 폴백 집합)가 빌드 로그에 있어야
+    # 사후 감사가 된다(비정규 0건이면 침묵하던 판은 원천 미발견을 폴백으로 통과한 경우와 구분 불가였다).
+    _top = " · ".join(f"{k!r}×{v:,}" for k, v in _bad_sido.most_common(5))
+    print(f"  [sido 게이트] 기준 원천={SIDO_SOURCE} · 비정규 시도 {sum(_bad_sido.values()):,}행/{len(_bad_sido)}종"
+          + (f" → 시도·시군구 비움(좌표 PIP 위임): {_top}" if _bad_sido else ""), file=sys.stderr)
     return pending
 
 

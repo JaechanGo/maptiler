@@ -8,7 +8,7 @@
 """
 import csv, glob, os, re, subprocess, sys, unicodedata
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # PYTHONSAFEPATH=1 대비
-from _common.region import parse_region_kr                          # noqa: E402  시도 검증 파서(공용)
+from _common.region import parse_region_kr, SIDO_SOURCE, CANON_SIDO, LEGACY_SIDO   # noqa: E402  시도 검증 파서(공용)
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/Downloads/인허가정보")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "localdata/localdata_clean.csv")
@@ -35,6 +35,7 @@ def convert(pairs):
     return out
 
 def main():
+    print(f"[region] 시도 집합 원천={SIDO_SOURCE} (현행 {len(CANON_SIDO)}·폐지 {len(LEGACY_SIDO)})", file=sys.stderr)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     files = sorted(glob.glob(os.path.join(SRC,"**","*.csv"), recursive=True))
     w = csv.writer(open(OUT,"w",encoding="utf-8",newline=""))

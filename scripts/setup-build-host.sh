@@ -103,7 +103,10 @@ echo "── [4/5] 빌드 툴체인(GDAL·tippecanoe) 설치 ──────"
 #   [실측 2026-09-01 .244/CentOS 7] yum 미러가 EOL 로 사망해 gdal·tippecanoe 를 못 깐다.
 #   이미 psql·ogr2ogr 가 같은 방식(컨테이너 실행)으로 대체돼 동작 중이라, 나머지 도구도 동일 규약으로 만든다.
 #   호출부(스크립트)는 무수정 — PATH 의 실행파일처럼 보이고 cwd·/home 마운트가 유지된다.
-GDAL_IMAGE="${GDAL_IMAGE:-ghcr.io/osgeo/gdal:alpine-small-latest}"
+# GDAL 이미지는 GEOS 포함본(alpine-normal)이어야 한다. alpine-small 은 GEOS 가 없어 ogr2ogr -simplify 가
+#   피처마다 "ERROR 6: GEOS support not enabled" 을 내고 **단순화만 조용히 건너뛴다**(원본 도형 그대로 통과).
+#   [실측 2026-09-02 .244] 06-gen-areas 가 8,983건 경고 후 비단순화 링으로 적재 — 데이터 누락은 아니나 areas 비대·PIP 저하.
+GDAL_IMAGE="${GDAL_IMAGE:-ghcr.io/osgeo/gdal:alpine-normal-latest}"
 TIPPE_IMAGE="${TIPPE_IMAGE:-naxgrp/tippecanoe:latest}"   # ghcr.io/felt/* 는 익명 pull 거부(실측)
 BUILD_ROOT_MOUNT="${BUILD_ROOT_MOUNT:-${BUILD_HOME:-$HOME}}"   # 컨테이너에 그대로 마운트할 작업 루트
 mk_docker_wrapper() {   # $1=명령명 $2=이미지 — 마운트 경로는 생성 시점에 확정해 박는다

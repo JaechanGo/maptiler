@@ -90,8 +90,9 @@ def check_db_scan(db):
     # biz·facility 는 정제 스크립트가 시도를 채우므로 정규 집합 밖 값 = 파서 결함. 빈값은 허용(좌표 PIP 로 채움).
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from _common.region import VALID_SIDO as _VS
+        from _common.region import VALID_SIDO as _VS, SIDO_SOURCE as _VSRC
     except Exception:   # 폐쇄망 번들엔 _common 이 없을 수 있다 — 같은 집합을 인라인 폴백
+        _VSRC = "inline-fallback"
         _VS = {"서울특별시","부산광역시","대구광역시","인천광역시","대전광역시","울산광역시","세종특별자치시","경기도",
                "강원특별자치도","충청북도","충청남도","전북특별자치도","전남광주통합특별시","경상북도","경상남도",
                "제주특별자치도","광주광역시","전라남도","전라북도","강원도","제주도","세종시"}
@@ -101,7 +102,7 @@ def check_db_scan(db):
     _nbad = sum(c for _, c in _bad)
     _top = " · ".join(f"{sd!r}×{c:,}" for sd, c in sorted(_bad, key=lambda x: -x[1])[:5])
     rec("FAIL" if _nbad else "PASS", "시도명 정규성(biz·facility)",
-        f"비정규 {_nbad:,}행/{len(_bad)}종 — {_top}" if _nbad else "정규 집합 외 0건")
+        (f"비정규 {_nbad:,}행/{len(_bad)}종 — {_top}" if _nbad else "정규 집합 외 0건") + f" (기준 원천={_VSRC})")
     # 빈 시도 비율 — 유입 게이트(09)는 미지의 명칭을 **비워서** 통과시킨다(추정 금지). 원천(예: 상가 CSV)이
     # 우리 법정동코드보다 새로운 개편 명칭을 쓰면 그 행들이 여기로 몰린다 → 비율이 튀면 lawd_code_v2 재수집 신호.
     # 평시엔 시도 자체가 없는 원천 주소(장전동 ***번지 류)만 남아 소수. 임계 0.5% 는 재정제 실측(4/2.34M·754/96,580)에 여유를 둔 값.
