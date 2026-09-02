@@ -11,6 +11,7 @@ import csv, glob, json, os, re, subprocess, sys, unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))       # PYTHONSAFEPATH=1 대비
 from _common.csvheur import _nk, pick_coord                          # noqa: E402
+from _common.region import parse_region_kr                          # noqa: E402  시도 검증 파서(공용)
 
 N = lambda s: unicodedata.normalize("NFC", s or "")
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/facility")
@@ -61,14 +62,8 @@ def find_col(cols, hints):
     return None
 
 
-def parse_region(*addrs):
-    for a in addrs:
-        t = N(a or "").split()
-        if len(t) >= 2:
-            sgg = t[1] + (" " + t[2] if len(t) >= 3 and t[2].endswith("구") else "")  # 시+구(예: 수원시 영통구) — navi sigungu 포맷에 맞춤
-            emd = next((x for x in t[2:5] if x.endswith(("동", "읍", "면", "리", "가"))), "")
-            return t[0], sgg, emd
-    return "", "", ""
+# parse_region 은 _common/region.py 의 parse_region_kr 로 대체(11-build-localdata 와 동일 결함 —
+# 실측 facility 90행: '경기도수원시'·'세종특별자치시종'·'원창로239번길' 이 시도로 적재).
 
 
 def tm5174_to_wgs(pairs):
@@ -141,7 +136,7 @@ def main():
                 doro_s = N(doro).strip(); jibun_s = N(jibun).strip()
                 if not (doro_s or jibun_s):
                     skipped += 1; continue                       # 주소도 비면 못 씀
-                sido, sgg, emd = parse_region(doro, jibun)       # 도로명 우선(09 의 navi 조인키)
+                sido, sgg, emd = parse_region_kr(doro, jibun, org_code=r.get("개방자치단체코드"))       # 도로명 우선(09 의 navi 조인키)
                 w.writerow([nm, label, sido, sgg, emd, "", "", "", "", "생활편의", doro_s, jibun_s]); ng += 1
             elif mode == "wgs":
                 try:
@@ -151,18 +146,18 @@ def main():
                     continue
                 if not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
-                sido, sgg, emd = parse_region(jibun, doro)
+                sido, sgg, emd = parse_region_kr(jibun, doro, org_code=r.get("개방자치단체코드"))
                 w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
             else:
                 x = str(r.get(c_tmx) or "").strip(); y = str(r.get(c_tmy) or "").strip()
                 if not x or not y:
                     continue
-                tm_rows.append((nm, jibun, doro)); tm_coords.append((x, y))
+                tm_rows.append((nm, jibun, doro, r.get("개방자치단체코드"))); tm_coords.append((x, y))
         if tm_rows:
-            for (nm, jibun, doro), (lon, lat) in zip(tm_rows, tm5174_to_wgs(tm_coords)):
+            for (nm, jibun, doro, org), (lon, lat) in zip(tm_rows, tm5174_to_wgs(tm_coords)):
                 if lon is None or not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
-                sido, sgg, emd = parse_region(jibun, doro)
+                sido, sgg, emd = parse_region_kr(jibun, doro, org_code=org)
                 w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
         total += n; geopend += ng
         if n or ng:

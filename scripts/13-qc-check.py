@@ -84,6 +84,24 @@ def check_db_scan(db):
         rec("PASS" if br >= 0.999 else "FAIL", "주소 법정동코드(b_code) 채움률", f"{br*100:.2f}% ({K['addr'][7]:,}/{addr_n:,})")
         hr = K["addr"][8] / addr_n
         rec("PASS" if hr >= 0.999 else "FAIL", "주소 행정동코드(h_code) 채움률", f"{hr*100:.2f}% ({K['addr'][8]:,}/{addr_n:,})")
+
+    # 시도명 정규성 — 위 '시도 커버리지'는 nsido < EXP_SIDO 만 FAIL 이라 종류가 **늘어난** 오염을 통과시켰다
+    # ([실측 2026-09-02] localdata_clean 시도명 270종·PostGIS biz 1,188행 '장전동'·'전남'·'서울특별시마포구').
+    # biz·facility 는 정제 스크립트가 시도를 채우므로 정규 집합 밖 값 = 파서 결함. 빈값은 허용(좌표 PIP 로 채움).
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _common.region import VALID_SIDO as _VS
+    except Exception:   # 폐쇄망 번들엔 _common 이 없을 수 있다 — 같은 집합을 인라인 폴백
+        _VS = {"서울특별시","부산광역시","대구광역시","인천광역시","대전광역시","울산광역시","세종특별자치시","경기도",
+               "강원특별자치도","충청북도","충청남도","전북특별자치도","전남광주통합특별시","경상북도","경상남도",
+               "제주특별자치도","광주광역시","전라남도","전라북도","강원도","제주도","세종시"}
+    _bad = [(sd, c) for sd, c in db.execute(
+        "SELECT sido, count(*) FROM places WHERE kind IN ('biz','facility') AND sido IS NOT NULL AND sido<>'' GROUP BY sido"
+    ).fetchall() if sd not in _VS]
+    _nbad = sum(c for _, c in _bad)
+    _top = " · ".join(f"{sd!r}×{c:,}" for sd, c in sorted(_bad, key=lambda x: -x[1])[:5])
+    rec("FAIL" if _nbad else "PASS", "시도명 정규성(biz·facility)",
+        f"비정규 {_nbad:,}행/{len(_bad)}종 — {_top}" if _nbad else "정규 집합 외 0건")
     biz_n = K.get("biz", (None, 0))[1]
     if biz_n:
         cr = K["biz"][5] / biz_n

@@ -14,6 +14,8 @@ import argparse, collections, io, json, math, os, pathlib, pwd, re, sqlite3, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
 from _common.textnorm import biznrm_nfc as biznrm, norm, rnorm        # noqa: E402
+from _common.region import is_valid_sido                                # noqa: E402  시도 유입 게이트
+_bad_sido = collections.Counter()   # 유입 게이트가 비운 시도값 집계(요약 출력용)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # 202607 원천 기준 16종. 원천에서 광주광역시·전라남도는 `jeonnamgwangju` 한 파일로 통합돼 있다.
@@ -374,6 +376,12 @@ def add_biz(db, csvdir, state):
                 if not nm or nm in ("업소명없음", "상호명없음", "-", "."): continue   # 원본 플레이스홀더 제외
                 biz=(row.get("상권업종소분류명") or "").strip()
                 sido=(row.get("시도명") or "").strip(); sgg=(row.get("시군구명") or "").strip()
+                # ★ 유입 게이트 — 상가·인허가·시설·향후 어떤 CSV 든 시도는 정규 집합에 있을 때만 믿는다.
+                #   정제 스크립트(11·11b)를 고쳐도 새 원천이 다시 첫 토큰을 시도로 실을 수 있다 → 합류점에서 최종 차단.
+                #   무효면 시도·시군구를 **둘 다** 비운다(시군구만 남기면 '***번지'가 살아남는다). 빈값은 API 가 좌표 PIP 로 채운다.
+                #   [실측 2026-09-02] 이 검증이 없어 localdata 의 시도명 270종이 그대로 places 에 실렸다(1,275행).
+                if sido and not is_valid_sido(sido):
+                    _bad_sido[sido] += 1; sido = ""; sgg = ""
                 haeng=(row.get("행정동명") or "").strip() or None   # CSV 행정동명 → haeng_dong 자리/폴백 전용(emd 아님; M2)
                 phone=(row.get("전화번호") or "").strip() or None; opened=(row.get("인허가일자") or "").strip() or None
                 cat1=(row.get("상권업종대분류명") or "").strip() or None
@@ -405,6 +413,9 @@ def add_biz(db, csvdir, state):
                 if len(pb)>=50000: _flush(db,pb,fb,rb); pb.clear(); fb.clear(); rb.clear()
     _flush(db,pb,fb,rb)
     print(f"  biz: +{pid-n0:,}  ({time.time()-st:.1f}s)", file=sys.stderr); state["pid"]=pid
+    if _bad_sido:
+        _top = " · ".join(f"{k!r}×{v:,}" for k, v in _bad_sido.most_common(5))
+        print(f"  [sido 게이트] 비정규 시도 {sum(_bad_sido.values()):,}행/{len(_bad_sido)}종 → 시도·시군구 비움(좌표 PIP 위임): {_top}", file=sys.stderr)
     return pending
 
 
