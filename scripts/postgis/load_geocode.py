@@ -252,11 +252,44 @@ def stream_copy(env, db_path, phase, table, limit=None):
     return n
 
 
+def normalize_live_names(env, table):
+    """이전 스왑이 finalize [3/3] 를 못 거쳤으면 라이브 테이블의 PK 제약·인덱스·통계가 *_new 이름을 달고 있다.
+    그대로 두면 새 스왑이 같은 이름을 만들다 'relation already exists' 로 죽는다
+    ([실측 2026-09-03 .244] address 의 PK 가 address_new_pkey 로 남아 phase=address 가 [2/5]에서 실패).
+    finalize 와 같은 규칙으로 정식명으로 환원한다(멱등). 정식명이 이미 있으면 _new 쪽은 중복이므로 DROP."""
+    fixed = []
+    if psql_q(env, f"SELECT count(*) FROM pg_constraint WHERE conrelid='{table}'::regclass "
+                   f"AND conname='{table}_new_pkey'") == "1":
+        psql(env, f"ALTER TABLE {table} RENAME CONSTRAINT {table}_new_pkey TO {table}_pkey")
+        fixed.append(f"{table}_new_pkey→{table}_pkey")
+    for line in psql_q(env, f"SELECT indexname FROM pg_indexes WHERE tablename='{table}' "
+                            f"AND indexname LIKE '%\\_new'").splitlines():
+        nm = line.strip()
+        if not nm:
+            continue
+        if psql_q(env, f"SELECT to_regclass('public.{nm[:-4]}') IS NOT NULL") == "t":
+            psql(env, f"DROP INDEX {nm}"); fixed.append(f"{nm}(중복 DROP)")
+        else:
+            psql(env, f"ALTER INDEX {nm} RENAME TO {nm[:-4]}"); fixed.append(nm)
+    for line in psql_q(env, "SELECT stxname FROM pg_statistic_ext WHERE "
+                            f"stxrelid='{table}'::regclass AND stxname LIKE '%\\_new'").splitlines():
+        nm = line.strip()
+        if nm:
+            psql(env, f"ALTER STATISTICS {nm} RENAME TO {nm[:-4]}"); fixed.append(nm)
+    if fixed:
+        print(f"      잔재 정규화({table}): {', '.join(fixed)}", file=sys.stderr)
+
+
 def live_index_defs(env, table):
-    """살아있는 카탈로그에서 2차 인덱스 + 확장통계 DDL 을 뜬다. pkey 는 제약으로 별도 생성."""
+    """살아있는 카탈로그에서 2차 인덱스 + 확장통계 DDL 을 뜬다. pkey 는 제약으로 별도 생성.
+    PK 는 이름이 아니라 카탈로그 플래그(indisprimary)로 뺀다 — 잔재 이름(address_new_pkey)이면 이름 비교가 놓쳐
+    PK 인덱스를 2차 인덱스로 한 번 더 복제한다(2026-09-03 실측: address_new_pkey_new 생성 후 제약 충돌)."""
     idefs = [l for l in psql_q(env,
         f"SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='{table}' "
-        f"AND indexname <> '{table}_pkey' ORDER BY indexname").splitlines() if l.strip()]
+        f"AND indexname <> '{table}_pkey' "
+        f"AND indexname NOT IN (SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+        f"                      WHERE i.indrelid='{table}'::regclass AND i.indisprimary) "
+        f"ORDER BY indexname").splitlines() if l.strip()]
     sdefs = [l for l in psql_q(env,
         f"SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxrelid='{table}'::regclass"
     ).splitlines() if l.strip()]
@@ -287,6 +320,7 @@ def cmd_swap(args, env):
         sys.exit(f"✗ {old} 가 이미 있다 — 이전 스왑이 finalize 되지 않았다. 검증 후 --finalize 먼저.")
     if psql_q(env, f"SELECT to_regclass('public.{new}') IS NOT NULL") == "t":
         sys.exit(f"✗ {new} 가 이미 있다 — 잔재를 확인하고 수동 DROP 후 재시도하라.")
+    normalize_live_names(env, table)   # 이전 스왑의 *_new 이름 잔재 → 정식명(멱등)
 
     print(f"[0/5] 기대값 산출(원천 sqlite, 읽기전용) …", file=sys.stderr)
     exp = sqlite_expected(args.db, phase)
