@@ -113,8 +113,20 @@ mk_docker_wrapper() {   # $1=명령명 $2=이미지 — 마운트 경로는 생�
 # $1 도커 래퍼 — setup-build-host.sh 가 생성(패키지 설치 불가 호스트 폴백).
 # -i: gdaltransform 처럼 **stdin 으로 입력받는** 도구가 있어 항상 붙인다. 없으면 입력이 컨테이너에
 #     닿지 않아 조용히 빈 출력을 내고, 호출부는 0건으로 흘러간다(실측: localdata '유지 0 · 제외 225만').
-exec docker run --rm -i --network host \\
+# /tmp 마운트: 호출부가 **/tmp 에 임시파일을 만들어 경로로 넘기는** 경우가 있다
+#     (06-gen-areas.py → tmpXXXX.geojson). 작업루트만 마운트하면 컨테이너가 그 파일을 못 봐
+#     FileNotFoundError 로 죽는다(실측 2026-09-01 areas 단계).
+# 환경변수 전달: 호출부가 **env 로 동작을 지정**하는 도구가 있다(06-gen-areas.py 는
+#     SHAPE_ENCODING=CP949 로 SHP 한글 속성을 해석시킨다). 컨테이너는 호스트 env 를 상속하지 않아
+#     빠뜨리면 인코딩이 틀어져 UnicodeDecodeError 로 죽는다(실측 2026-09-01 areas 단계).
+_envs=""
+for _v in SHAPE_ENCODING CPL_DEBUG GDAL_DATA PGCLIENTENCODING OGR_GEOMETRY_ACCEPT_UNCLOSED_RING; do
+  eval "_val=\\\${\$_v:-}"; [ -n "\$_val" ] && _envs="\$_envs -e \$_v=\$_val"
+done
+# shellcheck disable=SC2086
+exec docker run --rm -i --network host \$_envs \\
   -v $BUILD_ROOT_MOUNT:$BUILD_ROOT_MOUNT \\
+  -v /tmp:/tmp \\
   -w "\$(pwd)" \\
   $2 $1 "\$@"
 WRAP

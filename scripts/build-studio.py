@@ -28,6 +28,7 @@ DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·
 ARTIFACTS = BUILD_HOME / "artifacts"             # 빌드 산출물 스냅샷 보존(geocode.sqlite — 재적재·재수집 teardown 으로부터 보호)
 DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON — 최초 1회 DB로 마이그레이션 후 .bak 보존
 DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
+LOG_DIR = BUILD_HOME / "logs"                     # 단계별 실행 로그(SSE 는 흐르는 스트림이라 사후 추적 불가 → 파일 병행)
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
 SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
 
@@ -973,6 +974,17 @@ class Manager:
         j = self.jobs[kind]; j["log"].append(line); j["log"][:] = j["log"][-400:]
         p = progress_of(kind, line, j["st"])
         if p is not None: j["progress"] = max(j["progress"], min(p, 1.0))
+        # ★ 파일에도 남긴다 — SSE 는 '흐르는' 스트림이라 구독을 놓치면 그 순간의 로그가 영영 사라진다.
+        #   실패 원인을 사후에 못 캐는 게 실제 사고로 이어졌다([실측 2026-09-01~02] load_postgis 가
+        #   parcel 을 TRUNCATE 한 뒤 죽었는데 원인(bash 4.2 의 `wait -n` 미지원)을 스트림에서 놓쳐
+        #   재현 실행으로 하루를 돌아갔다). 메모리 링버퍼(400줄)도 앞부분이 잘려나가 같은 한계가 있다.
+        #   단계별 파일이라 사후 grep 이 되고, 화면(SSE)은 그대로 유지된다.
+        try:
+            fh = j.get("logfile")
+            if fh is not None:
+                fh.write(line + "\n"); fh.flush()
+        except Exception:
+            pass   # 로그 기록 실패가 빌드를 멈추게 하지 않는다(디스크 full 등)
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"], "line": line})
 
     def _run(self, kind):
@@ -988,6 +1000,18 @@ class Manager:
             self.publish({"kind": kind, "status": "skipped", "progress": j["progress"]})
             return
         j["status"] = "running"
+        # 단계별 로그 파일 — BUILD_HOME/logs/<단계>-<시각>.log. 최근 20개만 남기고 정리.
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            lf = LOG_DIR / f"{kind}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+            j["logfile"] = open(lf, "w", encoding="utf-8")
+            j["logpath"] = str(lf)
+            old_logs = sorted(LOG_DIR.glob(f"{kind}-*.log"))[:-20]
+            for f in old_logs:
+                try: f.unlink()
+                except OSError: pass
+        except Exception:
+            j["logfile"] = None; j["logpath"] = None
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
             cmd = TARGETS()[kind]["cmd"]
@@ -1011,6 +1035,16 @@ class Manager:
                 except Exception as e: self._emit(kind, f"[프로필 저장 실패] {e}")
         except Exception as e:
             j["status"] = "error"; self._emit(kind, f"[오류] {e}")
+        finally:
+            # 로그 파일 마감 — 경로를 마지막 줄로 남겨 화면에서 바로 찾아갈 수 있게 한다.
+            fh = j.pop("logfile", None)
+            if fh is not None:
+                try:
+                    fh.write(f"[로그] {j.get('logpath')}\n"); fh.close()
+                except Exception: pass
+                if j.get("logpath"):
+                    self.publish({"kind": kind, "status": j["status"], "progress": j["progress"],
+                                  "line": f"[로그 파일] {j['logpath']}"})
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"]})
 
     _ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')   # 색/커서 ANSI 이스케이프(TTY 모드에서 도구가 붙임) 제거

@@ -163,7 +163,11 @@ map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));</pre
       <tr><td>지오코딩(검색)</td><td class="mono">/geocode?q=증미역 <span class="note">· 게이트웨이 경유</span></td></tr>
       <tr><td>역지오코딩</td><td class="mono">/reverse?lon=126.86&amp;lat=37.55 <span class="note">· 게이트웨이 경유</span></td></tr>
       <tr><td>길찾기(차량)</td><td class="mono">/route/v1/driving/{lon},{lat};{lon},{lat}?steps=true&amp;geometries=geojson <span class="note">· 게이트웨이 경유 · 경유지는 ; 로 연결</span></td></tr>
-      <tr><td>길찾기(도보)</td><td class="mono">/route/v1/walking/{lon},{lat};{lon},{lat} <span class="note">· /table /trip /nearest 도 동일 분기</span></td></tr>
+      <tr><td>길찾기(도보)</td><td class="mono">/route/v1/walking/{lon},{lat};{lon},{lat} <span class="note">· 별칭 foot</span></td></tr>
+      <tr><td>길찾기(자전거)</td><td class="mono">/route/v1/cycling/{lon},{lat};{lon},{lat} <span class="note">· 별칭 bike, bicycle</span></td></tr>
+      <tr><td>소요시간·거리 매트릭스</td><td class="mono">/table/v1/driving/{coords}?annotations=duration,distance <span class="note">· N×N</span></td></tr>
+      <tr><td>방문순서 최적화</td><td class="mono">/trip/v1/driving/{coords}?roundtrip=true</td></tr>
+      <tr><td>좌표→도로 스냅</td><td class="mono">/nearest/v1/driving/{lon},{lat}</td></tr>
     </tbody>
   </table>
 
@@ -220,6 +224,23 @@ map.flyTo({ center: [r.results[0].lon, r.results[0].lat], zoom: 16 });
 const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.json());
 // rev.address={ ... }, rev.nearest=[{ name, kind, dist_m, ... }], rev.areas=[{ name, type, code }]
 // ↓ 전체 요청/응답 필드는 아래 "지오코딩 API — 요청 / 응답 스키마" 참고</pre>
+  </div>
+
+  <h2>길찾기 연동 (경로 안내)</h2>
+  <div class="card">
+    <pre>// 차량 경로 — 출발;경유;도착 (경도,위도 순서, 경유지는 ; 로 연결)
+const r = await fetch('/route/v1/driving/126.9877,37.4292;126.9169,37.4017'
+                    + '?steps=true&amp;overview=full&amp;geometries=geojson').then(x =&gt; x.json());
+if (r.code === 'Ok') {
+  const route = r.routes[0];
+  console.log(route.distance, route.duration);          // 미터, 초
+  map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: route.geometry } });
+  map.addLayer({ id: 'route', type: 'line', source: 'route',
+                 paint: { 'line-color': '#3d8bfd', 'line-width': 5 } });
+  route.legs[0].steps.forEach(s =&gt; console.log(s.maneuver.type, s.maneuver.modifier, s.name));
+}
+// 도보는 /route/v1/walking/… , 자전거는 /route/v1/cycling/…
+// ↓ 전체 파라미터/응답 필드는 아래 "길찾기 API — 차량 · 도보 · 자전거" 참고</pre>
   </div>
 
   <h2>지오코딩 API — 요청 / 응답 스키마</h2>
@@ -454,6 +475,57 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
   <p class="muted faint" style="margin-top:6px">places = 검색 인덱스 건수(약 11,281,251). areas 수치는 환경별로 상이할 수 있습니다.
     필수 테이블이 누락되면 503 + degraded 형태로 응답합니다:</p>
   <pre>{ "ok": false, "degraded": true, "missing_tables": ["address", "admin_boundary"] }</pre>
+
+  <h2>길찾기 API — 차량 · 도보 · 자전거</h2>
+  <p class="muted">OSRM 자체 호스팅(폐쇄망 자급). 게이트웨이가 URL 의 프로필로 엔진을 분기하므로
+    <b>OSRM/Mapbox Directions 표준 URL 을 그대로</b> 쓰면 됩니다. 좌표는 <code>경도,위도</code> 순서이고
+    <b>경유지는 <code>;</code> 로 이어 붙입니다</b>(최대 10지점). 응답은 CORS 허용.</p>
+  <table class="small">
+    <thead><tr><th>프로필</th><th>URL</th><th>별칭</th></tr></thead>
+    <tbody>
+      <tr><td>차량</td><td class="mono">/route/v1/driving/…</td><td class="mono">car</td></tr>
+      <tr><td>도보</td><td class="mono">/route/v1/walking/…</td><td class="mono">foot</td></tr>
+      <tr><td>자전거</td><td class="mono">/route/v1/cycling/…</td><td class="mono">bike, bicycle</td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="meth">GET</span>/route/v1/{프로필}/{좌표들} — 경로 탐색</h3>
+  <p class="tlabel">요청 — 출발;경유;도착 (경도,위도)</p>
+  <pre>const r = await fetch('/route/v1/driving/126.9877,37.4292;126.9769,37.4009;126.9169,37.4017'
+                    + '?steps=true&amp;overview=full&amp;geometries=geojson').then(x =&gt; x.json());</pre>
+  <table class="small">
+    <thead><tr><th>파라미터</th><th>값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">steps</td><td class="mono">true/false</td><td>턴바이턴 안내 포함 여부(기본 false)</td></tr>
+      <tr><td class="mono">overview</td><td class="mono">full / simplified / false</td><td>경로선 상세도. 지도에 그릴 땐 <code>full</code></td></tr>
+      <tr><td class="mono">geometries</td><td class="mono">geojson / polyline</td><td><b>geojson 권장</b> — MapLibre 소스에 그대로 투입</td></tr>
+      <tr><td class="mono">alternatives</td><td class="mono">true/false</td><td>대안 경로(있을 때만 반환)</td></tr>
+    </tbody>
+  </table>
+  <p class="tlabel">응답 주요 필드</p>
+  <table class="small">
+    <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">code</td><td>string</td><td><code>"Ok"</code> 가 아니면 실패(<code>NoRoute</code>·<code>NoSegment</code> 등) — <b>프론트 가드 필요</b></td></tr>
+      <tr><td class="mono">routes[0].distance</td><td>number</td><td>총 거리(미터)</td></tr>
+      <tr><td class="mono">routes[0].duration</td><td>number</td><td>총 소요시간(초). <b>도로등급·신호 지연 기반 추정 — 실시간 교통 미반영</b></td></tr>
+      <tr><td class="mono">routes[0].geometry</td><td>object</td><td>GeoJSON LineString — 지도 소스로 직결</td></tr>
+      <tr><td class="mono">routes[0].legs[]</td><td>array</td><td>경유지로 나뉜 구간. 각 <code>distance</code>·<code>duration</code>·<code>steps</code></td></tr>
+      <tr><td class="mono">legs[].steps[].maneuver</td><td>object</td><td><code>type</code>(depart/turn/arrive…)·<code>modifier</code>(left/right…)</td></tr>
+      <tr><td class="mono">legs[].steps[].name</td><td>string</td><td>도로명(한국어) — 안내문 조립에 사용</td></tr>
+      <tr><td class="mono">waypoints[]</td><td>array</td><td>입력 좌표의 도로 스냅 결과. <code>name</code>·<code>location</code>·<code>distance</code>(스냅거리 m)</td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="meth">GET</span>/table · /trip · /nearest — 부가 서비스</h3>
+  <pre>// N×N 소요시간·거리 매트릭스 (가까운 지점 찾기)
+await fetch('/table/v1/driving/126.98,37.56;126.75,37.50?annotations=duration,distance');
+// 다중지점 방문 순서 최적화
+await fetch('/trip/v1/driving/126.98,37.56;126.75,37.50;126.91,37.40?roundtrip=true');
+// 좌표 → 가장 가까운 도로 스냅
+await fetch('/nearest/v1/walking/126.9877,37.4292');</pre>
+  <p class="muted faint">데모 우상단 <b>길찾기</b> 패널(<code>demo/js/routing.js</code>)이 위 API 를 그대로 사용합니다 —
+    주소검색 연동·지도 클릭 지정·경유지·턴바이턴 표시의 참고 구현으로 보시면 됩니다.</p>
 
   <h3>에러 응답</h3>
   <p class="muted">모든 에러는 <code>application/json</code> 바디로 봉인됩니다(빈 바디·소켓 끊김 없음). 메시지는 절단될 수 있습니다.</p>
