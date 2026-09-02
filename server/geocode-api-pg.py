@@ -192,6 +192,19 @@ def _near_m(a, b):
     return math.hypot(dx, dy)
 
 
+def _name_path_sql(conds, short_prefix):
+    """이름 경로 SQL. 2자↓ prefix('강남%') 는 MATERIALIZED CTE 로 감싼다.
+    [실측 2026-09-03 .244] 플래너가 '강남%' 를 112,071행으로 추정(실제 6,194)해 LIMIT 400 과 결합하면
+    Seq Scan 이 '가장 싸다'고 판단 → 930만 행을 훑고 16초(statement_timeout 3s → 503). CTE 로 감싸면
+    LIMIT 이 스캔 선택에 스며들지 않아 GIN(trgm) 비트맵을 타고, 실행기는 여전히 400행에서 멈춘다
+    (강남 747ms·상 92ms·시청 197ms·역 2.2s). 3자+ infix 는 종전 계획이 정상이라 그대로 둔다."""
+    where = "kind <> 'addr' AND geom IS NOT NULL AND " + " AND ".join(conds)
+    if short_prefix:
+        return ("WITH c AS MATERIALIZED (SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
+                f"WHERE {where}) SELECT * FROM c LIMIT {ADDR_CAP}")
+    return f"SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address WHERE {where} LIMIT {ADDR_CAP}"
+
+
 def collapse_dups(results, limit):
     """점수 내림차순 (score,item) → 중복 접은 item 목록(상위 limit).
     종전 규칙(이름 완전일치+좌표 5자리)을 포함하며, 정규화 이름 동일 + DUP_RADIUS_M 이내를 추가로 접는다."""
@@ -1551,9 +1564,8 @@ def geocode(cur, q, limit, meta=None):
                 pat = f"%{t}%" if len(t) >= 3 else f"{t}%"
                 conds.append("(search_text ILIKE %s OR bld ILIKE %s)")
                 args += [pat, pat]
-        sql = ("SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
-               "WHERE kind <> 'addr' AND geom IS NOT NULL AND " + " AND ".join(conds) +
-               f" LIMIT {ADDR_CAP}")
+        short_prefix = (not multi) and len(p["terms"][0]) < 3
+        sql = _name_path_sql(conds, short_prefix)
         cur.execute(sql, args)
         for r in cur.fetchall():
             disp = addr_str(r) if r["kind"] == "addr" else r["name"]

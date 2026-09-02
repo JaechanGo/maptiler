@@ -90,5 +90,19 @@ class TestRefineSigungu(unittest.TestCase):
         self.assertEqual(M.refine_sigungu(own, {"sigungu": "부천시"})["sigungu"], "부천시")
 
 
+class TestNamePathSql(unittest.TestCase):
+    def test_short_prefix_is_materialized(self):
+        sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], True)
+        self.assertTrue(sql.startswith("WITH c AS MATERIALIZED ("))
+        self.assertIn("kind <> 'addr' AND geom IS NOT NULL AND (search_text ILIKE %s OR bld ILIKE %s)", sql)
+        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+
+    def test_long_or_multi_unchanged(self):
+        sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], False)
+        self.assertTrue(sql.startswith("SELECT *, ST_X(geom) AS lon"))
+        self.assertNotIn("MATERIALIZED", sql)
+        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+
+
 if __name__ == "__main__":
     unittest.main()
