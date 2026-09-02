@@ -117,7 +117,7 @@ load_one() {
   echo "  [$idx/${N}] $lyr (시도 $sido) → ${cnt}건"
 }
 
-# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
+# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n / bash<4.3 은 폴링 폴백).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
 # fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
 # jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료.
@@ -137,7 +137,16 @@ for shp in "${SHPS[@]}"; do
   if [ -z "$sido" ]; then echo "  ✗ 시도코드 추출 실패: $lyr (--sido 로 지정)"; continue; fi
   i=$((i+1))
   load_one "$shp" "$i" "$sido" &
-  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+  # ★ wait -n 은 bash 4.3+ 전용 — 4.2(CentOS 7)에서 "invalid option" 으로 죽으면 set -e 가 워커를
+  #   전부 정리해 **적재가 중도 절단**된다([실측 2026-09-02 .244] building 16.3M → 10.7M 로 유실).
+  #   load_parcel.sh 와 동일 폴백.
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+    if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
+      wait -n
+    else
+      sleep 0.5
+    fi
+  done
 done
 wait
 # 워커가 각자 스테이징을 정리하지만, 비정상 종료 잔여분(_stg_building_*)까지 일괄 정리.

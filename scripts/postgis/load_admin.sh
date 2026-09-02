@@ -42,11 +42,16 @@ for shp in "${SHPS[@]}"; do
   case "$shp" in *"(1)"*) echo "  (중복 제외) $(basename "$shp")"; continue;; esac
   lyr="$(basename "$shp" .shp)"
   code_sel="NULL"; [ -n "$CODEF" ] && code_sel="\"$CODEF\""
+  # ★ 확장은 반드시 ${simp[@]+"${simp[@]}"} 로 — bash 4.4 미만은 `set -u` 아래서 **빈 배열**의
+  #   "${arr[@]}" 를 unbound variable 로 취급해 스크립트가 죽는다(4.4+ 에서 고쳐진 동작이라
+  #   최신 개발기에선 재현되지 않는다). [실측 2026-09-02 .244/bash 4.2.46]
+  #   "load_admin.sh: line 47: simp[@]: unbound variable" 로 법정동·행정동 적재가 **둘 다 실패**했고,
+  #   load-all 은 앞서 DELETE 로 기존 level 을 지운 뒤였기에 admin_boundary 가 0 으로 남았다.
   simp=(); [ -n "$SIMPLIFY" ] && simp=(-simplify "$SIMPLIFY")
   # SHP → PG 임시 staging(name/code/geom). PROMOTE_TO_MULTI 로 MultiPolygon 통일.
   SHAPE_ENCODING="$ENC" ogr2ogr -f PostgreSQL "$PG_OGR" "$shp" \
     -nln "$STG" -overwrite -lco GEOMETRY_NAME=geom -nlt PROMOTE_TO_MULTI \
-    -s_srs "$SRS" -t_srs EPSG:4326 -skipfailures "${simp[@]}" \
+    -s_srs "$SRS" -t_srs EPSG:4326 -skipfailures ${simp[@]+"${simp[@]}"} \
     -dialect SQLITE -sql "SELECT \"$NAMEF\" AS name, $code_sel AS code, GEOMETRY FROM \"$lyr\""
   # staging → admin_boundary (sido_cd = code 앞 2자리)
   ins=$(psql_q -c "
