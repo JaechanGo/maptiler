@@ -105,7 +105,13 @@ def check_profile_order():
     if len(PROFILES) < 3:
         rec("WARN", "프로필 정합 생략", f"검사 대상 {PROFILES} — 3종 모두 필요")
         return
-    bad = []
+    # 근거리에서 자전거가 차량보다 빠른 것은 정상이다(실측 근거):
+    #   ① 같은 경로라도 신호 대기 차이가 지배한다 — 차량 40s vs 자전거 25s.
+    #      상동로196→상인초 312m: 경로 동일한데 차량 1.9분 · 자전거 1.7분.
+    #   ② 일방통행 우회 — 대구 반월당→중앙로: 차량 810m(달구벌대로·종로 경유) vs 자전거 518m(직행).
+    # 그래서 차량↔자전거 역전은 SHORT_M 미만에서만 허용하고, 도보 최장은 거리와 무관하게 강제한다.
+    SHORT_M = 1000
+    bad, soft = [], []
     for s, e in PAIRS:
         try:
             t = {}
@@ -113,13 +119,20 @@ def check_profile_order():
                 d = route(prof, coords(s, e))
                 t[prof] = (d["routes"][0]["duration"], d["routes"][0]["distance"])
             dv, cy, wk = t["driving"][0], t["cycling"][0], t["walking"][0]
-            if not (dv <= cy <= wk):
-                bad.append(f"{s}→{e} 차량{dv/60:.1f}·자전거{cy/60:.1f}·도보{wk/60:.1f}분")
+            desc = f"{s}→{e} 차량{dv/60:.1f}·자전거{cy/60:.1f}·도보{wk/60:.1f}분"
+            if wk < cy or wk < dv:
+                bad.append(desc + " (도보가 최장이 아님)")
+            elif dv > cy:
+                if t["driving"][1] < SHORT_M:
+                    soft.append(desc)          # 근거리 역전 — 설계상 정상
+                else:
+                    bad.append(desc + f" (장거리 {t['driving'][1]:.0f}m 에서 차량>자전거)")
         except Exception as ex:
             bad.append(f"{s}→{e} {type(ex).__name__}")
     if bad:
-        # 근거리에선 도보가 지름길을 써 자전거보다 빠를 수 있어 WARN(설계상 허용).
-        rec("WARN", "프로필 시간 역전", "; ".join(bad))
+        rec("FAIL", "프로필 시간 정합", "; ".join(bad))
+    elif soft:
+        rec("PASS", "차량 ≤ 자전거 ≤ 도보", f"{len(PAIRS)}쌍 — 근거리 역전 {len(soft)}건은 정상(신호·일방통행): " + "; ".join(soft))
     else:
         rec("PASS", "차량 ≤ 자전거 ≤ 도보", f"{len(PAIRS)}쌍")
 
