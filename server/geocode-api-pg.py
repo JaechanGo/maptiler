@@ -629,7 +629,19 @@ def _sgg_name(cur, sgg_cd):
     if sgg_cd not in _SGG_NAME_CACHE:
         cur.execute("SELECT sigungu_nm FROM lawd_sigungu WHERE sigungu_cd = %s", (sgg_cd,))
         row = cur.fetchone()
-        _SGG_NAME_CACHE[sgg_cd] = (row["sigungu_nm"] if isinstance(row, dict) else row[0]) if row else None
+        nm = (row["sigungu_nm"] if isinstance(row, dict) else row[0]) if row else None
+        if not nm:
+            # ★ 사전(lawd_sigungu)이 개편 코드를 모른다 — [실측 2026-09-02] 통합시 코드 12xxx 행 0개(구 29·46 만).
+            #   기준 원천인 법정동코드(신구대응) lawd_code 는 '1224000000 → 전남광주통합특별시 광주서구' 처럼
+            #   시군구 레벨(코드 XXXXX00000)을 항상 갖는다. 이름은 '시도 시군구' 형식이라 첫 토큰(시도)만 떼면
+            #   시군구(시+구 복합 포함)가 남는다. 코드→명칭 PK 조회라 명칭 조인 금지(P1)에 저촉되지 않는다.
+            cur.execute("SELECT name FROM lawd_code WHERE bcode = %s", (sgg_cd + "00000",))
+            row = cur.fetchone()
+            full = (row["name"] if isinstance(row, dict) else row[0]) if row else None
+            if full:
+                parts = str(full).split()
+                nm = " ".join(parts[1:]) if len(parts) > 1 else None
+        _SGG_NAME_CACHE[sgg_cd] = nm
     return _SGG_NAME_CACHE[sgg_cd]
 
 
@@ -1497,6 +1509,12 @@ def geocode(cur, q, limit, meta=None):
             s = base.get(r["kind"], 100) + (30 if (r.get("name") or "") == nq else 0)
             item = {"name": disp, "kind": r["kind"], "subtype": _g(r, "subtype"),
                     "lon": r["lon"], "lat": r["lat"]}
+            if r["kind"] != "addr":
+                # ★ 행의 자체 행정정보를 보존한다(응답 전에 pop). 종전엔 아래 후처리가 nonaddr_structure 에
+                #   DB 행이 아니라 이 item 을 넘겨 sido/sigungu/emd 가 전부 None 이 됐고, 좌표 PIP 만 남았다 —
+                #   PIP 는 시도·시군구 폴리곤이 없는 배포본에서 비고, 통합시(코드 12)는 사전에도 없어
+                #   biz '광주광역시 서구' 가 sgg=None 으로 나갔다([실측 2026-09-02] DB 엔 sigungu='서구' 존재).
+                item["_own"] = {k: _g(r, k) for k in ("sido", "sigungu", "emd", "bcode", "hcode")}
             cat = category_of(r)
             if cat: item["category"] = cat
             if _g(r, "phone"): item["phone"] = r["phone"]
@@ -1539,17 +1557,21 @@ def geocode(cur, q, limit, meta=None):
         seen.add(k); out.append(item)
         if len(out) >= limit: break
     for it in out:
+        own = it.pop("_own", None)          # 응답 계약(geocode/2)에 없는 키 — 반드시 제거
         if it["kind"] != "addr":
             # X6: 비-addr 자체 지역(OSM None) → admin_boundary PIP. 0행/미적재면 빈결과 → 지역 생략(graceful).
             pip = area_pip(cur, it["lon"], it["lat"])
             near = addr_at(cur, it["lon"], it["lat"]) or {}
-            # address: 인근 도로명주소(road/parcel/zipcode/bld, 부착 유지) + structure(자체 행정정보=PIP).
+            own = own or {}
+            # 자체 컬럼 우선, 결측만 PIP 로 보강(nonaddr_structure 계약과 동일). display 도 같은 병합값을 본다.
+            merged = {**pip, **{k: v for k, v in own.items() if v}}
+            # address: 인근 도로명주소(road/parcel/zipcode/bld, 부착 유지) + structure(자체 행정정보 → PIP 보강).
             it["address"] = {
                 "road": near.get("road"), "parcel": near.get("parcel"),
                 "zipcode": near.get("zipcode", ""), "bld": near.get("bld", ""),
-                "structure": nonaddr_structure(it, pip)["structure"],
+                "structure": nonaddr_structure(own, pip)["structure"],
             }
-            it["display"] = display_of(it, pip)
+            it["display"] = display_of(it, merged)
     return out
 
 
