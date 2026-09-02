@@ -169,6 +169,46 @@ _HAS_SGG_REMAP = False
 
 # ── 표시/응답 헬퍼 (geocode-api.py 와 동일 형태) ─────────────────────
 def _g(r, k): return r.get(k)
+
+
+# ---- 검색 결과 '같은 자리·같은 이름' 접기 ----------------------------------------------
+# [실측 2026-09-03] dedup_er 가 고른 대표(is_primary)는 타일 표시층에만 쓰이고 검색은 안 봤다.
+# 그래서 '이마트24R춘의역점'/'이마트24 R춘의역점'(0m, localdata 2행) 이 나란히 나오고, OSM 은
+# 역(station)·정류장/출입구(poi) 가 같은 이름으로 10~25m 안에 겹쳐 '대전역 ×8' 같은 목록이 됐다.
+# 규칙: 정규화 이름(영숫자·한글만, 대소문자 무시)이 같고 DUP_RADIUS_M 이내면 뒤 항목을 버린다.
+# 정렬은 점수 → 대표(is_primary=1) 우선이라 접힐 때 대표가 남는다. 양방향 정류장(50~100m)은
+# 반경 밖이라 그대로 둔다 — 서로 다른 객체이고 display.secondary 로 구분된다(2026-09-02 합의).
+DUP_RADIUS_M = 30
+
+
+def _dup_key(name):
+    return "".join(ch for ch in (name or "") if ch.isalnum()).lower()
+
+
+def _near_m(a, b):
+    """(lon,lat) 두 점의 근사 거리(m) — 반경 판정용, 정밀도 불필요."""
+    dx = (a[0] - b[0]) * 111320.0 * math.cos(math.radians((a[1] + b[1]) / 2.0))
+    dy = (a[1] - b[1]) * 110540.0
+    return math.hypot(dx, dy)
+
+
+def collapse_dups(results, limit):
+    """점수 내림차순 (score,item) → 중복 접은 item 목록(상위 limit).
+    종전 규칙(이름 완전일치+좌표 5자리)을 포함하며, 정규화 이름 동일 + DUP_RADIUS_M 이내를 추가로 접는다."""
+    out = []; seen = set(); keys = []
+    for s, item in results:
+        if item["lon"] is None or item["lat"] is None:
+            continue
+        k = (item["name"], round(item["lon"], 5), round(item["lat"], 5))
+        if k in seen:
+            continue
+        nk = _dup_key(item.get("name"))
+        if nk and any(nk == ok and _near_m((item["lon"], item["lat"]), pt) <= DUP_RADIUS_M for ok, pt in keys):
+            continue
+        seen.add(k); keys.append((nk, (item["lon"], item["lat"]))); out.append(item)
+        if len(out) >= limit:
+            break
+    return out
 # ※scripts/_common/textnorm.py 와 동일 구현(수동 동기화). 컨테이너 빌드 컨텍스트가 server/ 라
 #   import 불가 — 변경 시 양쪽을 함께 고칠 것. 동기화는 test_textnorm.py 의 등가성 테스트가 강제한다.
 def norm(s): return re.sub(r"\s+", " ", unicodedata.normalize("NFC", s or "")).strip()
@@ -572,6 +612,17 @@ def display_of(item, r=None):
         return {"main": name, "secondary": secondary, "full": full}
 
     return {"main": name, "secondary": None, "full": name}   # 미정의 kind fallback
+
+
+def refine_sigungu(own, pip):
+    """자체 시군구가 PIP 시군구의 '덜 구체적인 접두'면 PIP 값으로 올린다.
+    [실측 2026-09-03] 상가·인허가 원천은 시군구를 '부천시' 로 싣는데(구 폐지 2016→부활 2024 이전 표기 잔존),
+    같은 자리의 PIP 는 '부천시 원미구' 다. 자체값 우선 원칙(ADR)은 유지하되, PIP 가 자체값을 포함하는
+    더 구체적인 이름일 때만 교체한다 — 다른 시군구로 바꾸는 일은 없다(정보 손실·오염 없음)."""
+    o = (own or {}).get("sigungu"); p = (pip or {}).get("sigungu")
+    if o and p and p != o and p.startswith(o + " "):
+        return {**own, "sigungu": p}
+    return own
 
 
 def nonaddr_structure(r, pip=None):
@@ -1515,6 +1566,7 @@ def geocode(cur, q, limit, meta=None):
                 #   PIP 는 시도·시군구 폴리곤이 없는 배포본에서 비고, 통합시(코드 12)는 사전에도 없어
                 #   biz '광주광역시 서구' 가 sgg=None 으로 나갔다([실측 2026-09-02] DB 엔 sigungu='서구' 존재).
                 item["_own"] = {k: _g(r, k) for k in ("sido", "sigungu", "emd", "bcode", "hcode")}
+                item["_prim"] = _g(r, "is_primary")   # 동점 정렬용(대표 우선) — 응답 전에 pop
             cat = category_of(r)
             if cat: item["category"] = cat
             if _g(r, "phone"): item["phone"] = r["phone"]
@@ -1547,22 +1599,17 @@ def geocode(cur, q, limit, meta=None):
             results = demoted
 
     # ---- 병합·정렬·중복 제거 ----
-    results.sort(key=lambda x: -x[0])
-    out = []; seen = set()
-    for s, item in results:
-        if item["lon"] is None or item["lat"] is None:
-            continue
-        k = (item["name"], round(item["lon"], 5), round(item["lat"], 5))
-        if k in seen: continue
-        seen.add(k); out.append(item)
-        if len(out) >= limit: break
+    # 점수 내림차순, 동점이면 대표(is_primary=1) → 비대표(0) 순. 그래야 아래 접기에서 대표가 남는다.
+    results.sort(key=lambda x: (-x[0], 1 if x[1].get("_prim") == 0 else 0))
+    out = collapse_dups(results, limit)
     for it in out:
+        it.pop("_prim", None)               # 응답 계약(geocode/2)에 없는 키 — 반드시 제거
         own = it.pop("_own", None)          # 응답 계약(geocode/2)에 없는 키 — 반드시 제거
         if it["kind"] != "addr":
             # X6: 비-addr 자체 지역(OSM None) → admin_boundary PIP. 0행/미적재면 빈결과 → 지역 생략(graceful).
             pip = area_pip(cur, it["lon"], it["lat"])
             near = addr_at(cur, it["lon"], it["lat"]) or {}
-            own = own or {}
+            own = refine_sigungu(own or {}, pip)
             # 자체 컬럼 우선, 결측만 PIP 로 보강(nonaddr_structure 계약과 동일). display 도 같은 병합값을 본다.
             merged = {**pip, **{k: v for k, v in own.items() if v}}
             # address: 인근 도로명주소(road/parcel/zipcode/bld, 부착 유지) + structure(자체 행정정보 → PIP 보강).
