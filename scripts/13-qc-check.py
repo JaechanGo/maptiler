@@ -483,14 +483,27 @@ def check_postgis():
     if poic is not None:
         rec("WARN" if poic == 0 else "PASS", "poi 행수", f"{poic:,}" + (" — 0건(POI 미적재?)" if poic == 0 else ""))
 
-    # 2) 파티션 커버리지 — 17 시도가 모두 비어있지 않아야(교착 중단 시 일부 파티션만 적재됨).
+    # 2) 파티션 커버리지 — 현행 시도가 모두 비어있지 않아야(교착 중단 시 일부 파티션만 적재됨).
+    #    기대 시도 집합은 상수(PG_SIDO, 통합 전 17개)가 아니라 **법정동코드 원천(lawd_code 의 현행 시도코드)** 에서 읽는다.
+    #    [실측 2026-09-03] 202608 연속지적·건물이 통합코드 12(전남광주)로 들어오자 29·46 파티션이 정당하게 비었는데
+    #    17개 상수를 기대해 FAIL → package 게이트까지 막혔다. lawd_code 가 없으면 상수로 폴백한다.
+    try:
+        # 세종(3611000000)처럼 시도 레벨 코드가 XX00000000 꼴이 아닌 경우가 있어 접두 2자리 DISTINCT 로 뽑는다.
+        cur_sido = sorted({r[0].strip()[:2] for r in q("SELECT DISTINCT left(bcode,2) FROM lawd_code WHERE exist")
+                           if r and r[0].strip()})
+    except Exception:
+        cur_sido = []
+    exp_sido = cur_sido if len(cur_sido) >= 15 else list(PG_SIDO)
+    src_note = f"lawd_code 현행 {len(cur_sido)}개" if exp_sido is cur_sido else "상수 PG_SIDO(폴백)"
     for tbl in ("parcel", "building"):
         try:
             have = {r[0].strip(): int(r[1]) for r in q(f"SELECT sido_cd, count(*) FROM {tbl} GROUP BY sido_cd")
                     if len(r) >= 2 and r[1] != ""}
-            empty = [s for s in PG_SIDO if have.get(s, 0) == 0]
-            if empty: rec("FAIL", f"{tbl} 파티션 커버리지", f"빈 시도 {len(empty)}/17: {','.join(empty)} — 부분적재/중단 의심")
-            else:     rec("PASS", f"{tbl} 파티션 커버리지", "17/17 시도 적재")
+            empty = [s for s in exp_sido if have.get(s, 0) == 0]
+            extra = sorted(s for s, n in have.items() if s not in exp_sido and n > 0)
+            if empty: rec("FAIL", f"{tbl} 파티션 커버리지", f"빈 시도 {len(empty)}/{len(exp_sido)}: {','.join(empty)} — 부분적재/중단 의심 (기준 {src_note})")
+            else:     rec("PASS", f"{tbl} 파티션 커버리지", f"{len(exp_sido)}/{len(exp_sido)} 시도 적재 (기준 {src_note})"
+                          + (f" · 폐지코드 잔존 {','.join(extra)}" if extra else ""))
         except Exception as e:
             rec("FAIL", f"{tbl} 파티션 커버리지", f"조회 실패 {str(e)[:80]}")
 
