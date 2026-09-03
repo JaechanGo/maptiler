@@ -170,8 +170,9 @@ def main():
         # ── 4) tippecanoe ──
         out = pathlib.Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
         tmp_out = os.path.join(tmpdir, "admin.mbtiles")
+        # -r1(--drop-rate=1): 라벨 점을 저줌에서 솎지 않는다 — 기본 드롭률(2.5/줌)이면 z5 에서 시도 16개 중 2~3개만 남는다([실측 2026-09-03]).
         cmd = ["tippecanoe", "-o", tmp_out, "--force", "--detect-shared-borders", "--no-tile-size-limit",
-               "--simplification=4", "--no-feature-limit", "-n", "cuvia-admin",
+               "--simplification=4", "--no-feature-limit", "-r1", "-n", "cuvia-admin",
                "-N", "행정구역(법정동코드 원천) — 시도·시군구·읍면동 경계와 라벨"]
         for layer, (nd, zmin, zmax, lzmin) in LAYERS.items():
             poly, pt = outs[layer]
