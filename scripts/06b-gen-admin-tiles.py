@@ -167,18 +167,22 @@ def main():
             print(f"  ⚠ {layer}: 법정동코드에 현행 이름 없는 코드 {len(codes)}개 — 라벨 생략: {codes[:8]}", file=sys.stderr)
         print(f"[3/4] 라벨 — 시도 {counts['sido']} · 시군구 {counts['sigungu']} · 읍면동 {counts['emd']}", file=sys.stderr)
 
-        # ── 4) tippecanoe ──
+        # ── 4) tippecanoe — 레이어군(시도/시군구/읍면동)별로 줌 범위를 달리 생성해 tile-join 으로 합친다.
+        #   tippecanoe 1.36 은 -L 의 JSON minzoom/maxzoom 을 무시해([실측 2026-09-03] 모든 레이어가 z0~14 →
+        #   z5 타일에 읍면동 폴리곤 4,565개가 실려 비대) 실행 단위로 -Z/-z 를 준다. 라벨 점은 -r1 로 저줌에서 솎지 않는다.
         out = pathlib.Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
-        tmp_out = os.path.join(tmpdir, "admin.mbtiles")
-        # -r1(--drop-rate=1): 라벨 점을 저줌에서 솎지 않는다 — 기본 드롭률(2.5/줌)이면 z5 에서 시도 16개 중 2~3개만 남는다([실측 2026-09-03]).
-        cmd = ["tippecanoe", "-o", tmp_out, "--force", "--detect-shared-borders", "--no-tile-size-limit",
-               "--simplification=4", "--no-feature-limit", "-r1", "-n", "cuvia-admin",
-               "-N", "행정구역(법정동코드 원천) — 시도·시군구·읍면동 경계와 라벨"]
+        parts_mb = []
         for layer, (nd, zmin, zmax, lzmin) in LAYERS.items():
             poly, pt = outs[layer]
-            cmd += ["-L", json.dumps({"file": poly, "layer": layer, "minzoom": zmin, "maxzoom": zmax}),
-                    "-L", json.dumps({"file": pt, "layer": f"{layer}_label", "minzoom": lzmin, "maxzoom": zmax})]
-        run(cmd)
+            part_mb = os.path.join(tmpdir, f"{layer}.mbtiles")
+            cmd = ["tippecanoe", "-o", part_mb, "--force", "--detect-shared-borders", "--no-tile-size-limit",
+                   "--simplification=4", "--no-feature-limit", "-r1", f"-Z{zmin}", f"-z{zmax}",
+                   "-L", json.dumps({"file": poly, "layer": layer}), "-L", json.dumps({"file": pt, "layer": f"{layer}_label"})]
+            run(cmd)
+            parts_mb.append(part_mb)
+        tmp_out = os.path.join(tmpdir, "admin.mbtiles")
+        run(["tile-join", "-o", tmp_out, "--force", "--no-tile-size-limit", "-n", "cuvia-admin",
+             "-N", "행정구역(법정동코드 원천) — 시도·시군구·읍면동 경계와 라벨"] + parts_mb)
         db = sqlite3.connect(tmp_out)
         sido_names = sorted(v for v in sido_nm.values())
         db.executemany("INSERT OR REPLACE INTO metadata(name, value) VALUES(?,?)", [
