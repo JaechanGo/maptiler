@@ -17,6 +17,7 @@
 | 산봉우리 (이름·표고) | OpenStreetMap | `natural=peak` + `ele` | korea / mountain_peak | peak-label |
 | **건물 2D/3D** (footprint·높이) | **OpenStreetMap** | `building=*` 폴리곤 + `height`/`building:levels` | korea / building (`render_height`/`render_min_height`) | building-2d, **Building 3D** |
 | **아파트 동(棟) 라벨** (101동 …) | OpenStreetMap 건물 `name`/`ref` → 자체 추출 | scripts/04 정규식(`\d+동`·아파트 숫자형·문자동) | **dong** / dong | dong-dot, dong-label |
+| **행정구역 라벨·경계** (시도·시군구·읍면동) | VWorld 법정동 경계(읍면동 SHP) + 법정동코드(신구대응) → 코드 앞자리 병합·현행 명칭 부착 (scripts/06b) | ogr2ogr ST_Union + tippecanoe | **admin** / sido·sigungu·emd(+_label) | admin-sido-line, admin-sigungu-line, admin-emd-line, admin-sido-label, admin-sigungu-label |
 | **역 출구(도보 안내)** | **OpenStreetMap** (scripts/08) | `railway=subway_entrance`·`ref` | **demo/data**/station-exits.json (4,555개) | 데모 도보 출구 스냅 |
 | **길찾기 경로(차량·도보·자전거)** | **OpenStreetMap** 도로망 → OSRM 그래프(scripts/07) | `highway=*`·`oneway`·`maxspeed`·`traffic_signals`·turn restriction — car·foot·bicycle 은 한국 도심 보정 프로필(scripts/route-profiles) | **route**/{car,foot,bicycle} (OSRM MLD — 타일 아님) | 데모 routing.js 경로선 |
 | **지형 (3D 터레인)** | **NASA SRTM 30m** (AWS Open Data `elevation-tiles-prod`) | skadi `.hgt` (N33~38, E124~131) | **terrain** / raster-dem (Terrain-RGB) | `map.setTerrain` 소스 |

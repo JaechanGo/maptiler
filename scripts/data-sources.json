@@ -183,7 +183,7 @@
       "url": "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?dsId=30603&datPageSize=100",
       "period_fmt": "YYYY-MM-DD",
       "cycle": "월",
-      "note": "VWorld dsId=30603(datPageSize=100로 17시도 전체 한 페이지) 「행정구역_읍면동(법정동)」 LSMD_ADM_SECT_UMD_<시도>(시도별 SHP). EPSG:5186·CP949, 필드 EMD_NM/EMD_CD(8자리=법정동코드 앞8). 역지오코딩 areas(type=legal-dong) 적재: `06-gen-areas.py --shp sources/boundary/legal --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong`. 2026-06 기준 5,370건. 갱신일 추적=VWorld 30603(갱신일 YYYY-MM-DD). 대안 법정동 소스 GIS Developer(gisdeveloper.co.kr/?p=2332, 읍면동=법정동, 가입X)이나 날짜가 지저분해 VWorld 채택.",
+      "note": "VWorld dsId=30603(datPageSize=100로 17시도 전체 한 페이지) 「행정구역_읍면동(법정동)」 LSMD_ADM_SECT_UMD_<시도>(시도별 SHP). EPSG:5186·CP949, 필드 EMD_NM/EMD_CD(8자리=법정동코드 앞8). 역지오코딩 areas(type=legal-dong) 적재 + 지도 행정구역 타일(admin.mbtiles, 06b — 시도·시군구 병합·법정동코드 명칭, ADR-011) 원천. ★202608 판에 필지 레코드 306건(코드 '??1-84', 이름=PNU)이 섞여 있어 세 적재 경로가 코드 형식(숫자)으로 거른다(2026-09-03). 06-gen-areas 호출: `06-gen-areas.py --shp sources/boundary/legal --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong`. 2026-06 기준 5,370건. 갱신일 추적=VWorld 30603(갱신일 YYYY-MM-DD). 대안 법정동 소스 GIS Developer(gisdeveloper.co.kr/?p=2332, 읍면동=법정동, 가입X)이나 날짜가 지저분해 VWorld 채택.",
       "build_input": {
         "dest": "sources/boundary/legal",
         "extract": "zip",

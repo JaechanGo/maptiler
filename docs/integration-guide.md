@@ -53,6 +53,7 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 | 벡터 타일 TileJSON | `http://<서버>:8080/data/korea.json` |
 | 지형 타일 TileJSON | `http://<서버>:8080/data/terrain.json` |
 | 동 라벨 TileJSON | `http://<서버>:8080/data/dong.json` |
+| 행정구역 TileJSON | `http://<서버>:8080/data/admin.json` (레이어 sido/sigungu/emd + *_label, 법정동코드 원천) |
 | 글리프 | `http://<서버>:8080/fonts/{fontstack}/{range}.pbf` |
 | **지오코딩** | `http://<서버>:8082/geocode?q=증미역` |
 | **역지오코딩** | `http://<서버>:8082/reverse?lon=126.86&lat=37.55` |
@@ -116,6 +117,8 @@ const t = await fetch(`/table/v1/driving/${coords}?annotations=duration,distance
 | 레이어 id | 내용 | 표시 줌 |
 |---|---|---|
 | `dong-dot` / `dong-label` | 아파트 동(棟) 점/번호 — OSM 추출 92,004개 (K-apt 144,706동 대비 ~64%) | z14+ / z16+ |
+| `admin-sido-line` / `admin-sigungu-line` / `admin-emd-line`(기본 숨김) | 시도·시군구·읍면동 경계 — 법정동 경계 병합(국가 원천) | z3+ / z6+ / z11+ |
+| `admin-sido-label` / `admin-sigungu-label` | 시도(저줌 약칭→정식명)·시군구 라벨 — 법정동코드 현행 명칭(`전남광주통합특별시` 등). OSM `place` city 라벨은 제외됨 | z3–10 / z7–14 |
 | `poi-station-dot` / `poi-station-label` | 철도·지하철역 (전국 1,383개) | z12+ (단, 데이터가 z12·z13에 부분 존재 — 완전 표시는 z14+) |
 | `poi-civic-label` | 병원·학교·관공서·박물관 등 주요 시설 | z15+ |
 | `peak-label` | 산봉우리 (전국 2만, 이름 보유) | z12+ |

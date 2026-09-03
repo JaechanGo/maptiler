@@ -10,6 +10,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 - 서버: TileServer-GL (Docker, x86_64)
 - 3D 건물 + 3D 지형(토글) 지원
 - 아파트 동(棟) 라벨: OSM 추출 → 별도 벡터타일(dong.mbtiles, 토글)
+- 행정구역 라벨·경계(시도·시군구·읍면동): **국가 원천**(VWorld 법정동 경계 + 법정동코드 신구대응) → admin.mbtiles. OSM 지명 대신 법정동코드가 진실원이라 행정개편은 법정동코드 재수집만으로 지도·검색·역지오코딩에 함께 반영(ADR-011)
 - 역·공항·산봉우리·주요시설 라벨 (OpenMapTiles poi/place 레이어 활용)
 - 통합 지오코더: 전국 도로명주소(내비DB) + OSM 이름 + 소상공인 상가 + LOCALDATA 인허가
   → FTS5+R-tree 단일 인덱스. 결과에 전체주소·지번·우편번호·전화·업종대분류(cat1) 동반
@@ -34,6 +35,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 python3 scripts/08-gen-station-exits.py   # 역 출구 (OSM subway_entrance → demo/data/station-exits.json)
 ./scripts/04-gen-dong-labels.py  # 동 라벨 추출 (OSM → data/dong/*.geojson)
 ./scripts/05-gen-dong-tiles.py   # 동 라벨 타일 (dong.mbtiles)
+./scripts/06b-gen-admin-tiles.py --shp $BUILD_HOME/sources/boundary/legal   # 행정구역 타일 (admin.mbtiles, 법정동 경계+법정동코드)
 ./scripts/postgis/load-all.sh    # 3D 건물 → PostGIS building (STEPS=building, GIS건물통합 SHP)
 ./scripts/11-build-localdata.py  # LOCALDATA 인허가 → 상가포맷 CSV (영업중·비물리제외·NFC)
 ./scripts/09-gen-geocode.py \    # 통합 지오코딩 인덱스 (geocode.sqlite)
