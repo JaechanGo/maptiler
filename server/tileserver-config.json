@@ -32,6 +32,9 @@
     },
     "dong": {
       "mbtiles": "dong.mbtiles"
+    },
+    "admin": {
+      "mbtiles": "admin.mbtiles"
     }
   }
 }

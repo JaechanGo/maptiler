@@ -15,7 +15,7 @@ geocode-api.py reverse() 가 이미 area_rtree bbox + point_in_ring 으로 판�
 --shp 는 파일 또는 폴더(폴더면 내부 *.shp 모두 한 type 으로 합침). --type 별로 기존분을 한 번만 지우고 다시 넣음(멱등).
 필드명은 소스마다 다르니 `ogrinfo -so <shp> <레이어>` 로 확인할 것.
 """
-import argparse, glob, json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
+import argparse, glob, json, os, pathlib, re, sqlite3, subprocess, sys, tempfile, time
 
 
 def ensure_schema(db):
@@ -81,7 +81,7 @@ def main():
     db.execute("DELETE FROM areas WHERE type=?", (args.type,))   # 멱등: type 기존분 한 번만 제거
     nid = (db.execute("SELECT COALESCE(MAX(id),0) FROM areas").fetchone()[0]) + 1
 
-    n = skip = 0
+    n = skip = bad_code = 0
     for path, is_shp in sources:
         gj_path = shp_to_geojson(path, args.srs, args.simplify, args.encoding) if is_shp else path
         feats = json.load(open(gj_path, encoding="utf-8")).get("features", [])
@@ -93,6 +93,12 @@ def main():
                     if args.code_field and props.get(args.code_field) is not None else None)
             rings = geom_rings(f.get("geometry"))
             if not name or not rings: skip += 1; continue
+            # [실측 2026-09-03] VWorld 202608 법정동 경계에 필지 레코드 306건(코드 '??1-84', 이름=19자리 PNU, 최대 5.4km²)이 섞여
+            # 읍면동 폴리곤과 겹친 채 areas 에 들어가 역지오 PIP 를 오염시킬 수 있었다. 코드는 숫자 7~10자리여야 한다.
+            if code is not None and not re.fullmatch(r"\d{7,10}", code):
+                bad_code += 1
+                if bad_code <= 3: print(f"  ⚠ 코드 형식 불량 제외: {args.type} code={code!r} name={name[:24]!r}", file=sys.stderr)
+                continue
             xs = [pt[0] for r in rings for pt in r]; ys = [pt[1] for r in rings for pt in r]
             ab.append((nid, name, args.type, code, json.dumps(rings, ensure_ascii=False)))
             rb.append((nid, min(xs), max(xs), min(ys), max(ys))); nid += 1; n += 1
@@ -106,7 +112,7 @@ def main():
     tot = dict(db.execute("SELECT type,count(*) FROM areas GROUP BY type").fetchall())
     db.close()
     print("=" * 56)
-    print(f"적재 {n:,}건(type={args.type}, 소스 {len(sources)}) · 스킵 {skip} · {time.time()-t0:.0f}s · areas {tot}")
+    print(f"적재 {n:,}건(type={args.type}, 소스 {len(sources)}) · 스킵 {skip} · 코드불량 제외 {bad_code} · {time.time()-t0:.0f}s · areas {tot}")
 
 
 if __name__ == "__main__":

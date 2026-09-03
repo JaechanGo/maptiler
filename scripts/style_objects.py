@@ -68,6 +68,7 @@ SOURCE_GROUPS = [
     {"key": "base",      "label": "기본도(OSM)",       "kind": "src_visibility", "src": "openmaptiles"},
     {"key": "buildings", "label": "건물(GIS·2D/3D)",   "kind": "src_visibility", "src": "buildings"},
     {"key": "dong",      "label": "동(棟) 라벨",         "kind": "src_visibility", "src": "dong"},
+    {"key": "admin",     "label": "행정구역 경계·라벨(국가)", "kind": "src_visibility", "src": "admin"},
     {"key": "sangga",    "label": "상가(소상공인)",      "kind": "poi_source",     "source": "sangga"},
     {"key": "localdata", "label": "인허가(LOCALDATA)",   "kind": "poi_source",     "source": "localdata"},
     {"key": "terrain",   "label": "지형(3D)",            "kind": "terrain"},

@@ -147,6 +147,9 @@ def check_areas(db):
     miss = [t for t in ("legal-dong", "admin-dong") if by.get(t, 0) == 0]
     if miss: rec("FAIL", "행정경계 단위", f"누락 {', '.join(miss)} (현재 {by})")
     else:    rec("PASS", "행정경계 areas", f"{total:,}건 · " + " ".join(f"{k}={v:,}" for k, v in by.items()))
+    # 코드 형식 — 원천(VWorld 법정동 경계)에 필지 레코드가 섞이면 코드가 '??1-84' 꼴로 들어온다([실측 2026-09-03] 306건).
+    bad = db.execute("SELECT count(*) FROM areas WHERE code IS NOT NULL AND code<>'' AND code GLOB '*[^0-9]*'").fetchone()[0]
+    rec("FAIL" if bad else "PASS", "행정경계 areas 코드 형식", f"비숫자 코드 {bad:,}건" + (" — 원천 오염(필지 레코드 혼입) 의심, 06-gen-areas 필터 확인" if bad else ""))
     bad = q1(db, "SELECT count(*) FROM areas WHERE rings IS NULL OR rings='' OR rings='[]'")
     rec("FAIL" if bad else "PASS", "areas rings 무결성", f"빈/깨진 rings {bad:,}건" if bad else f"전 {total:,}건 polygon 보유")
     if has("area_rtree"):
@@ -280,6 +283,25 @@ def check_tiles(tiles_dir, style_path, config_path):
             rec(sev, f"mbtiles: {mb.name}", note)
         except Exception as e:
             rec("FAIL", f"mbtiles: {mb.name}", f"열기 실패 {e}")
+
+    # 행정구역 타일(admin.mbtiles, ADR-011) — 시도 집합이 법정동코드 현행과 같아야 한다(개편 미반영 빌드 차단).
+    adm = pathlib.Path(tiles_dir) / "admin.mbtiles"
+    if adm.is_file():
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from _common.region import CANON_SIDO as _CS, SIDO_SOURCE as _CSRC
+            con = sqlite3.connect(f"file:{adm}?mode=ro", uri=True)
+            md = dict(con.execute("SELECT name, value FROM metadata").fetchall()); con.close()
+            names = set(json.loads(md.get("cuvia_sido_names") or "[]"))
+            miss = sorted(set(_CS) - names); extra = sorted(names - set(_CS))
+            if miss or extra:
+                rec("FAIL", "행정구역 타일 시도 집합", f"법정동코드 현행({len(_CS)})과 불일치 — 누락 {miss} 잉여 {extra} (기준 원천={_CSRC})")
+            else:
+                rec("PASS", "행정구역 타일 시도 집합", f"{len(names)}/{len(_CS)} 일치 · 시군구 라벨 {md.get('cuvia_sigungu_count','?')} · 읍면동 {md.get('cuvia_emd_count','?')} (기준 원천={_CSRC})")
+        except Exception as e:
+            rec("FAIL", "행정구역 타일 시도 집합", f"검사 실패 {str(e)[:80]}")
+    else:
+        rec("WARN", "행정구역 타일", "admin.mbtiles 없음 — 행정 라벨이 OSM 표기로 남는다(admin_tiles 타깃 실행)")
 
     # 스타일이 참조하는 source-layer가 실제 mbtiles에 존재하는가 (안 보임 함정)
     if not (style_path and config_path and os.path.exists(style_path) and os.path.exists(config_path)):
@@ -479,6 +501,10 @@ def check_postgis():
         else:
             rec("FAIL" if n < lo else "PASS", f"{tbl} 행수",
                 f"{n:,} (임계 {lo:,}; 우회 {env_key}=0)" + ("" if n >= lo else " — 적재 미완 의심"))
+    # admin_boundary 코드 형식 — load_admin.sh 필터가 무력화되면 PIP 오염(2026-09-03 실측 306행 제거).
+    badc = scalar("SELECT count(*) FROM admin_boundary WHERE code !~ '^[0-9]+$'")
+    if badc is not None:
+        rec("FAIL" if badc else "PASS", "admin_boundary 코드 형식", f"비숫자 코드 {badc:,}행" + (" — 원천 오염(필지 레코드 혼입)" if badc else ""))
     poic = scalar("SELECT count(*) FROM poi")
     if poic is not None:
         rec("WARN" if poic == 0 else "PASS", "poi 행수", f"{poic:,}" + (" — 0건(POI 미적재?)" if poic == 0 else ""))

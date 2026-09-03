@@ -42,6 +42,33 @@ def _version_dyn(style):
             src["tiles"] = [t.replace("/dyn/", f"/dyn/v{_build_id}/", 1) if isinstance(t, str) and "/dyn/" in t else t for t in tiles]
 
 
+def _ensure_admin(style):
+    """행정구역 국가 레이어(ADR-011)를 가져온 스타일에도 보장한다(멱등).
+    Style Studio 내보내기가 admin 조각 이전 기본형에서 나왔으면 소스·레이어가 없고, OSM boundary(admin_level 4)·
+    place city 라벨이 살아 있어 국가 라벨과 겹친다. 조각(style/layers/admin-boundaries.json)을 그대로 주입하고
+    OSM 쪽 필터를 base.json 과 같게 맞춘다. 이미 있으면 손대지 않는다(사용자 편집 보존)."""
+    frag_path = root / "layers" / "admin-boundaries.json"
+    if not frag_path.is_file():
+        return
+    frag = load_json(frag_path)
+    ids = {L.get("id") for L in style.get("layers", [])}
+    style.setdefault("sources", {})
+    if "admin" not in style["sources"]:
+        style["sources"]["admin"] = frag["sources"]["admin"]
+    added = [L for L in frag["layers"] if L["id"] not in ids]
+    if added:
+        style["layers"].extend(added)
+    for L in style.get("layers", []):
+        if L.get("id") == "boundary" and L.get("source-layer") == "boundary" and L.get("filter") == ["<=", ["get", "admin_level"], 4]:
+            L["filter"] = ["<=", ["get", "admin_level"], 2]
+        if L.get("id") == "place-label" and L.get("source-layer") == "place":
+            f = L.get("filter")
+            if isinstance(f, list) and len(f) == 3 and f[0] == "in" and isinstance(f[2], list) and f[2][0] == "literal" and "city" in f[2][1]:
+                L["filter"] = ["in", ["get", "class"], ["literal", [c for c in f[2][1] if c != "city"]]]
+    if added or "admin" in style["sources"]:
+        print(f"  admin 레이어 보장: 추가 {len(added)}개 (국가 행정구역 라벨·경계, ADR-011)")
+
+
 imported = os.environ.get("STYLE_IMPORT")
 if imported and pathlib.Path(imported).is_file():
     # 가져온 스타일(완성형 style.json) 그대로 사용 — 조립/테마 적용 생략.
@@ -49,6 +76,7 @@ if imported and pathlib.Path(imported).is_file():
     if not isinstance(style.get("layers"), list) or not style["layers"]:
         sys.exit(f"가져온 스타일 형식 오류 ({imported}): layers 배열이 없습니다")
     _version_dyn(style)
+    _ensure_admin(style)
     out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"OK: {out} (가져온 스타일 사용 ← {imported} · layers={len(style['layers'])})")
 else:

@@ -873,7 +873,11 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
   'parcel-line':{label:'필지 경계',color:'line-color',opacity:'line-opacity',width:'line-width'},
   'poi-label':{label:'POI 라벨',color:'text-color',opacity:'text-opacity',theme:['poilabel']},
   'place-label':{label:'지명 라벨',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
-  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity',theme:['donglabel']}};
+  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity',theme:['donglabel']},
+  'admin-sido-label':{label:'시도 라벨(국가)',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'admin-sigungu-label':{label:'시군구 라벨(국가)',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'admin-sido-line':{label:'시도 경계(국가)',color:'line-color',opacity:'line-opacity'},
+  'admin-sigungu-line':{label:'시군구 경계(국가)',color:'line-color',opacity:'line-opacity'}};
  const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',rail:'철도',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
  const ovrKo=v=>OVRCLS[v]||v;
  let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[], ovrEdit=null;

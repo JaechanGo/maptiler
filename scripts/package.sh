@@ -30,7 +30,7 @@ GEOCODE_DB="$BUILD_HOME/geocode.sqlite"
 # 번들/QC 정본은 BUILD_HOME/tiles 이므로, repo/tiles 에만 있거나 더 최신인 산출물을 여기로 모은다
 # (APFS clonefile=즉시·무추가공간; 타 볼륨이면 일반 복사 폴백). → 번들이 5종을 빠짐없이 담는다.
 mkdir -p "$TILES_DIR"
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles admin.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ -s "$ROOT/tiles/$mb" ] && { [ ! -s "$TILES_DIR/$mb" ] || [ "$ROOT/tiles/$mb" -nt "$TILES_DIR/$mb" ]; }; then
     echo "  ↪ tiles 통합: tiles/$mb → $TILES_DIR/$mb"
     cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null \
@@ -83,7 +83,7 @@ fi
 # tileserver-config.json 이 참조하는 베이스 mbtiles 3종(korea/terrain/dong) — 하나라도 빠진 번들은
 # 폐쇄망에서 TileServer-GL 기동 실패/레이어 누락으로 이어지므로 패키징 단계에서 차단한다.
 # (buildings/poi/parcel 등 동적 레이어는 PostGIS→martin 서빙 — pg_dump 로 별도 번들, 위 WITH_POSTGIS)
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles admin.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ ! -s "$TILES_DIR/$mb" ]; then
     if [ "$mb" = terrain.mbtiles ]; then
       echo "오류: $TILES_DIR/$mb 없음 — 지형타일은 정적 산출물(빌드 그래프 'terrain' 단계=03-gen-terrain.sh)." >&2

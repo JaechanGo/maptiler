@@ -615,6 +615,11 @@ def TARGETS():
         #     `[ -d "$RI" ]` 로 쓰면 항상 거짓이 되어 리가 있어도 영구히 건너뛴다(조용한 실패).
         #   · --name-field RI_NM / --code-field RI_CD 는 **잠정값**이다. 리 SHP 반입 시 ogrinfo 로
         #     확정할 것. 틀리면 06-gen-areas.py:95 의 skip 카운터가 전건 skip 으로 자기진단한다.
+        # admin_tiles: 법정동 경계 + 법정동코드 → tiles/admin.mbtiles (시도·시군구·읍면동 경계·라벨, ADR-011).
+        #   OSM place/boundary 대신 국가 원천으로 지도 행정 라벨을 그린다 — 법정동코드가 바뀌면 자동 stale.
+        "admin_tiles": dict(label="행정구역 타일 (국가 원천 → admin.mbtiles)", dep=None,
+            cmd=[py, str(ROOT/"scripts/06b-gen-admin-tiles.py"), "--shp", str(BUILD_HOME/"sources/boundary/legal"),
+                 "--srs", "EPSG:5186", "--out", str(ROOT/"tiles/admin.mbtiles")]),
         "areas": dict(label="행정구역 경계 (법정동·행정동·리 → areas)", dep="geocode",
             cmd=["bash", "-c",
                  f'python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/legal"}" --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
@@ -647,7 +652,7 @@ def TARGETS():
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "route_graph", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "admin_tiles", "route_graph", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
 
 
 def _deps(t):
@@ -691,6 +696,8 @@ TFRESH = {
                 "out": [BUILD_HOME / "geocode.sqlite"]},
     # boundary_ri: 리 SHP 를 새로 올리거나 교체하면 areas 가 stale 로 떨어져 재적재된다.
     #   빠뜨리면 새 경계를 올려도 fresh 판정으로 조용히 건너뛴다.
+    "admin_tiles": {"src": ["boundary_legal", "lawd_code_v2"], "scripts": ["scripts/06b-gen-admin-tiles.py", "scripts/_common/region.py"],
+                    "out": [ROOT / "tiles/admin.mbtiles"]},
     "areas": {"src": ["boundary_legal", "boundary_admin", "boundary_ri"], "dep_art": ["geocode"],
               "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
     # juso_building_shp/dong: AL_D010 이 놓친 신축(신개발지구) 패치 원천(2026-08 편입).

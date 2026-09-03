@@ -42,6 +42,9 @@ for shp in "${SHPS[@]}"; do
   case "$shp" in *"(1)"*) echo "  (중복 제외) $(basename "$shp")"; continue;; esac
   lyr="$(basename "$shp" .shp)"
   code_sel="NULL"; [ -n "$CODEF" ] && code_sel="\"$CODEF\""
+  # [실측 2026-09-03] VWorld 202608 법정동 경계에 필지 레코드 306건(코드 '??1-84'·'1140-4구', 이름=PNU)이 섞여 admin_boundary 로
+  #   들어가 PIP 를 오염시켰다(최대 5.4km² 폴리곤). 코드가 숫자로만 된 행만 적재한다(리 10자리·읍면동 8자리 모두 통과).
+  code_where=""; [ -n "$CODEF" ] && code_where=" WHERE \"$CODEF\" GLOB '[0-9]*' AND \"$CODEF\" NOT GLOB '*[^0-9]*'"
   # ★ 확장은 반드시 ${simp[@]+"${simp[@]}"} 로 — bash 4.4 미만은 `set -u` 아래서 **빈 배열**의
   #   "${arr[@]}" 를 unbound variable 로 취급해 스크립트가 죽는다(4.4+ 에서 고쳐진 동작이라
   #   최신 개발기에선 재현되지 않는다). [실측 2026-09-02 .244/bash 4.2.46]
@@ -52,7 +55,7 @@ for shp in "${SHPS[@]}"; do
   SHAPE_ENCODING="$ENC" ogr2ogr -f PostgreSQL "$PG_OGR" "$shp" \
     -nln "$STG" -overwrite -lco GEOMETRY_NAME=geom -nlt PROMOTE_TO_MULTI \
     -s_srs "$SRS" -t_srs EPSG:4326 -skipfailures ${simp[@]+"${simp[@]}"} \
-    -dialect SQLITE -sql "SELECT \"$NAMEF\" AS name, $code_sel AS code, GEOMETRY FROM \"$lyr\""
+    -dialect SQLITE -sql "SELECT \"$NAMEF\" AS name, $code_sel AS code, GEOMETRY FROM \"$lyr\"${code_where}"
   # staging → admin_boundary (sido_cd = code 앞 2자리)
   ins=$(psql_q -c "
     INSERT INTO admin_boundary(level,code,name,sido_cd,geom)
