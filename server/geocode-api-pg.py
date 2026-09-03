@@ -648,6 +648,16 @@ def display_of(item, r=None):
     return {"main": name, "secondary": None, "full": name}   # 미정의 kind fallback
 
 
+def normalize_own(own, pip):
+    """비-addr 행의 자체 행정정보 정규화: ① 시도는 통합 표기 치환(remap_sido_name — 상가/인허가 원천이 '광주광역시'·
+    '전라남도' 를 그대로 싣는다. [실측 2026-09-03] 자체 컬럼 우선 규칙이 도입되며 표시가 '광주 서구' 로 되돌아갔다)
+    ② 시군구는 PIP 가 더 구체적일 때만 승급(refine_sigungu)."""
+    own = dict(own or {})
+    if own.get("sido"):
+        own["sido"] = remap_sido_name(own["sido"])
+    return refine_sigungu(own, pip)
+
+
 def refine_sigungu(own, pip):
     """자체 시군구가 PIP 시군구의 '덜 구체적인 접두'면 PIP 값으로 올린다.
     [실측 2026-09-03] 상가·인허가 원천은 시군구를 '부천시' 로 싣는데(구 폐지 2016→부활 2024 이전 표기 잔존),
@@ -1586,7 +1596,11 @@ def geocode(cur, q, limit, meta=None):
                 # — pg_trgm GIN 은 연속 3글자(trigram)가 있어야 인덱스를 탄다. 2자 infix '%서울%' 는 trigram 0개라
                 #   1570만행 Seq Scan(2~11초). 2자↓는 인덱스 타는 prefix 로 유지(기존 동작, 회귀 없음).
                 pat = f"%{t}%" if len(t) >= 3 else f"{t}%"
-                conds.append("(search_text ILIKE %s OR bld ILIKE %s)")
+                # 2자↓ 접두: 대소문자가 없는(ASCII 영문 없음) 토큰은 LIKE 로 btree(text_pattern_ops) 접두 인덱스를 탄다.
+                # ILIKE 는 btree 를 못 타고 trigram GIN 은 시도명 접두('서울%')에서 수백만 행 비트맵으로 3s timeout
+                # ([실측 2026-09-03] 서울·부산·광주·전남 단독 질의 전부 503). 영문 포함 토큰은 종전대로 ILIKE.
+                op = "LIKE" if (len(t) < 3 and not re.search(r"[A-Za-z]", t)) else "ILIKE"
+                conds.append(f"(search_text {op} %s OR bld {op} %s)")
                 args += [pat, pat]
         short_prefix = (not multi) and len(p["terms"][0]) < 3
         sql = _name_path_sql(conds, short_prefix)
@@ -1645,7 +1659,7 @@ def geocode(cur, q, limit, meta=None):
             # X6: 비-addr 자체 지역(OSM None) → admin_boundary PIP. 0행/미적재면 빈결과 → 지역 생략(graceful).
             pip = area_pip(cur, it["lon"], it["lat"])
             near = addr_at(cur, it["lon"], it["lat"]) or {}
-            own = refine_sigungu(own or {}, pip)
+            own = normalize_own(own or {}, pip)
             # 자체 컬럼 우선, 결측만 PIP 로 보강(nonaddr_structure 계약과 동일). display 도 같은 병합값을 본다.
             merged = {**pip, **{k: v for k, v in own.items() if v}}
             # address: 인근 도로명주소(road/parcel/zipcode/bld, 부착 유지) + structure(자체 행정정보 → PIP 보강).

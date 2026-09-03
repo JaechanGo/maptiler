@@ -137,5 +137,19 @@ class TestNarrowByRegion(unittest.TestCase):
         self.assertEqual(M.narrow_by_region(["11140101"], set(), set(), {"28"}), [])
 
 
+class TestNormalizeOwn(unittest.TestCase):
+    def test_legacy_sido_is_remapped_for_display(self):
+        M._HAS_SIDO_REMAP = True
+        own = M.normalize_own({"sido": "광주광역시", "sigungu": "서구"}, {"sido": "전남광주통합특별시", "sigungu": "서구"})
+        self.assertEqual(own["sido"], "전남광주통합특별시")
+        own = M.normalize_own({"sido": "전라남도", "sigungu": "순천시"}, {})
+        self.assertEqual(own["sido"], "전남광주통합특별시")
+
+    def test_current_sido_untouched_and_sigungu_refined(self):
+        own = M.normalize_own({"sido": "경기도", "sigungu": "부천시"}, {"sido": "경기도", "sigungu": "부천시 원미구"})
+        self.assertEqual((own["sido"], own["sigungu"]), ("경기도", "부천시 원미구"))
+        self.assertEqual(M.normalize_own({}, {"sido": "경기도"}), {})
+
+
 if __name__ == "__main__":
     unittest.main()

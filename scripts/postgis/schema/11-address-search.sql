@@ -9,6 +9,13 @@ CREATE INDEX IF NOT EXISTS address_search_trgm ON address USING gin (search_text
 -- 없으면 OR 가 BitmapOr 로 안 묶여 1570만행 Seq Scan(구청/역 이름검색 2~11초). load_geocode.py 와 동기 유지.
 CREATE INDEX IF NOT EXISTS address_bld_trgm ON address USING gin (bld gin_trgm_ops);
 
+-- 2자↓ 접두('서울%'·'강남%') 전용 btree(text_pattern_ops) — [실측 2026-09-03] trigram GIN 은 2자 접두에서
+-- '  서'·' 서울' 두 트라이그램으로 비트맵을 만들어 시도명 접두는 수백만 행을 물고(재검사 폭주) 3s timeout,
+-- 플래너가 LIMIT 과 결합해 Seq Scan 을 고르기도 한다(강남% 16s). btree 범위스캔이면 LIMIT 에서 즉시 멈춘다.
+-- API 는 한글 전용 2자↓ 토큰에 LIKE 't%'(대소문자 무관) 로 이 인덱스를 탄다. load_geocode.py 와 동기 유지.
+CREATE INDEX IF NOT EXISTS address_search_prefix_idx ON address (search_text text_pattern_ops);
+CREATE INDEX IF NOT EXISTS address_bld_prefix_idx    ON address (bld text_pattern_ops);
+
 -- 도로명주소 경로 — road_norm 정확 + 본번/부번. addr 만(전체의 대부분이지만 partial 로 명시)
 CREATE INDEX IF NOT EXISTS address_road_addr_idx
     ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
