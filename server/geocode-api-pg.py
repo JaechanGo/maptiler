@@ -26,6 +26,7 @@ DSN = os.environ.get("DATABASE_URL") or (
     f"user={os.environ.get('PGUSER','cuvia')} dbname={os.environ.get('PGDATABASE','cuvia')} "
     f"password={os.environ.get('PGPASSWORD','cuvia')}")
 ADDR_CAP = 400
+SHORT_PREFIX_CAP = 120   # 2자↓ 접두 이름검색 후보 상한(힙 I/O 절감, _name_path_sql 참조)
 # T047 §4.2 — 지번 근사 매칭(같은 본번의 다른 부번) 점수. 정확 매칭 200 보다 반드시 낮다.
 # 근사는 정확 매칭이 전부 실패한 뒤에만 열리므로 실제로 200 과 경합하지는 않지만,
 # 값 자체가 "이건 물어본 번지가 아니다"를 표현한다.
@@ -227,10 +228,12 @@ def _name_path_sql(conds, short_prefix):
         m = re.match(r"\(search_text (I?LIKE) %s OR bld (I?LIKE) %s\)", conds[0]) if len(conds) == 1 else None
         if m:
             op = m.group(1)
+            # 후보 상한은 SHORT_PREFIX_CAP: 접두 2자는 후보가 이름순 임의 400건이라 400→120 으로 줄여도 상위 노출(limit≤20)에
+            # 영향이 없고, 힙 무작위 읽기(HDD 콜드 캐시·적재 부하 시 건당 ~5ms)가 그만큼 준다([실측] 400건 1.9s → 120건).
             arm = ("SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
-                   "WHERE kind <> 'addr' AND geom IS NOT NULL AND {col} " + op + f" %s LIMIT {ADDR_CAP}")
+                   "WHERE kind <> 'addr' AND geom IS NOT NULL AND {col} " + op + f" %s LIMIT {SHORT_PREFIX_CAP}")
             return ("SELECT * FROM ((" + arm.format(col="search_text") + ") UNION ALL (" + arm.format(col="bld")
-                    + f")) u LIMIT {ADDR_CAP}")
+                    + f")) u LIMIT {SHORT_PREFIX_CAP}")
         return ("WITH c AS MATERIALIZED (SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
                 f"WHERE {where}) SELECT * FROM c LIMIT {ADDR_CAP}")
     return f"SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address WHERE {where} LIMIT {ADDR_CAP}"

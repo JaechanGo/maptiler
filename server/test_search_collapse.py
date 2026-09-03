@@ -96,7 +96,7 @@ class TestNamePathSql(unittest.TestCase):
         self.assertTrue(sql.startswith("SELECT * FROM (("))
         self.assertIn("search_text LIKE %s LIMIT", sql); self.assertIn("bld LIKE %s LIMIT", sql)
         self.assertEqual(sql.count("%s"), 2)
-        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.SHORT_PREFIX_CAP}"))
         # 인식 못 하는 형태(다중 cond)는 CTE 폴백
         sql2 = M._name_path_sql(["a", "b"], True)
         self.assertTrue(sql2.startswith("WITH c AS MATERIALIZED ("))
