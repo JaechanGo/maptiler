@@ -139,7 +139,7 @@ class TestNarrowByRegion(unittest.TestCase):
 
 class TestNormalizeOwn(unittest.TestCase):
     def test_legacy_sido_is_remapped_for_display(self):
-        M._HAS_SIDO_REMAP = True
+        M._HAS_SIDO_REMAP = False    # 치환표 0행(통합 코드 DB) 이어도 표기 정규화는 동작해야 한다
         own = M.normalize_own({"sido": "광주광역시", "sigungu": "서구"}, {"sido": "전남광주통합특별시", "sigungu": "서구"})
         self.assertEqual(own["sido"], "전남광주통합특별시")
         own = M.normalize_own({"sido": "전라남도", "sigungu": "순천시"}, {})

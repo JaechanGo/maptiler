@@ -653,8 +653,14 @@ def normalize_own(own, pip):
     '전라남도' 를 그대로 싣는다. [실측 2026-09-03] 자체 컬럼 우선 규칙이 도입되며 표시가 '광주 서구' 로 되돌아갔다)
     ② 시군구는 PIP 가 더 구체적일 때만 승급(refine_sigungu)."""
     own = dict(own or {})
-    if own.get("sido"):
-        own["sido"] = remap_sido_name(own["sido"])
+    sd = (own.get("sido") or "").strip()
+    # _HAS_SIDO_REMAP(코드 치환 스위치)에 묶지 않는다: DB 가 통합 코드(12)로 재빌드되면 치환표(lawd_sido_remap)는
+    # 0행이 되어 스위치가 OFF 지만, 상가/인허가 원천이 실은 옛 시도 **표기**는 그대로 남아 있다(2026-09-03 실측
+    # '광주시청' biz → '광주 서구'). 표기 정규화는 원천 텍스트 문제라 코드 치환 유무와 무관하게 항상 적용한다.
+    if sd in SIDO_MERGED_OLD:
+        own["sido"] = SIDO_MERGED_NEW
+    elif sd in SIDO_MERGED_OLD_ABBR:
+        own["sido"] = SIDO_MERGED_ABBR
     return refine_sigungu(own, pip)
 
 
