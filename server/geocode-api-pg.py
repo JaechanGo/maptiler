@@ -833,6 +833,56 @@ def _check_tables(cur):
     return [r["t"] for r in cur.fetchall()]
 
 
+# ---- 지역 토큰 사전(다중 토큰 이름검색용) — lawd_dong 의 시군구·읍면동 명(기동 1회, fail-open) ----------
+# [실측 2026-09-03] '부천 초등학교' 같은 2어절 질의는 지역 토큰을 5개 컬럼 접두 OR 로 풀면 플래너가 교집합(BitmapAnd)을
+# 못 잡고 '초등학교' 전체 행(수천~수만)을 힙에서 읽어 콜드 캐시에서 3s timeout(503). 토큰이 사전의 시군구/읍면동/시도
+# 이름에 해당하면 `sigungu = ANY(...)` 같은 정확 매칭으로 바꿔 btree/GIN 등가 비트맵과 교집합이 잡히게 한다.
+_REGION_SGG = frozenset(); _REGION_EMD = frozenset()
+REGION_EQ_MAX = 80   # 한 토큰이 사전에서 뽑는 이름 수 상한(1~2자 접두가 수백 개로 번지는 것을 막는다)
+
+
+def _load_region_names(cur):
+    global _REGION_SGG, _REGION_EMD
+    try:
+        cur.execute("SELECT DISTINCT sigungu FROM lawd_dong WHERE sigungu IS NOT NULL AND sigungu <> ''")
+        sgg = {r["sigungu"].strip() for r in cur.fetchall()}
+        cur.execute("SELECT DISTINCT emd FROM lawd_dong WHERE emd IS NOT NULL AND emd <> ''")
+        emd = {r["emd"].strip() for r in cur.fetchall()}
+        _REGION_SGG, _REGION_EMD = frozenset(sgg), frozenset(emd)
+    except Exception:
+        _REGION_SGG, _REGION_EMD = frozenset(), frozenset()   # fail-open → _region_cond 폴백
+    return len(_REGION_SGG), len(_REGION_EMD)
+
+
+def region_eq_cond(t):
+    """지역 토큰 t 를 사전 이름의 정확 목록으로 해석한 (SQL, args) — 사전에 없으면 None(호출측이 _region_cond 폴백).
+    시도: 정식명/약칭 접두(통합 시도는 구 표기까지), 시군구: 이름 접두 또는 어절 접두('원미'→'부천시 원미구'),
+    읍면동: 이름 접두. 2자 미만은 해석하지 않는다."""
+    t = (t or "").strip()
+    if len(t) < 2:
+        return None
+    sido = set()
+    for alt in sido_input_alias(t):
+        for code, names in SIDO_NM.items():
+            full = SIDO_FULL.get(code, "")
+            if any(n == alt or n.startswith(alt) for n in names) or (full and full.startswith(alt)):
+                sido.add(full)
+        for full in SIDO_FULL.values():
+            if full and full.startswith(alt):
+                sido.add(full)
+    if SIDO_MERGED_NEW in sido:
+        sido.update(SIDO_MERGED_OLD)          # 상가/인허가 행의 옛 시도 표기까지
+    sgg = sorted(n for n in _REGION_SGG if n.startswith(t) or any(w.startswith(t) for w in n.split()))[:REGION_EQ_MAX]
+    emd = sorted(n for n in _REGION_EMD if n.startswith(t))[:REGION_EQ_MAX]
+    if not (sido or sgg or emd):
+        return None
+    conds, args = [], []
+    if sido: conds.append("sido = ANY(%s::text[])"); args.append(sorted(sido))
+    if sgg:  conds.append("sigungu = ANY(%s::text[])"); args.append(sgg)
+    if emd:  conds.append("emd = ANY(%s::text[])"); args.append(emd)
+    return "(" + " OR ".join(conds) + ")", args
+
+
 def _probe_lawd_ri(cur):
     """lawd_ri 존재 여부 1회 평가 → 전역 캐시(_HAS_LAWD_RI).
 
@@ -1630,7 +1680,11 @@ def geocode(cur, q, limit, meta=None):
             if multi:   # search_text(이름+도로명+지번, trgm 인덱스) + 지역 토큰
                 # §B-3 입력 역치환. 원토큰은 _region_cond 가 항상 첫 별칭으로 남기므로 search_text/bld
                 #   매칭(상호명이 우연히 '전남광주…'로 시작하는 경우 포함)은 그대로 유지된다.
-                c, a = _region_cond(("search_text", "bld", "sido", "sigungu", "emd"), t)
+                # 지역 사전에 있는 토큰 → 정확 목록(sido/sigungu/emd = ANY), 그 외(이름 토큰) → search_text·bld 2 arm 만.
+                # [실측 2026-09-03] 이름 토큰까지 5컬럼 OR 로 풀면 플래너가 BitmapOr 5개를 비싸게 보고 교집합을 포기해
+                #   지역 비트맵 13만 행을 힙에서 훑는다(콜드 3s+ 503). 2 arm 이면 BitmapAnd(지역 ∧ 이름) 147ms.
+                rc = region_eq_cond(t)
+                c, a = rc if rc else _region_cond(("search_text", "bld"), t)
                 conds.append(c); args += a
             else:       # 단일 토큰 = search_text/건물명. 3자+만 중간검색('%t%'), 2자↓는 prefix('t%')
                 # — pg_trgm GIN 은 연속 3글자(trigram)가 있어야 인덱스를 탄다. 2자 infix '%서울%' 는 trigram 0개라
@@ -1905,6 +1959,8 @@ def _boot_check():
                 has_remap = _load_sido_remap(cur)   # 안 A 치환표(부재 시 46/29 현행 유지)
                 has_sgg = _load_sgg_remap(cur)      # T026 인천 치환표(부재 시 중/동/서구 현행 유지)
                 n_ri_emds = _load_ri_emds(cur)      # A-5 관측용 리 보유 읍면동 집합
+                n_sgg, n_emd = _load_region_names(cur)   # 다중 토큰 지역 사전(시군구·읍면동 이름)
+                print(f"geocode-api-pg: region dict: sigungu={n_sgg} emd={n_emd}", file=sys.stderr)
             _DICT_STATE = "present" if has_ri else "absent"
             retried = "" if attempts == 1 else f" (after {attempts} attempts)"
             print(f"geocode-api-pg: lawd_ri: {_DICT_STATE}{retried}", file=sys.stderr)

@@ -180,5 +180,30 @@ class TestSidoInputAlias(unittest.TestCase):
         self.assertEqual(M.sido_input_alias(""), ("",))
 
 
+class TestRegionEqCond(unittest.TestCase):
+    def setUp(self):
+        M._REGION_SGG = frozenset({"부천시 원미구", "부천시 소사구", "부천시 오정구", "강남구", "수원시 영통구"})
+        M._REGION_EMD = frozenset({"상동", "역삼동", "중동", "송정동"})
+
+    def test_sigungu_prefix_and_word_prefix(self):
+        c, a = M.region_eq_cond("부천")
+        self.assertIn("sigungu = ANY(%s::text[])", c); self.assertEqual(a[0], ["부천시 소사구", "부천시 오정구", "부천시 원미구"])
+        c2, a2 = M.region_eq_cond("원미")
+        self.assertEqual(a2[0], ["부천시 원미구"])
+
+    def test_emd_and_sido(self):
+        c, a = M.region_eq_cond("역삼")
+        self.assertIn("emd = ANY", c); self.assertEqual(a[0], ["역삼동"])
+        c3, a3 = M.region_eq_cond("서울")
+        self.assertIn("sido = ANY", c3); self.assertIn("서울특별시", a3[0])
+
+    def test_merged_sido_includes_old_names(self):
+        c, a = M.region_eq_cond("광주")
+        self.assertIn("sido = ANY", c); self.assertTrue({"전남광주통합특별시", "광주광역시", "전라남도"} <= set(a[0]))
+
+    def test_unknown_token_returns_none(self):
+        self.assertIsNone(M.region_eq_cond("홍대")); self.assertIsNone(M.region_eq_cond("이"))
+
+
 if __name__ == "__main__":
     unittest.main()
