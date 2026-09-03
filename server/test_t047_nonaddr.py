@@ -114,7 +114,7 @@ class GeoCursor:
             self._last = "road_rows"
         elif "bld ILIKE" in s:
             self._last = "bld_rows"
-        elif "search_text ILIKE" in s:
+        elif "search_text ILIKE" in s or "kind='addr' AND emd = %s" in s:   # 지번 폴백(2026-09-03 emd+jibun 인덱스 경로 포함)
             self._last = "jibun_rows"
         else:
             self._last = "empty"

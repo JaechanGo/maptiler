@@ -16,6 +16,8 @@ CREATE INDEX IF NOT EXISTS address_bld_trgm ON address USING gin (bld gin_trgm_o
 -- API 는 한글 전용 2자↓ 토큰에 LIKE 't%' 두 arm 을 UNION ALL + LIMIT 으로 돌린다. load_geocode.py 와 동기 유지.
 CREATE INDEX IF NOT EXISTS address_search_prefix_na_idx ON address (search_text text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
 CREATE INDEX IF NOT EXISTS address_bld_prefix_na_idx    ON address (bld text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
+-- 지번 폴백 경로(동명 + 번지) — emd 정확 + jibun 정확/접두. [실측 2026-09-03] search_text trgm 은 동명 전체 힙 접근으로 3~6s.
+CREATE INDEX IF NOT EXISTS address_emd_jibun_idx ON address (emd, jibun text_pattern_ops) WHERE kind = 'addr';
 
 -- 도로명주소 경로 — road_norm 정확 + 본번/부번. addr 만(전체의 대부분이지만 partial 로 명시)
 CREATE INDEX IF NOT EXISTS address_road_addr_idx

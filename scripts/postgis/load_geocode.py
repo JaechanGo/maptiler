@@ -79,6 +79,7 @@ DROP INDEX IF EXISTS address_search_trgm;
 DROP INDEX IF EXISTS address_bld_trgm;
 DROP INDEX IF EXISTS address_search_prefix_na_idx;
 DROP INDEX IF EXISTS address_bld_prefix_na_idx;
+DROP INDEX IF EXISTS address_emd_jibun_idx;
 DROP INDEX IF EXISTS address_road_addr_idx;
 DROP INDEX IF EXISTS address_addr_geom_gix;
 DROP INDEX IF EXISTS address_region_idx;
@@ -120,6 +121,7 @@ CREATE INDEX IF NOT EXISTS address_search_trgm   ON address USING gin (search_te
 CREATE INDEX IF NOT EXISTS address_bld_trgm      ON address USING gin (bld gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS address_search_prefix_na_idx ON address (search_text text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
 CREATE INDEX IF NOT EXISTS address_bld_prefix_na_idx    ON address (bld text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
+CREATE INDEX IF NOT EXISTS address_emd_jibun_idx ON address (emd, jibun text_pattern_ops) WHERE kind = 'addr';
 CREATE INDEX IF NOT EXISTS address_road_addr_idx ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
 CREATE INDEX IF NOT EXISTS address_addr_geom_gix ON address USING gist (geom) WHERE kind = 'addr';
 CREATE INDEX IF NOT EXISTS address_region_idx    ON address (sigungu, emd);

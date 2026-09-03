@@ -155,5 +155,19 @@ class TestNormalizeOwn(unittest.TestCase):
         self.assertEqual(M.normalize_own({}, {"sido": "경기도"}), {})
 
 
+class TestRegionCondShortToken(unittest.TestCase):
+    def test_two_char_korean_uses_word_prefix_like(self):
+        c, a = M._region_cond(("search_text", "sigungu"), "부천")
+        self.assertNotIn("ILIKE", c); self.assertIn("search_text LIKE %s", c)
+        self.assertEqual(a[:4], ["부천%", "% 부천%", "부천%", "% 부천%"])
+        self.assertEqual(c.count("%s"), len(a))
+
+    def test_three_char_or_ascii_keeps_infix_ilike(self):
+        c, a = M._region_cond(("search_text",), "이마트")
+        self.assertIn("search_text ILIKE %s", c); self.assertEqual(a, ["%이마트%"])
+        c2, a2 = M._region_cond(("search_text",), "CU")
+        self.assertIn("ILIKE", c2); self.assertEqual(a2, ["%CU%"])
+
+
 if __name__ == "__main__":
     unittest.main()

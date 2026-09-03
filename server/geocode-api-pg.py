@@ -366,6 +366,15 @@ def _region_cond(cols, t):
     conds/args 는 동일한 (별칭, 컬럼) 순회 순서로 만들어야 바인딩이 어긋나지 않는다.
     """
     alts = sido_input_alias(t)
+    if len(t) < 3 and not re.search(r"[A-Za-z]", t):
+        # 2자↓ 한글 토큰: infix '%부천%' 는 trigram 0개라 인덱스를 못 타고(5개 컬럼 × 500만 행 Seq Scan → 3s+ 503),
+        # '단어 접두'(t% / % t%)는 패딩 트라이그램('  부',' 부천')으로 GIN 을 탄다 — '이마트 부천' 6.4s→0.2s [실측 2026-09-03].
+        # 의미는 '부분 문자열' → '단어 시작' 으로 좁아지지만 지역·상호 어절은 단어 단위라 실사용 차이가 없다('스타벅스 홍대점' ✓).
+        conds = []; args = []
+        for a in alts:
+            for c in cols:
+                conds += [f"{c} LIKE %s", f"{c} LIKE %s"]; args += [f"{a}%", f"% {a}%"]
+        return "(" + " OR ".join(conds) + ")", args
     conds = [f"{c} ILIKE %s" for a in alts for c in cols]
     args = [f"%{a}%" for a in alts for _ in cols]
     return "(" + " OR ".join(conds) + ")", args
@@ -1523,12 +1532,15 @@ def geocode(cur, q, limit, meta=None):
     if not results and p["dong"] and p["house"]:
         dong = p["dong"]; h = p["house"]; sep = "산 " if p["san"] else " "
         region = [t for t in p["terms"] if t != dong]
-        exact = f"%{sep}{h[0]}-{h[1]}" if h[1] else f"%{sep}{h[0]}"
+        # [실측 2026-09-03] 종전 search_text ILIKE '%상동%' AND '% 543' 은 동명 전체(3.7만 행)+숫자 트라이그램 비트맵을
+        #   힙에서 긁어 HDD 콜드 캐시에서 3~6s(503). jibun 컬럼은 '법정동 [산 ]본번[-부번]' 정규 표기라
+        #   (emd, jibun) 부분 btree(address_emd_jibun_idx, kind='addr')로 정확·접두 매칭하면 0.2ms.
+        exact = f"{dong} {sep}{h[0]}-{h[1]}" if h[1] else f"{dong} {sep}{h[0]}"
         if h[1]:
-            num_conds = "search_text ILIKE %s"; nums = [exact]
+            num_conds = "jibun = %s"; nums = [exact]
         else:
-            num_conds = "(search_text ILIKE %s OR search_text ILIKE %s)"
-            nums = [exact, f"%{sep}{h[0]}-%"]
+            num_conds = "(jibun = %s OR jibun LIKE %s)"
+            nums = [exact, f"{exact}-%"]
         reg_sql = ""; reg_args = []
         for t in region:
             # §B-3 입력 역치환: 토큰별 조건은 AND 로 이어붙으므로, 신 시도명 하나가 안 맞으면 전체가
@@ -1538,9 +1550,9 @@ def geocode(cur, q, limit, meta=None):
             reg_args += a
         cur.execute(
             "SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
-            f"WHERE kind='addr' AND search_text ILIKE %s AND {num_conds}{reg_sql} "
-            f"ORDER BY (search_text ILIKE %s) DESC, sigungu, emd, id LIMIT {ADDR_CAP}",
-            (f"%{dong}%", *nums, *reg_args, exact))
+            f"WHERE kind='addr' AND emd = %s AND {num_conds}{reg_sql} "
+            f"ORDER BY (jibun = %s) DESC, sigungu, emd, id LIMIT {ADDR_CAP}",
+            (dong, *nums, *reg_args, exact))
         for r in cur.fetchall():
             # 가산도 같은 별칭 규칙을 써야 한다 — WHERE 는 통과했는데 가산이 0 이면 신 시도명으로
             #   검색한 결과만 순위가 밀린다(조용한 품질 저하).
