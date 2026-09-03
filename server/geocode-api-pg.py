@@ -221,6 +221,16 @@ def _name_path_sql(conds, short_prefix):
     (강남 747ms·상 92ms·시청 197ms·역 2.2s). 3자+ infix 는 종전 계획이 정상이라 그대로 둔다."""
     where = "kind <> 'addr' AND geom IS NOT NULL AND " + " AND ".join(conds)
     if short_prefix:
+        # [2차 실측 2026-09-03] CTE+BitmapOr 는 접두 구간의 주소행(강남대로…)까지 힙을 긁어 4s. 두 arm 을 각각
+        # 부분 btree(address_*_prefix_na_idx: kind<>'addr' AND geom IS NOT NULL) Index Scan + LIMIT 으로 돌리면
+        # 400건에서 즉시 멈춘다. 단일 토큰이므로 conds 는 "(search_text OP %s OR bld OP %s)" 하나, args 는 [pat, pat].
+        m = re.match(r"\(search_text (I?LIKE) %s OR bld (I?LIKE) %s\)", conds[0]) if len(conds) == 1 else None
+        if m:
+            op = m.group(1)
+            arm = ("SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
+                   "WHERE kind <> 'addr' AND geom IS NOT NULL AND {col} " + op + f" %s LIMIT {ADDR_CAP}")
+            return ("SELECT * FROM ((" + arm.format(col="search_text") + ") UNION ALL (" + arm.format(col="bld")
+                    + f")) u LIMIT {ADDR_CAP}")
         return ("WITH c AS MATERIALIZED (SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
                 f"WHERE {where}) SELECT * FROM c LIMIT {ADDR_CAP}")
     return f"SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address WHERE {where} LIMIT {ADDR_CAP}"

@@ -92,10 +92,14 @@ class TestRefineSigungu(unittest.TestCase):
 
 class TestNamePathSql(unittest.TestCase):
     def test_short_prefix_is_materialized(self):
-        sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], True)
-        self.assertTrue(sql.startswith("WITH c AS MATERIALIZED ("))
-        self.assertIn("kind <> 'addr' AND geom IS NOT NULL AND (search_text ILIKE %s OR bld ILIKE %s)", sql)
+        sql = M._name_path_sql(["(search_text LIKE %s OR bld LIKE %s)"], True)
+        self.assertTrue(sql.startswith("SELECT * FROM (("))
+        self.assertIn("search_text LIKE %s LIMIT", sql); self.assertIn("bld LIKE %s LIMIT", sql)
+        self.assertEqual(sql.count("%s"), 2)
         self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+        # 인식 못 하는 형태(다중 cond)는 CTE 폴백
+        sql2 = M._name_path_sql(["a", "b"], True)
+        self.assertTrue(sql2.startswith("WITH c AS MATERIALIZED ("))
 
     def test_long_or_multi_unchanged(self):
         sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], False)
