@@ -356,7 +356,14 @@ def sido_input_alias(t):
     _HAS_SIDO_REMAP 에 묶지 않는다: 입력 관용은 치환표 유무와 무관하게 해로울 게 없다.
     """
     if not t: return (t,)
-    return (t,) + SIDO_MERGED_OLD if t.startswith(SIDO_MERGED_ABBR) else (t,)
+    if t.startswith(SIDO_MERGED_ABBR):
+        return (t,) + SIDO_MERGED_OLD
+    # 구 표기·약칭('광주'·'전남'·'광주광역시'·'전라남도') → 통합 표기도 후보에 넣는다. DB 가 통합 코드(12)로 재빌드되면
+    # sido 텍스트가 '전남광주통합특별시' 라서, '광주 서구 치평동 1200' 의 '광주' 는 infix 시절엔 시도 문자열 가운데에
+    # 우연히 걸렸지만 단어 접두 매칭(2자 토큰)에선 0건이 된다([실측 2026-09-03]). 통합 표기를 붙여 양방향을 닫는다.
+    if t in SIDO_MERGED_OLD_ABBR or t in SIDO_MERGED_OLD:
+        return (t, SIDO_MERGED_NEW, SIDO_MERGED_ABBR)
+    return (t,)
 
 
 def _region_cond(cols, t):
@@ -1389,7 +1396,9 @@ def geocode(cur, q, limit, meta=None):
         #   {12,46} 이 되므로, 확장 없이는 광주 소재 동이 전부 탈락한다(부분적 0건 = 더 나쁜 회귀).
         for _new, _olds in SIDO_ALIAS_CODES.items():
             if _new in sido_hit:
-                sido_hit.discard(_new); sido_hit.update(_olds)
+                sido_hit.update(_olds)            # 신 → 구(안 A: DB 가 46·29 인 경우)
+            if any(o in sido_hit for o in _olds):
+                sido_hit.add(_new)                # 구 → 신(DB 가 통합 코드 12 로 재빌드된 경우) — [실측 2026-09-03] '광주 서구 치평동 1200' 0건
         emd8_hit = set()
         if region and cds and _HAS_SGG_REMAP:
             cur.execute("SELECT btrim(old_emd8) AS o, btrim(new_emd8) AS n FROM lawd_sgg_remap "   # char(8) 공백패딩 제거

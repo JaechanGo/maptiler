@@ -169,5 +169,16 @@ class TestRegionCondShortToken(unittest.TestCase):
         self.assertIn("ILIKE", c2); self.assertEqual(a2, ["%CU%"])
 
 
+class TestSidoInputAlias(unittest.TestCase):
+    def test_old_abbr_gets_merged_names(self):
+        self.assertEqual(M.sido_input_alias("광주"), ("광주", M.SIDO_MERGED_NEW, M.SIDO_MERGED_ABBR))
+        self.assertEqual(M.sido_input_alias("전라남도"), ("전라남도", M.SIDO_MERGED_NEW, M.SIDO_MERGED_ABBR))
+
+    def test_new_abbr_gets_old_names_and_others_untouched(self):
+        self.assertEqual(M.sido_input_alias("전남광주")[1:], M.SIDO_MERGED_OLD)
+        self.assertEqual(M.sido_input_alias("부천"), ("부천",))
+        self.assertEqual(M.sido_input_alias(""), ("",))
+
+
 if __name__ == "__main__":
     unittest.main()
