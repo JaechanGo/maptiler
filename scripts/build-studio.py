@@ -10,6 +10,7 @@
 """
 import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
 import errno  # _swap_dir 의 크로스 디바이스(EXDEV) 판별
+import socket  # _ensure_postgis 의 TCP 선점검
 import pty   # 자식 프로세스를 TTY 에 붙여 외부 도구의 블록버퍼링을 막고 로그를 실시간 스트리밍
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -830,6 +831,69 @@ def _restart_tileserver():
         return f"[tileserver] 재시작 실패(수동 docker restart 필요): {e}"
 
 
+PG_TARGETS = ("load_postgis", "qc", "package")   # PostGIS 접속을 전제로 하는 타깃(package 는 WITH_POSTGIS 덤프)
+
+
+def _pg_endpoint():
+    return os.environ.get("PGHOST", "localhost"), int(os.environ.get("PGPORT", "5433"))
+
+
+def _pg_port_open(timeout=3):
+    host, port = _pg_endpoint()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _pg_ready(compose):
+    """컨테이너 안의 pg_isready 로 '접속 수락' 상태까지 확인(포트만 열린 복구 중 상태 배제)."""
+    try:
+        r = subprocess.run(["docker", "compose", "-f", str(compose), "exec", "-T", "postgis",
+                            "pg_isready", "-U", os.environ.get("PGUSER", "cuvia"), "-d", os.environ.get("PGDATABASE", "cuvia")],
+                           capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "COMPOSE_PROFILES": "postgis"})
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_postgis(emit, wait_s=180):
+    """PostGIS 를 쓰는 타깃 실행 전, 빌드 호스트의 compose postgis 가 내려가 있으면 올리고 접속 가능할 때까지 기다린다.
+    [실측 2026-09-04] 대화형 셸에서 서빙 컨테이너를 통째로 내린 직후 load_postgis 가 큐에서 나와 7단계 연속 PQconnectdb 실패로
+    error → qc·package 까지 스킵. 복구는 `compose start postgis` 하나라 스튜디오가 스스로 한다. 끝내 접속 불가면 False(실행 안 함)."""
+    if _pg_port_open():
+        return True
+    host, port = _pg_endpoint()
+    compose = ROOT / "server" / "docker-compose.yml"
+    if host not in ("localhost", "127.0.0.1") or not compose.exists():
+        emit(f"[postgis] {host}:{port} 접속 불가 — 원격/외부 PostGIS 는 스튜디오가 기동하지 못한다. 수동 기동 후 재실행")
+        return False
+    emit(f"[postgis] {host}:{port} 접속 불가 — compose postgis 기동 시도")
+    try:
+        env = {**os.environ, "COMPOSE_PROFILES": "postgis"}
+        r = subprocess.run(["docker", "compose", "-f", str(compose), "start", "postgis"],
+                           capture_output=True, text=True, timeout=120, env=env)
+        if r.returncode != 0:   # 컨테이너 자체가 없으면(down 이후) up -d
+            r = subprocess.run(["docker", "compose", "-f", str(compose), "up", "-d", "postgis"],
+                               capture_output=True, text=True, timeout=300, env=env)
+        if r.returncode != 0:
+            emit(f"[postgis] 기동 실패: {(r.stderr or r.stdout).strip()[-300:]}")
+            return False
+    except Exception as e:
+        emit(f"[postgis] 기동 실패: {e}")
+        return False
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        if _pg_port_open() and _pg_ready(compose):
+            emit(f"[postgis] 기동 확인({time.time() - t0:.0f}s) — 계속")
+            return True
+        time.sleep(4)
+    emit(f"[postgis] {wait_s}s 내 접속 불가 — 실행하지 않음(docker logs server-postgis-1 확인)")
+    return False
+
+
 def mark_fresh(kind, reason):
     """타깃 서명만 현재값으로 기록 — 산출물이 실제로 최신인데 스크립트 로그/주석 변경 등으로 stale 판정된 경우의 우회.
     사유를 상태에 남긴다(무근거 우회 방지: UI 가 사유를 필수로 받는다)."""
@@ -1073,6 +1137,9 @@ class Manager:
                                          "서빙 컨테이너·jenkins 를 잠시 내리고 돌리는 편이 빠르다(완료 후 재기동).")
                 except Exception:
                     pass
+            if kind in PG_TARGETS and not (kind == "package" and env.get("WITH_POSTGIS") == "0") \
+                    and not _ensure_postgis(lambda m: self._emit(kind, m)):
+                raise RuntimeError("PostGIS 접속 불가 — 실행하지 않음")
             rc = self._stream(kind, cmd, env)
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0

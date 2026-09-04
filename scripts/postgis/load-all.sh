@@ -12,6 +12,12 @@ BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
 STEPS="${STEPS:-schema admin parcel building geocode lawd facility}"
 has(){ case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
 run(){ echo; echo "━━ $* ━━"; "$@"; }
+# 접속 선검사 — PostGIS 가 내려가 있으면 단계마다 PQconnectdb 실패만 누적된다([실측 2026-09-04] 7단계 연속 ✗ 뒤 error).
+# 부분 적재·TRUNCATE 가 섞이기 전에 즉시 중단(종료코드 2). 스튜디오는 실행 전 _ensure_postgis 로 먼저 올린다.
+if ! psql_q -c "SELECT 1" >/dev/null 2>&1; then
+  echo "✗ PostGIS 접속 불가(${PGHOST}:${PGPORT}) — 기동 후 재실행: cd server && COMPOSE_PROFILES=postgis docker compose start postgis" >&2
+  exit 2
+fi
 fail=0   # 적재 단계 실패 누적 — 하나라도 실패하면 종료코드 1(빌드그래프가 단계 실패로 인지). set -e 미사용이라 직접 추적.
 
 # 0) 스키마(멱등)
