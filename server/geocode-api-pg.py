@@ -237,6 +237,11 @@ def _name_path_sql(conds, short_prefix):
                     + f")) u LIMIT {SHORT_PREFIX_CAP}")
         return ("WITH c AS MATERIALIZED (SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
                 f"WHERE {where}) SELECT * FROM c LIMIT {ADDR_CAP}")
+    if len(conds) == 1:
+        # 단일 토큰 infix('%경기도%'·'%아파트%')도 CTE — 매칭이 수십만~백만 행이면 플래너가 LIMIT 과 결합해 Seq Scan 을 고르고
+        # 매칭 행이 테이블 뒤쪽에 몰려 있어 826만 행을 훑는다([실측 2026-09-04] '경기도' 27s). CTE 면 GIN 비트맵 → 1.4s.
+        return ("WITH c AS MATERIALIZED (SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address "
+                f"WHERE {where}) SELECT * FROM c LIMIT {ADDR_CAP}")
     return f"SELECT *, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM address WHERE {where} LIMIT {ADDR_CAP}"
 
 

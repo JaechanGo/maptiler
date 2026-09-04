@@ -101,11 +101,12 @@ class TestNamePathSql(unittest.TestCase):
         sql2 = M._name_path_sql(["a", "b"], True)
         self.assertTrue(sql2.startswith("WITH c AS MATERIALIZED ("))
 
-    def test_long_or_multi_unchanged(self):
+    def test_single_infix_is_cte_and_multi_plain(self):
         sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], False)
-        self.assertTrue(sql.startswith("SELECT *, ST_X(geom) AS lon"))
-        self.assertNotIn("MATERIALIZED", sql)
+        self.assertTrue(sql.startswith("WITH c AS MATERIALIZED ("))     # 단일 토큰 infix 도 CTE(Seq Scan 함정)
         self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+        sql2 = M._name_path_sql(["(a ILIKE %s)", "(b = ANY(%s::text[]))"], False)
+        self.assertTrue(sql2.startswith("SELECT *, ST_X(geom) AS lon")); self.assertNotIn("MATERIALIZED", sql2)
 
 
 class TestNarrowByRegion(unittest.TestCase):
