@@ -26,6 +26,7 @@ DSN = os.environ.get("DATABASE_URL") or (
     f"user={os.environ.get('PGUSER','cuvia')} dbname={os.environ.get('PGDATABASE','cuvia')} "
     f"password={os.environ.get('PGPASSWORD','cuvia')}")
 ADDR_CAP = 400
+MAX_TERMS = 8            # 질의 토큰 상한(중복 제거 후) — parse() 참조
 SHORT_PREFIX_CAP = 120   # 2자↓ 접두 이름검색 후보 상한(힙 I/O 절감, _name_path_sql 참조)
 # T047 §4.2 — 지번 근사 매칭(같은 본번의 다른 부번) 점수. 정확 매칭 200 보다 반드시 낮다.
 # 근사는 정확 매칭이 전부 실패한 뒤에만 열리므로 실제로 200 과 경합하지는 않지만,
@@ -1053,6 +1054,13 @@ def parse(q):
     if road:
         mm = re.fullmatch(r"(.+?)\1+", road)
         if mm: road = mm.group(1)
+    # 토큰 중복 제거(순서 보존) + 상한 — '경기도 '×40 같은 반복 입력은 같은 조건을 40번 AND 해 3s timeout(503) 이 났다
+    # ([실측 2026-09-03 13j 엣지]). 의미 있는 검색어는 8어절 안에 들어온다.
+    seen = set(); uniq = []
+    for t in terms:
+        if t not in seen:
+            seen.add(t); uniq.append(t)
+    terms = uniq[:MAX_TERMS]
     return {"road": road, "house": house, "terms": terms, "dong": dong, "ri": ri, "san": san,
             "bld_dong": bld_dong, "zipcode": zipcode, "house_adj": house_adj}
 

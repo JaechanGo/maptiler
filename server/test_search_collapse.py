@@ -205,5 +205,17 @@ class TestRegionEqCond(unittest.TestCase):
         self.assertIsNone(M.region_eq_cond("홍대")); self.assertIsNone(M.region_eq_cond("이"))
 
 
+class TestParseTermsCap(unittest.TestCase):
+    def test_repeated_tokens_deduped_and_capped(self):
+        p = M.parse("경기도 " * 40)
+        self.assertEqual(p["terms"], ["경기도"])
+        p2 = M.parse(" ".join(f"토큰{i}" for i in range(20)))
+        self.assertLessEqual(len(p2["terms"]), M.MAX_TERMS)
+
+    def test_normal_query_unchanged(self):
+        p = M.parse("서울 강남구 스타벅스")
+        self.assertEqual(p["terms"], ["서울", "강남구", "스타벅스"])
+
+
 if __name__ == "__main__":
     unittest.main()
