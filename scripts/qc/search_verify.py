@@ -43,9 +43,17 @@ seen = {}
 for cat, qs in QUERIES.items():
     for q in qs:
         code, j, dt = get("/geocode", {"q": q, "limit": 10})
+        if code != 200 or not isinstance(j, dict):
+            # 비200 은 1초 뒤 1회 재시도 — 스왑 직후 새 힙이 전부 콜드인 HDD 에선 첫 호출만 3s 를 넘기는 경우가 있다
+            # ([실측 2026-09-04] '부천 파출소' 콜드 2.0s → 웜 0.12s). 재시도 성공은 'HTTP-콜드'(참고치), 연속 실패만 게이트 FAIL.
+            time.sleep(1)
+            code2, j2, dt2 = get("/geocode", {"q": q, "limit": 10})
+            if code2 == 200 and isinstance(j2, dict):
+                issues.append(("HTTP-콜드", q, f"1회차 {code} {dt:.1f}s → 재시도 200 {dt2:.1f}s"))
+                code, j, dt = code2, j2, dt2
         lat.setdefault(cat, []).append(dt); codes[code] = codes.get(code, 0) + 1
         if code != 200 or not isinstance(j, dict):
-            issues.append(("HTTP", q, f"{code} {dt:.1f}s {j if not isinstance(j, dict) else ''}")); continue
+            issues.append(("HTTP", q, f"{code} {dt:.1f}s(재시도 포함 2회) {j if not isinstance(j, dict) else ''}")); continue
         res = j.get("results", [])
         seen[q] = res
         if not res:
@@ -133,7 +141,8 @@ for t, q, d in issues[:60]:
     print(f"  [{t}] {q} — {d}")
 print(f"\n총 질의 {sum(len(v) for v in QUERIES.values())} · 이슈 {len(issues)}")
 
-# 게이트: HTTP 비200·좌표범위·비정규시도·시설명오매핑·빈이름·구/신명칭 불일치가 하나라도 있으면 FAIL. 중복/동명다건은 참고치.
+# 게이트: HTTP 비200(재시도까지 실패)·좌표범위·비정규시도·시설명오매핑·빈이름·구/신명칭 불일치가 하나라도 있으면 FAIL.
+# 중복/동명다건/HTTP-콜드(재시도 성공)는 참고치.
 _hard = {"HTTP", "좌표범위", "비정규시도", "시설명오매핑", "빈이름", "구/신명칭 불일치", "reverse-HTTP"}
 _bad = [i for i in issues if i[0] in _hard]
 print("GATE:", "PASS" if not _bad else f"FAIL ({len(_bad)})")

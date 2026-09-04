@@ -206,6 +206,31 @@ class TestRegionEqCond(unittest.TestCase):
         self.assertIsNone(M.region_eq_cond("홍대")); self.assertIsNone(M.region_eq_cond("이"))
 
 
+class TestBldPathTerms(unittest.TestCase):
+    """건물명(bld) 경로 토큰 분배 — 2자 지역 토큰은 bld 패턴 대신 지역 정확 조건(trigram 0개 → GIN 무력 → 힙 재검사 3s 503 실측)."""
+    def setUp(self):
+        M._REGION_SGG = frozenset({"부천시 원미구", "부천시 소사구", "부천시 오정구", "강남구"})
+        M._REGION_EMD = frozenset({"상동", "역삼동", "삼성동"})
+
+    def test_two_char_region_token_becomes_region_cond(self):
+        bld, conds, args = M.bld_path_terms(["부천", "초등학교"], None)
+        self.assertEqual(bld, ["초등학교"])
+        self.assertEqual(len(conds), 1); self.assertIn("sigungu = ANY(%s::text[])", conds[0])
+        self.assertEqual(args, [["부천시 소사구", "부천시 오정구", "부천시 원미구"]])
+
+    def test_three_char_region_token_stays_bld_pattern(self):
+        bld, conds, args = M.bld_path_terms(["부천시", "초등학교"], None)   # ≥3자는 trgm 인덱스가 쓰이므로 기존 동작 유지
+        self.assertEqual(bld, ["부천시", "초등학교"]); self.assertEqual(conds, []); self.assertEqual(args, [])
+
+    def test_dong_token_excluded_and_non_region_two_char_kept(self):
+        bld, conds, args = M.bld_path_terms(["역삼동", "한빛", "아파트"], "역삼동")
+        self.assertEqual(bld, ["한빛", "아파트"]); self.assertEqual(conds, [])
+
+    def test_all_region_tokens_leave_no_bld_terms(self):
+        bld, conds, args = M.bld_path_terms(["부천", "강남"], None)   # 호출측은 bld_terms 가 비면 경로 진입 안 함
+        self.assertEqual(bld, []); self.assertEqual(len(conds), 2)
+
+
 class TestParseTermsCap(unittest.TestCase):
     def test_repeated_tokens_deduped_and_capped(self):
         p = M.parse("경기도 " * 40)

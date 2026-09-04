@@ -889,6 +889,26 @@ def region_eq_cond(t):
     return "(" + " OR ".join(conds) + ")", args
 
 
+def bld_path_terms(terms, dong):
+    """건물명(bld) 경로의 토큰 분배 → (bld ILIKE 토큰, 지역 SQL 조건들, 그 인자들).
+    · 법정동(dong) 토큰은 bld(단지명+동(棟))에 없으므로 제외(호출측이 emd 정확매칭으로 씀).
+    · 2자 지역 토큰(시도·시군구·읍면동 사전 접두: '부천'·'수원'·'강남'…)은 trigram 이 0개라 GIN 이 걸러주지 못한다 —
+      [실측 2026-09-04] '부천 초등학교' 가 bld ILIKE '%부천%' AND '%초등학교%' 로 나가 '초등학교' 후보 30,985행을 힙 재검사
+      (7,479블록) → 스왑 직후 HDD 콜드에서 3s 초과 503(웜 72ms). 지역 정확 조건(sigungu/emd = ANY)으로 돌리면
+      BitmapAnd(region_idx ∧ bld_trgm) 64블록·148행. 의미도 '부천시 안의 초등학교' 로 사용자 의도에 가깝다.
+    · ≥3자 토큰은 trgm 인덱스가 쓰이므로 사전 일치 여부와 무관하게 bld 패턴을 유지(기존 동작·최소 변경)."""
+    bld_terms, conds, args = [], [], []
+    for t in terms:
+        if t == dong:
+            continue
+        rc = region_eq_cond(t) if len(t) < 3 else None
+        if rc:
+            conds.append(rc[0]); args.extend(rc[1])
+        else:
+            bld_terms.append(t)
+    return bld_terms, conds, args
+
+
 def _probe_lawd_ri(cur):
     """lawd_ri 존재 여부 1회 평가 → 전역 캐시(_HAS_LAWD_RI).
 
@@ -1660,12 +1680,13 @@ def geocode(cur, q, limit, meta=None):
         bd = p["bld_dong"]
         # 법정동(dong) 토큰은 bld(단지명+동(棟))에 없음(행정구역은 emd/sigungu 별도 컬럼) → bld 매칭에서 빼고
         # 지역 좁힘(emd 정확매칭)에만 사용. 안 그러면 '도곡동 타워팰리스 101동' 처럼 동을 앞에 붙일 때 AND 0건.
-        bld_terms = [t for t in p["terms"] if t != p["dong"]]
+        bld_terms, region_conds, region_args = bld_path_terms(p["terms"], p["dong"])
         # ≥3자(trgm 가능) 토큰이 1개 이상일 때만 진입 — 2자 단독('%XX%')은 trigram 0개라 1570만행 Seq Scan.
         anchors = [t for t in bld_terms if len(t) >= 3]
         if bld_terms and (anchors or (bd and len(bd) >= 3)):
             def bld_fetch(use_dong):
                 conds = ["bld ILIKE %s"] * len(bld_terms); a = [f"%{t}%" for t in bld_terms]
+                conds += region_conds; a += region_args
                 if use_dong and bd:
                     conds.append("bld ILIKE %s"); a.append(f"%{bd}%")
                 if p["dong"]:                          # 법정동 동반 시 emd 정확매칭(동명 단지 혼입 방지·지역 좁힘)
