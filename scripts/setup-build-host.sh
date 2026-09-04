@@ -99,7 +99,45 @@ fi
 
 echo
 echo "── [4/5] 빌드 툴체인(GDAL·tippecanoe) 설치 ──────"
-# GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·10-gen-buildings.sh 변환에 필수.
+# 패키지 설치가 불가능한 호스트(EOL 배포판 등)를 위한 **도커 래퍼 폴백**.
+#   [실측 2026-09-01 .244/CentOS 7] yum 미러가 EOL 로 사망해 gdal·tippecanoe 를 못 깐다.
+#   이미 psql·ogr2ogr 가 같은 방식(컨테이너 실행)으로 대체돼 동작 중이라, 나머지 도구도 동일 규약으로 만든다.
+#   호출부(스크립트)는 무수정 — PATH 의 실행파일처럼 보이고 cwd·/home 마운트가 유지된다.
+# GDAL 이미지는 GEOS 포함본(alpine-normal)이어야 한다. alpine-small 은 GEOS 가 없어 ogr2ogr -simplify 가
+#   피처마다 "ERROR 6: GEOS support not enabled" 을 내고 **단순화만 조용히 건너뛴다**(원본 도형 그대로 통과).
+#   [실측 2026-09-02 .244] 06-gen-areas 가 8,983건 경고 후 비단순화 링으로 적재 — 데이터 누락은 아니나 areas 비대·PIP 저하.
+GDAL_IMAGE="${GDAL_IMAGE:-ghcr.io/osgeo/gdal:alpine-normal-latest}"
+TIPPE_IMAGE="${TIPPE_IMAGE:-naxgrp/tippecanoe:latest}"   # ghcr.io/felt/* 는 익명 pull 거부(실측)
+BUILD_ROOT_MOUNT="${BUILD_ROOT_MOUNT:-${BUILD_HOME:-$HOME}}"   # 컨테이너에 그대로 마운트할 작업 루트
+mk_docker_wrapper() {   # $1=명령명 $2=이미지 — 마운트 경로는 생성 시점에 확정해 박는다
+  _bin="/usr/local/bin/$1"
+  $SUDO sh -c "cat > '$_bin'" <<WRAP
+#!/bin/sh
+# $1 도커 래퍼 — setup-build-host.sh 가 생성(패키지 설치 불가 호스트 폴백).
+# -i: gdaltransform 처럼 **stdin 으로 입력받는** 도구가 있어 항상 붙인다. 없으면 입력이 컨테이너에
+#     닿지 않아 조용히 빈 출력을 내고, 호출부는 0건으로 흘러간다(실측: localdata '유지 0 · 제외 225만').
+# /tmp 마운트: 호출부가 **/tmp 에 임시파일을 만들어 경로로 넘기는** 경우가 있다
+#     (06-gen-areas.py → tmpXXXX.geojson). 작업루트만 마운트하면 컨테이너가 그 파일을 못 봐
+#     FileNotFoundError 로 죽는다(실측 2026-09-01 areas 단계).
+# 환경변수 전달: 호출부가 **env 로 동작을 지정**하는 도구가 있다(06-gen-areas.py 는
+#     SHAPE_ENCODING=CP949 로 SHP 한글 속성을 해석시킨다). 컨테이너는 호스트 env 를 상속하지 않아
+#     빠뜨리면 인코딩이 틀어져 UnicodeDecodeError 로 죽는다(실측 2026-09-01 areas 단계).
+_envs=""
+for _v in SHAPE_ENCODING CPL_DEBUG GDAL_DATA PGCLIENTENCODING OGR_GEOMETRY_ACCEPT_UNCLOSED_RING; do
+  eval "_val=\\\${\$_v:-}"; [ -n "\$_val" ] && _envs="\$_envs -e \$_v=\$_val"
+done
+# shellcheck disable=SC2086
+exec docker run --rm -i --network host \$_envs \\
+  -v $BUILD_ROOT_MOUNT:$BUILD_ROOT_MOUNT \\
+  -v /tmp:/tmp \\
+  -w "\$(pwd)" \\
+  $2 $1 "\$@"
+WRAP
+  $SUDO chmod +x "$_bin"
+  echo "  ↪ 도커 래퍼 생성: $1 ($2, 마운트 $BUILD_ROOT_MOUNT)"
+}
+
+# GDAL(gdaltransform·ogr2ogr): 11-build-localdata.py 좌표변환(EPSG:5174→4326)·load_building.sh 변환에 필수.
 if have gdaltransform && have ogr2ogr; then
   echo "✓ 이미 설치됨: GDAL ($(command -v ogr2ogr))"
 elif have apt-get; then
@@ -112,6 +150,12 @@ elif have brew; then
   echo "→ brew: gdal"; brew install gdal
 else
   echo "✗ 패키지 매니저 미발견 — GDAL 수동 설치 필요"
+fi
+if ! (have gdaltransform && have ogr2ogr) && have docker; then
+  echo "→ GDAL 패키지 설치 실패 → 도커 래퍼로 폴백 ($GDAL_IMAGE)"
+  for _g in ogr2ogr gdaltransform gdalbuildvrt gdalwarp gdal_translate gdaladdo gdalinfo; do
+    have "$_g" || mk_docker_wrapper "$_g" "$GDAL_IMAGE"
+  done
 fi
 if have gdaltransform && have ogr2ogr; then echo "✓ GDAL 사용 가능"; else echo "✗ GDAL 여전히 없음 — localdata/buildings 빌드 불가(권한/네트워크 확인)"; fi
 
@@ -161,6 +205,12 @@ elif have git && have make; then
 else
   echo "✗ tippecanoe 설치 불가 — brew 또는 git+make 필요. 수동: git clone https://github.com/felt/tippecanoe && make -j && $SUDO make install"
 fi
+if ! (have tippecanoe && have tile-join) && have docker; then
+  echo "→ tippecanoe 설치 실패 → 도커 래퍼로 폴백 ($TIPPE_IMAGE)"
+  for _t in tippecanoe tile-join; do
+    have "$_t" || mk_docker_wrapper "$_t" "$TIPPE_IMAGE"
+  done
+fi
 if have tippecanoe && have tile-join; then echo "✓ tippecanoe 사용 가능"; else echo "✗ tippecanoe 여전히 없음 — buildings/poi 타일 빌드 불가"; fi
 
 echo
@@ -174,6 +224,24 @@ elif have dnf;     then echo "→ dnf: postgresql"; $SUDO dnf install -y --disab
 elif have yum;     then echo "→ yum: postgresql"; $SUDO yum install -y --disablerepo='pgdg*' postgresql
 elif have brew;    then echo "→ brew: libpq(psql)"; brew install libpq && brew link --force libpq 2>/dev/null || true
 else echo "✗ 패키지 매니저 미발견 — psql 수동 설치 필요"; fi
+# EOL 호스트 폴백: 패키지로 못 깔면 psql 도 도커 래퍼로(compose 의 postgis 이미지 재사용). 세 가지가 반드시 들어간다 —
+#   PG* 환경 전달(호스트포트 5433 기본), 작업루트 마운트(-f 파일·\copy), **/tmp 마운트**(로더가 tempfile 로 만든
+#   load.sql 을 컨테이너가 못 보면 "No such file" — [실측 2026-09-03 .244] lawd_code 적재 2종이 이걸로 실패).
+if ! have psql && have docker; then
+  PG_IMAGE="${PG_IMAGE:-postgis/postgis:17-3.5}"
+  echo "→ psql 도커 래퍼 폴백: $PG_IMAGE (/usr/local/bin/psql)"
+  $SUDO sh -c "cat > /usr/local/bin/psql" <<WRAP
+#!/bin/sh
+# psql 도커 래퍼(setup-build-host.sh 생성) — 이미지 $PG_IMAGE. PG* 환경 전달 + 작업루트·/tmp 마운트.
+exec docker run --rm -i --network host \\
+  -v $BUILD_ROOT_MOUNT:$BUILD_ROOT_MOUNT -v /tmp:/tmp -w "\$(pwd)" \\
+  -e PGHOST="\${PGHOST:-localhost}" -e PGPORT="\${PGPORT:-5433}" \\
+  -e PGUSER="\${PGUSER:-cuvia}" -e PGDATABASE="\${PGDATABASE:-cuvia}" \\
+  -e PGPASSWORD="\${PGPASSWORD:-cuvia}" \\
+  $PG_IMAGE psql "\$@"
+WRAP
+  $SUDO chmod +x /usr/local/bin/psql
+fi
 if have psql; then echo "✓ psql 사용 가능"; else echo "✗ psql 없음 — PostGIS 스키마/적재 불가"; fi
 echo
 if have osm2pgsql; then echo "✓ 이미 설치됨: osm2pgsql ($(command -v osm2pgsql))"

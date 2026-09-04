@@ -1,5 +1,5 @@
 -- CUVIA PostGIS 백본 — POI / 공공시설 (Phase 0)
--- poi: 상가·인허가·생활편의(기존 무인증 collect) → biz/facility. 기존 poi.mbtiles(12-build-poi.sh) 대체.
+-- poi: 상가·인허가·생활편의(기존 무인증 collect) → biz/facility. 기존 poi.mbtiles 방식 대체(생성 스크립트는 T028 에서 폐기).
 -- public_facility: data.go.kr 공공시설(병원·경찰·소방·AED·대피소). 동질 포인트라 단일 테이블+kind.
 
 CREATE TABLE IF NOT EXISTS poi (
@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS poi (
 CREATE INDEX IF NOT EXISTS poi_geom_gix    ON poi USING gist (geom);
 CREATE INDEX IF NOT EXISTS poi_kind_idx    ON poi (kind);
 CREATE INDEX IF NOT EXISTS poi_primary_idx ON poi (is_primary);
+
+-- T8: 서버측 tier 디클러터 — tier_minzoom = 해당 POI가 타일에 처음 등장하는 줌 (theme 단일소스 백필).
+ALTER TABLE poi ADD COLUMN IF NOT EXISTS tier_minzoom smallint;
+CREATE INDEX IF NOT EXISTS poi_tier_idx ON poi (tier_minzoom);
 
 -- 공공시설 — kind 로 레이어 구분(병원/경찰/소방/AED/대피소). 출처별 갱신 = DELETE WHERE kind=... + insert.
 CREATE TABLE IF NOT EXISTS public_facility (

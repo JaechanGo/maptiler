@@ -9,6 +9,16 @@ CREATE INDEX IF NOT EXISTS address_search_trgm ON address USING gin (search_text
 -- 없으면 OR 가 BitmapOr 로 안 묶여 1570만행 Seq Scan(구청/역 이름검색 2~11초). load_geocode.py 와 동기 유지.
 CREATE INDEX IF NOT EXISTS address_bld_trgm ON address USING gin (bld gin_trgm_ops);
 
+-- 2자↓ 접두('서울%'·'강남%') 전용 btree(text_pattern_ops) — [실측 2026-09-03] trigram GIN 은 2자 접두에서
+-- '  서'·' 서울' 두 트라이그램으로 비트맵을 만들어 시도명 접두는 수백만 행을 물고(재검사 폭주) 3s timeout,
+-- 플래너가 LIMIT 과 결합해 Seq Scan 을 고르기도 한다(강남% 16s). btree 범위스캔이면 LIMIT 에서 즉시 멈춘다.
+-- 부분 인덱스(kind<>'addr' AND geom IS NOT NULL): 접두 구간에 섞이는 주소행('강남대로 …')의 힙 접근을 없앤다.
+-- API 는 한글 전용 2자↓ 토큰에 LIKE 't%' 두 arm 을 UNION ALL + LIMIT 으로 돌린다. load_geocode.py 와 동기 유지.
+CREATE INDEX IF NOT EXISTS address_search_prefix_na_idx ON address (search_text text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
+CREATE INDEX IF NOT EXISTS address_bld_prefix_na_idx    ON address (bld text_pattern_ops) WHERE kind <> 'addr' AND geom IS NOT NULL;
+-- 지번 폴백 경로(동명 + 번지) — emd 정확 + jibun 정확/접두. [실측 2026-09-03] search_text trgm 은 동명 전체 힙 접근으로 3~6s.
+CREATE INDEX IF NOT EXISTS address_emd_jibun_idx ON address (emd, jibun text_pattern_ops) WHERE kind = 'addr';
+
 -- 도로명주소 경로 — road_norm 정확 + 본번/부번. addr 만(전체의 대부분이지만 partial 로 명시)
 CREATE INDEX IF NOT EXISTS address_road_addr_idx
     ON address (road_norm, main_no, sub_no) WHERE kind = 'addr';
@@ -19,3 +29,56 @@ CREATE INDEX IF NOT EXISTS address_addr_geom_gix
 
 -- 지역 토큰 가산용(시군구/읍면동 동등비교) — 짧아서 btree 로 충분
 CREATE INDEX IF NOT EXISTS address_region_idx ON address (sigungu, emd);
+
+-- 지역(sido/sigungu/emd) 부분 trgm GIN — 다중토큰 이름경로의 지역 arm 인덱스화(BitmapOr 형성).
+-- 없으면 지역명 토큰('경기도'·'화성시'·'장안면')이 비인덱스 ILIKE '%t%' 라 OR 전체가 비인덱스화 →
+-- 1600만행 Parallel Seq Scan(실측 5.86s, 타임아웃 다수). 세 arm 인덱스화 시 BitmapOr→BitmapAnd(실측 27ms).
+-- kind<>'addr' 부분(비-addr ~560만행) — 이름경로가 kind<>'addr' 만 검색하므로 인덱스도 동일 조건으로 축소.
+CREATE INDEX IF NOT EXISTS address_sido_trgm    ON address USING gin (sido    gin_trgm_ops) WHERE kind <> 'addr';
+CREATE INDEX IF NOT EXISTS address_sigungu_trgm ON address USING gin (sigungu gin_trgm_ops) WHERE kind <> 'addr';
+CREATE INDEX IF NOT EXISTS address_emd_trgm     ON address USING gin (emd     gin_trgm_ops) WHERE kind <> 'addr';
+
+-- 우편번호(postal) 정확매칭 — 5자리 신우편번호 검색('06236' 등) 경로. addr 한정 btree.
+-- 없으면 postal=%s 가 1068만 addr 행 Seq Scan. (geocode-api-pg.py 우편번호 경로와 한 쌍)
+CREATE INDEX IF NOT EXISTS address_postal_idx   ON address (postal) WHERE kind = 'addr';
+
+-- 합성 PNU 키조인 — 역지오코딩에서 PIP 로 확정한 필지(parcel.pnu) 안의 주소점을 집는 경로.
+-- (geocode-api-pg.py road_at_parcel() 과 한 쌍. 없으면 CTE 안이 1069만행 Seq Scan)
+--
+-- 키가 raw bd_mgt_sn 앞 19자가 아니라 bcode||substr(bd_mgt_sn,11,9) 인 이유:
+--   bd_mgt_sn 앞 10자리에는 '폐지된' 법정동코드가 박혀 있다(예: 4571041023 전라북도 완주군
+--   exist=f / 5271041023 전북특별자치도 완주군 exist=t). raw 로 맞추면 완주군 매칭률이 2.8%
+--   까지 무너진다. bcode 를 신뢰하고 앞 10자리를 버리면 97.2% 로 회복된다.
+-- 표현식 인덱스인 이유: 합성 PNU 는 컬럼이 아니고, GENERATED 컬럼 추가는 5.7GB 테이블 재작성이다.
+--   ||(text) 와 substr(text,int,int) 는 IMMUTABLE 이라 인덱스 가능.
+-- 부분 인덱스인 이유: addr(1069만행)만 bd_mgt_sn·bcode 가 100% 충전돼 있다. biz(491만)는 bcode
+--   가 전부 NULL, poi/road/facility/place/station(~68만)은 둘 다 NULL 이라 애초에 키가 없다.
+--   이 술어가 질의쪽 kind='addr' 강제를 인덱스 층에서 한 번 더 거는 이중 장치를 겸한다.
+-- ※ 질의쪽 WITH cand AS MATERIALIZED (…) 는 이 인덱스를 태우기 위한 최적화 울타리다.
+--   근거가 된 실측 — 「MATERIALIZED 없는 CTE 는 ORDER BY geom <-> pt 때문에 플래너가
+--   address_addr_geom_gix 를 골라 합성키를 Filter 로 강등시킨다」 — 은 아래 확장통계를
+--   만들기 **이전** 시점의 관찰이다. 통계가 있는 현 상태에서는 MATERIALIZED 를 떼도
+--   Index Cond 로 처리된다(검수 재확인). 그럼에도 울타리는 유지한다 — 통계 객체가 유실되면
+--   선택도 추정이 되돌아가 강등이 재발하므로, 둘은 서로를 대체하지 않는 다중방어다.
+CREATE INDEX IF NOT EXISTS address_synth_pnu_idx
+    ON address ((bcode || substr(bd_mgt_sn, 11, 9))) WHERE kind = 'addr';
+
+-- 같은 표현식의 '독립' 통계 객체. 인덱스가 있는데도 왜 또 필요한가:
+--   표현식 인덱스는 ANALYZE 때 자체 통계를 갖지만, 플래너는 그것을 '부분 인덱스일 때는 쓰지
+--   않는다'(selfuncs.c examine_variable(): partial index 통계는 전체 릴레이션을 대변하지 못하므로
+--   배제). 위 인덱스는 WHERE kind='addr' 부분 인덱스라 정확히 이 배제에 걸린다.
+--   결과로 등호 선택도가 DEFAULT_EQ_SEL(0.005) 로 고정된다 — 1076만 addr × 0.005 = 53,815행 추정
+--   (실제 1행, 5.4만 배 과대). 그 추정으로 플래너가 병렬 스캔을 깔아 Gather 워커 기동에만
+--   35~40ms 를 쓴다(실측). 필지당 1행 집는 질의에 워커 2개가 붙는 셈이다.
+-- CREATE STATISTICS(PG14+ 단일 표현식 지원)는 인덱스와 무관한 독립 객체라 위 배제를 받지 않는다.
+--   적용 후 추정 rows=1 → 비병렬 Index Scan → 실행 75ms → 0.12ms(실측, 동일 좌표·동일 PNU).
+-- 원복은 DROP STATISTICS IF EXISTS address_synth_pnu_stat 이다. 인덱스만 DROP 하면
+--   통계 객체는 남는다(별개 객체다). 특히 재적재 스크립트(scripts/postgis/load_geocode.py)는
+--   인덱스를 DROP 후 재생성하는데 통계는 CREATE ... IF NOT EXISTS 라, 함께 DROP 하지 않으면
+--   표현식을 바꿨을 때 인덱스만 새 정의로 갱신되고 통계는 옛 정의에 묶인 채 살아남아
+--   선택도 추정이 DEFAULT_EQ_SEL 로 되돌아간다. 두 객체는 항상 같이 만들고 같이 지운다.
+CREATE STATISTICS IF NOT EXISTS address_synth_pnu_stat
+    ON (bcode || substr(bd_mgt_sn, 11, 9)) FROM address;
+
+-- 표현식 인덱스·확장통계는 모두 ANALYZE 로만 채워진다. 생성 직후 1회 필요.
+ANALYZE address;

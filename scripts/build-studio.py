@@ -5,18 +5,20 @@
 실시간 표시하며, 체크박스로 빌드 대상을 정제하고, 완료물을 폐쇄망 번들로 패키징한다.
 이미 검증된 CLI 파이프라인(09/10/11/12/13/package)을 그대로 빌드 엔진으로 구동한다.
 
-기동:  python3 scripts/build-studio.py            # http://localhost:8090
-       BUILD_HOME=~/geocode-build PORT=8090 python3 scripts/build-studio.py
+기동:  python3 scripts/build-studio.py            # http://localhost:18081
+       BUILD_HOME=~/geocode-build PORT=18081 python3 scripts/build-studio.py
 """
 import json, os, pathlib, queue, subprocess, threading, time, re, ssl, sqlite3, shutil, zipfile, hashlib, urllib.request, urllib.parse
+import errno  # _swap_dir 의 크로스 디바이스(EXDEV) 판별
+import socket  # _ensure_postgis 의 TCP 선점검
 import pty   # 자식 프로세스를 TTY 에 붙여 외부 도구의 블록버퍼링을 막고 로그를 실시간 스트리밍
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
-PORT = int(os.environ.get("PORT", "8090"))
+PORT = int(os.environ.get("PORT", "18081"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))   # 미리보기가 스타일을 읽어올 tileserver 포트
-STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "8091")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
+STYLE_STUDIO_PORT = os.environ.get("STYLE_STUDIO_PORT", "18082")   # 스타일 편집기(style-studio) — /style 은 여기로 일원화(리다이렉트)
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 # 기본 외부(LAN) 노출(0.0.0.0). 인증이 없으므로 같은 LAN의 누구나 빌드 실행/업로드가 가능함을
 # 운영자가 인지해야 함 — 신뢰망에서만 사용하고, 로컬 전용이 필요하면 HOST=127.0.0.1 로 명시.
@@ -27,6 +29,7 @@ DIST = BUILD_HOME / "dist"                       # package.sh 산출물(번들·
 ARTIFACTS = BUILD_HOME / "artifacts"             # 빌드 산출물 스냅샷 보존(geocode.sqlite — 재적재·재수집 teardown 으로부터 보호)
 DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON — 최초 1회 DB로 마이그레이션 후 .bak 보존
 DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
+LOG_DIR = BUILD_HOME / "logs"                     # 단계별 실행 로그(SSE 는 흐르는 스트림이라 사후 추적 불가 → 파일 병행)
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
 SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
 
@@ -289,7 +292,8 @@ def _v_style(files):
 
 
 _VALIDATORS = {"juso_navi": _v_navi, "sangga": _v_sangga, "localdata": _v_localdata, "building_db": _v_building,
-               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary, "style": _v_style}
+               "boundary_legal": _v_boundary, "boundary_admin": _v_boundary, "boundary_ri": _v_boundary,
+               "style": _v_style}
 
 
 def _validate_source(key):
@@ -572,7 +576,7 @@ def prepare_sources(keys=None, emit=None):
 # 빌드 입력 — 기본값은 Build Studio 업로드 적재 경로(prepare_sources). 외부 경로는 환경변수로 덮어쓰기.
 SRC_JUSO = os.environ.get("SRC_JUSO", str(BUILD_HOME / "staged/navi"))
 SRC_LOCALDATA = os.environ.get("SRC_LOCALDATA", str(BUILD_HOME / "staged/localdata"))
-SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))
+SRC_GIS = os.environ.get("SRC_GIS", str(BUILD_HOME / "staged/gis"))   # 건물 SHP 경로 오버라이드 계약(load-all.sh:88 소비). TARGETS() 미사용은 정상 — test_build_studio.py 가 계약 고정
 
 # ── 빌드 대상 정의 ─────────────────────────────────────────────────
 # kind: 카드 id / label / cmd(argv) / dep(선행 대상) / weight(진행률 가중 단계 키워드)
@@ -593,14 +597,39 @@ def TARGETS():
             cmd=["bash", "-c", f'python3 "{ROOT/"scripts/04-gen-dong-labels.py"}" && python3 "{ROOT/"scripts/05-gen-dong-tiles.py"}"']),
         "terrain": dict(label="지형 음영 타일 (terrain.mbtiles)", dep=None,
             cmd=["bash", str(ROOT/"scripts/03-gen-terrain.sh")]),   # SRTM30m→Terrain-RGB(온라인·정적). 반입본 있으면 freshness=fresh 로 스킵
+        "route_graph": dict(label="길찾기 그래프 (OSRM car·foot·bicycle) + 역 출구", dep=None,
+            # 07: data/osm pbf → route/{car,foot,bicycle} MLD 그래프. 08: 같은 pbf → demo/data/station-exits.json
+            # (도보 출구 안내). 둘 다 pbf 하나만 보므로 한 단계로 묶는다 — 08 은 8초라 분리 이득이 없다.
+            cmd=["bash", "-c", f'bash "{ROOT/"scripts/07-gen-route-graph.sh"}" && '
+                               f'python3 "{ROOT/"scripts/08-gen-station-exits.py"}"']),   # FEAT-007
         "geocode": dict(label="통합 지오코딩 인덱스", dep=["localdata", "facility"],
             cmd=[py, str(ROOT/"scripts/09-gen-geocode.py"), "--src", SRC_JUSO,
                  "--osm", str(BUILD_HOME/"osm.sqlite"), "--poi-csv-dir", str(BUILD_HOME/"poi-all"),
-                 "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er"]),   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
-        "areas": dict(label="행정구역 경계 (법정동·행정동 → areas)", dep="geocode",
+                 "--out", str(BUILD_HOME/"geocode.sqlite"), "--dedup", "er",   # ER 중복제거+건물키 backfill 적용(없으면 09 기본 legacy)
+                 "--t018-disposed"]),   # [F1 2026-08-28·T045] T018 리 백필 처분 완료 — G0 해제 조건 5.
+                                        #   조건 1·2: ri_backfill_* 폐기 헤더·s3 하드게이트 폐기, 조건 3: load_geocode.py 는
+                                        #   ri/bcode 를 무가공 통과(확인), 조건 4: backfill-admin-codes.py PK6 세대 가드.
+        # 리(legal-ri)는 if/else 가드로 감싼다 — 아직 한 번도 반입한 적이 없어 보통 디렉터리가 없다.
+        #   · `&& … || echo` 로 쓰지 않는 이유: 디렉터리가 있는데 06 이 실패해도 rc 가 0 으로 덮여
+        #     areas 단계가 '성공'으로 기록된다. if/else 는 06 의 rc 를 그대로 전파한다.
+        #   · 경로에 셸 변수를 쓰지 않는 이유: 이 bash -c 는 BUILD_HOME 을 상속받지 않는다.
+        #     `[ -d "$RI" ]` 로 쓰면 항상 거짓이 되어 리가 있어도 영구히 건너뛴다(조용한 실패).
+        #   · --name-field RI_NM / --code-field RI_CD 는 **잠정값**이다. 리 SHP 반입 시 ogrinfo 로
+        #     확정할 것. 틀리면 06-gen-areas.py:95 의 skip 카운터가 전건 skip 으로 자기진단한다.
+        # admin_tiles: 법정동 경계 + 법정동코드 → tiles/admin.mbtiles (시도·시군구·읍면동 경계·라벨, ADR-011).
+        #   OSM place/boundary 대신 국가 원천으로 지도 행정 라벨을 그린다 — 법정동코드가 바뀌면 자동 stale.
+        "admin_tiles": dict(label="행정구역 타일 (국가 원천 → admin.mbtiles)", dep=None,
+            cmd=[py, str(ROOT/"scripts/06b-gen-admin-tiles.py"), "--shp", str(BUILD_HOME/"sources/boundary/legal"),
+                 "--srs", "EPSG:5186", "--out", str(ROOT/"tiles/admin.mbtiles")]),
+        "areas": dict(label="행정구역 경계 (법정동·행정동·리 → areas)", dep="geocode",
             cmd=["bash", "-c",
                  f'python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/legal"}" --srs EPSG:5186 --name-field EMD_NM --code-field EMD_CD --type legal-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
-                 f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"']),
+                 f' && python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/admin/BND_ADM_DONG_PG.shp"}" --srs EPSG:5186 --name-field ADM_NM --code-field ADM_CD --type admin-dong --db "{BUILD_HOME/"geocode.sqlite"}"'
+                 f' && if [ -d "{BUILD_HOME/"sources/boundary/ri"}" ]; then'
+                 f' python3 "{ROOT/"scripts/06-gen-areas.py"}" --shp "{BUILD_HOME/"sources/boundary/ri"}"'
+                 f' --srs EPSG:5186 --name-field RI_NM --code-field RI_CD --type legal-ri'
+                 f' --db "{BUILD_HOME/"geocode.sqlite"}";'
+                 f' else echo "(건너뜀) 리 경계 없음: {BUILD_HOME/"sources/boundary/ri"}"; fi']),
         # 하이브리드: 건물·필지·POI·시설은 PostGIS→martin(/dyn) 서빙으로 일원화 → buildings.mbtiles/poi.mbtiles 타깃 폐기.
         # 동적 레이어 = scripts/postgis/load-all.sh(admin·parcel·building·geocode→address/poi·facility) 한 타깃으로.
         # (PostGIS 적재는 빌드호스트에서 compose --profile postgis 기동 후 실행.)
@@ -609,14 +638,24 @@ def TARGETS():
         # dep=load_postgis: PostGIS 적재 후 실행 보장 + 적재 실패 시 qc 스킵(거짓 PASS 차단). qc 는 always=True 라
         #   적재가 최신이면 자동 재사용(강제 재적재 없음). --pg 로 parcel/building 적재 완전성·인덱스까지 검증.
         "qc": dict(label="QC 검증", dep="load_postgis",
-            cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
-                 "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
-                 "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082", "--pg"]),
-        "package": dict(label="폐쇄망 번들 패키징", dep=None,
+            # 13-qc-check(정적·PostGIS) 뒤 13j-search-qc(라이브 검색·역지오·왕복·길찾기 QC, 게이트웨이 경유) — 둘 다 통과해야 done.
+            cmd=["bash", "-c",
+                 f'python3 "{ROOT/"scripts/13-qc-check.py"}" --db "{BUILD_HOME/"geocode.sqlite"}" --tiles "{BUILD_HOME/"tiles"}" '
+                 f'--style "{ROOT/"style/style.json"}" --config "{ROOT/"server/tileserver-config.json"}" --api http://localhost:8082 --pg'
+                 f' && bash "{ROOT/"scripts/13j-search-qc.sh"}" --api "${{GATEWAY_URL:-http://localhost:18080}}"']),
+        # [T043 검수 M-3] dep=None → dep="geocode".
+        #   package.sh:240 은 `cp -c "$BUILD_HOME/geocode.sqlite"` 로 지오코딩 DB 를 번들에 담는다.
+        #   dep 이 없으면 geocode 가 G0(전국 재빌드 차단)로 정지해도 package 는 그대로 돌아
+        #   **직전 세대 7GB DB** 를 최신 번들인 양 반출한다. 폐쇄망으로 나가면 되돌릴 수 없다.
+        #   dep="qc" 가 아니라 dep="geocode" 인 이유: qc 는 PostGIS 기동을 전제하므로
+        #   그것을 걸면 DB 가 없는 환경에서 번들 생성 자체가 막힌다(과잉 차단). geocode 라면
+        #   fresh 일 때 큐에서 자동으로 빠져 현행 동작이 그대로 유지되고(build-studio.py:914-920),
+        #   실제로 실행됐다가 실패/스킵된 경우에만 package 가 선다 — 정확히 막아야 할 경우다.
+        "package": dict(label="폐쇄망 번들 패키징", dep="geocode",
             cmd=["bash", str(ROOT/"scripts/package.sh")]),
     }
 
-CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
+CANON = ["osm_vector", "osm_sqlite", "dong", "terrain", "admin_tiles", "route_graph", "localdata", "facility", "geocode", "areas", "load_postgis", "qc", "package"]
 
 
 def _deps(t):
@@ -642,19 +681,47 @@ TFRESH = {
              "out": [ROOT / "tiles/dong.mbtiles"]},
     "terrain": {"out_only": True, "scripts": ["scripts/03-gen-terrain.sh"],
                 "out": [ROOT / "tiles/terrain.mbtiles"]},   # 정적 SRTM 산출물 — 파일 존재=최신(반입본 보존·재다운로드 방지)
-    "localdata": {"src": ["localdata"], "scripts": ["scripts/11-build-localdata.py"],
+    "route_graph": {"src": ["osm"], "scripts": ["scripts/07-gen-route-graph.sh",
+                                                "scripts/08-gen-station-exits.py",
+                                                "scripts/route-profiles/car.lua",      # 계수만 바꿔도 그래프 재생성 필요
+                                                "scripts/route-profiles/foot.lua",
+                                                "scripts/route-profiles/bicycle.lua"],
+                    "out": [ROOT / "route/car/south-korea.osrm.mldgr",
+                            ROOT / "route/foot/south-korea.osrm.mldgr",
+                            ROOT / "route/bicycle/south-korea.osrm.mldgr",   # 하나라도 없으면 stale
+                            ROOT / "demo/data/station-exits.json"]},         # customize 완주해야 생김 — 부분 산출물은 stale
+    "localdata": {"src": ["localdata", "lawd_code_v2"], "scripts": ["scripts/11-build-localdata.py", "scripts/_common/region.py"],   # 시도 검증 파서가 법정동코드 원천을 읽는다
                   "out": [BUILD_HOME / "poi-all/localdata_clean.csv"]},
-    "facility": {"src": ["facility"], "scripts": ["scripts/11b-build-facility.py"],
+    "facility": {"src": ["facility", "lawd_code_v2"], "scripts": ["scripts/11b-build-facility.py", "scripts/_common/region.py"],
                  "out": [BUILD_HOME / "poi-all/facility_clean.csv"]},
-    "geocode": {"src": ["juso_navi", "sangga"], "dep_art": ["osm_sqlite", "localdata", "facility"],
-                "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py"],
+    "geocode": {"src": ["juso_navi", "sangga", "lawd_code_v2"], "dep_art": ["osm_sqlite", "localdata", "facility"],
+                "scripts": ["scripts/09-gen-geocode.py", "scripts/dedup_er.py", "scripts/_common/region.py"],   # 09 유입 게이트도 원천 집합 사용
                 "out": [BUILD_HOME / "geocode.sqlite"]},
-    "areas": {"src": ["boundary_legal", "boundary_admin"], "dep_art": ["geocode"],
+    # boundary_ri: 리 SHP 를 새로 올리거나 교체하면 areas 가 stale 로 떨어져 재적재된다.
+    #   빠뜨리면 새 경계를 올려도 fresh 판정으로 조용히 건너뛴다.
+    "admin_tiles": {"src": ["boundary_legal", "lawd_code_v2"], "scripts": ["scripts/06b-gen-admin-tiles.py", "scripts/_common/region.py"],
+                    "out": [ROOT / "tiles/admin.mbtiles"]},
+    "areas": {"src": ["boundary_legal", "boundary_admin", "boundary_ri"], "dep_art": ["geocode"],
               "scripts": ["scripts/06-gen-areas.py"], "out": [BUILD_HOME / "geocode.sqlite"]},
-    "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility"],
+    # juso_building_shp/dong: AL_D010 이 놓친 신축(신개발지구) 패치 원천(2026-08 편입).
+    #   load-all.sh building 단계가 load_building_juso_all.sh 로 소비 — 원천/로더 갱신 시 stale.
+    "load_postgis": {"src": ["parcel", "building_db", "sangga", "localdata", "facility",
+                             "juso_building_shp", "juso_building_dong"],
                      "dep_art": ["geocode"],
                      "scripts": ["scripts/postgis/load-all.sh", "scripts/postgis/load_parcel.sh",
-                                 "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py"],
+                                 "scripts/postgis/load_building.sh", "scripts/postgis/load_geocode.py",
+                                 "scripts/postgis/load_building_juso.sh",
+                                 "scripts/postgis/load_building_juso_all.sh",
+                                 # ── 지번 1급화(A3): 스키마·사전·백필 추적 → 개선 시 stale 인식(조용한 skip 방지) ──
+                                 "scripts/postgis/schema/21-parcel-jibun.sql",
+                                 "scripts/postgis/build_dong_dict.sql",
+                                 "scripts/postgis/build_sigungu_dict.sh",
+                                 "scripts/postgis/backfill_parcel_jibun.sql",
+                                 "scripts/postgis/backfill_geom_pt.sql",
+                                 # ── T8: POI tier 디클러터(스키마·함수·백필) ──
+                                 "scripts/postgis/schema/30-poi.sql",
+                                 "scripts/postgis/schema/31-poi-mvt.sql",
+                                 "scripts/postgis/backfill_poi_tier.py"],
                      "out": []},   # PostGIS 적재(파일 산출물 없음) — src/scripts 시그니처로 재빌드 판정
     "qc": {"always": True},
     "package": {"always": True},
@@ -745,6 +812,105 @@ def target_freshness(kind, ver=None, state=None):
 def all_freshness():
     ver = load_versions(); state = load_build_state()
     return {k: target_freshness(k, ver, state) for k in TARGETS()}
+
+
+MBTILES_TARGETS = ("osm_vector", "dong", "terrain", "admin_tiles")
+
+
+def _restart_tileserver():
+    """빌드 호스트에서 서빙 중인 tileserver-gl 컨테이너를 재시작(mbtiles 교체 반영). 없으면 안내만."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--filter", "name=tileserver", "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=20)
+        names = [n for n in r.stdout.split() if n]
+        if not names:
+            return "[tileserver] 컨테이너 없음 — 폐쇄망 배포 시 deploy.sh 가 기동"
+        subprocess.run(["docker", "restart", *names], capture_output=True, text=True, timeout=120)
+        return f"[tileserver] 재시작 {', '.join(names)} — 새 mbtiles 반영"
+    except Exception as e:
+        return f"[tileserver] 재시작 실패(수동 docker restart 필요): {e}"
+
+
+PG_TARGETS = ("load_postgis", "qc", "package")   # PostGIS 접속을 전제로 하는 타깃(package 는 WITH_POSTGIS 덤프)
+
+
+def _pg_endpoint():
+    return os.environ.get("PGHOST", "localhost"), int(os.environ.get("PGPORT", "5433"))
+
+
+def _pg_port_open(timeout=3):
+    host, port = _pg_endpoint()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _pg_ready(compose):
+    """컨테이너 안의 pg_isready 로 '접속 수락' 상태까지 확인(포트만 열린 복구 중 상태 배제)."""
+    try:
+        r = subprocess.run(["docker", "compose", "-f", str(compose), "exec", "-T", "postgis",
+                            "pg_isready", "-U", os.environ.get("PGUSER", "cuvia"), "-d", os.environ.get("PGDATABASE", "cuvia")],
+                           capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "COMPOSE_PROFILES": "postgis"})
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_postgis(emit, wait_s=180):
+    """PostGIS 를 쓰는 타깃 실행 전, 빌드 호스트의 compose postgis 가 내려가 있으면 올리고 접속 가능할 때까지 기다린다.
+    [실측 2026-09-04] 대화형 셸에서 서빙 컨테이너를 통째로 내린 직후 load_postgis 가 큐에서 나와 7단계 연속 PQconnectdb 실패로
+    error → qc·package 까지 스킵. 복구는 `compose start postgis` 하나라 스튜디오가 스스로 한다. 끝내 접속 불가면 False(실행 안 함)."""
+    if _pg_port_open():
+        return True
+    host, port = _pg_endpoint()
+    compose = ROOT / "server" / "docker-compose.yml"
+    if host not in ("localhost", "127.0.0.1") or not compose.exists():
+        emit(f"[postgis] {host}:{port} 접속 불가 — 원격/외부 PostGIS 는 스튜디오가 기동하지 못한다. 수동 기동 후 재실행")
+        return False
+    emit(f"[postgis] {host}:{port} 접속 불가 — compose postgis 기동 시도")
+    try:
+        env = {**os.environ, "COMPOSE_PROFILES": "postgis"}
+        r = subprocess.run(["docker", "compose", "-f", str(compose), "start", "postgis"],
+                           capture_output=True, text=True, timeout=120, env=env)
+        if r.returncode != 0:   # 컨테이너 자체가 없으면(down 이후) up -d
+            r = subprocess.run(["docker", "compose", "-f", str(compose), "up", "-d", "postgis"],
+                               capture_output=True, text=True, timeout=300, env=env)
+        if r.returncode != 0:
+            emit(f"[postgis] 기동 실패: {(r.stderr or r.stdout).strip()[-300:]}")
+            return False
+    except Exception as e:
+        emit(f"[postgis] 기동 실패: {e}")
+        return False
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        if _pg_port_open() and _pg_ready(compose):
+            emit(f"[postgis] 기동 확인({time.time() - t0:.0f}s) — 계속")
+            # 스튜디오가 PostGIS 를 올린 경우, 이미 떠 있던 martin·geocode-pg 는 끊긴 커넥션을 물고 있어 검색·동적 타일이
+            # 5xx 를 낸다([실측 2026-09-04 seq 10 리허설] 수동 재시작 후에야 200). 의존 서비스를 함께 재시작한다(실패는 안내만).
+            try:
+                r = subprocess.run(["docker", "compose", "-f", str(compose), "restart", "martin", "geocode-pg"],
+                                   capture_output=True, text=True, timeout=180, env=env)
+                emit("[postgis] 의존 서비스 martin·geocode-pg 재시작 — 끊긴 커넥션 정리" if r.returncode == 0
+                     else f"[postgis] 의존 서비스 재시작 실패(수동 docker compose restart martin geocode-pg): {(r.stderr or r.stdout).strip()[-200:]}")
+            except Exception as e:
+                emit(f"[postgis] 의존 서비스 재시작 실패(수동 재시작 필요): {e}")
+            return True
+        time.sleep(4)
+    emit(f"[postgis] {wait_s}s 내 접속 불가 — 실행하지 않음(docker logs server-postgis-1 확인)")
+    return False
+
+
+def mark_fresh(kind, reason):
+    """타깃 서명만 현재값으로 기록 — 산출물이 실제로 최신인데 스크립트 로그/주석 변경 등으로 stale 판정된 경우의 우회.
+    사유를 상태에 남긴다(무근거 우회 방지: UI 가 사유를 필수로 받는다)."""
+    st = load_build_state()
+    st[kind] = {"sig": _target_sig(kind), "built_at": time.strftime("%Y-%m-%d %H:%M"),
+                "note": f"서명만 갱신: {reason}"}
+    save_build_state(st)
+    return st[kind]
 
 
 def record_build_sig(kind):
@@ -917,6 +1083,17 @@ class Manager:
         j = self.jobs[kind]; j["log"].append(line); j["log"][:] = j["log"][-400:]
         p = progress_of(kind, line, j["st"])
         if p is not None: j["progress"] = max(j["progress"], min(p, 1.0))
+        # ★ 파일에도 남긴다 — SSE 는 '흐르는' 스트림이라 구독을 놓치면 그 순간의 로그가 영영 사라진다.
+        #   실패 원인을 사후에 못 캐는 게 실제 사고로 이어졌다([실측 2026-09-01~02] load_postgis 가
+        #   parcel 을 TRUNCATE 한 뒤 죽었는데 원인(bash 4.2 의 `wait -n` 미지원)을 스트림에서 놓쳐
+        #   재현 실행으로 하루를 돌아갔다). 메모리 링버퍼(400줄)도 앞부분이 잘려나가 같은 한계가 있다.
+        #   단계별 파일이라 사후 grep 이 되고, 화면(SSE)은 그대로 유지된다.
+        try:
+            fh = j.get("logfile")
+            if fh is not None:
+                fh.write(line + "\n"); fh.flush()
+        except Exception:
+            pass   # 로그 기록 실패가 빌드를 멈추게 하지 않는다(디스크 full 등)
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"], "line": line})
 
     def _run(self, kind):
@@ -932,6 +1109,18 @@ class Manager:
             self.publish({"kind": kind, "status": "skipped", "progress": j["progress"]})
             return
         j["status"] = "running"
+        # 단계별 로그 파일 — BUILD_HOME/logs/<단계>-<시각>.log. 최근 20개만 남기고 정리.
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            lf = LOG_DIR / f"{kind}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+            j["logfile"] = open(lf, "w", encoding="utf-8")
+            j["logpath"] = str(lf)
+            old_logs = sorted(LOG_DIR.glob(f"{kind}-*.log"))[:-20]
+            for f in old_logs:
+                try: f.unlink()
+                except OSError: pass
+        except Exception:
+            j["logfile"] = None; j["logpath"] = None
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
             cmd = TARGETS()[kind]["cmd"]
@@ -941,10 +1130,33 @@ class Manager:
             # TTY 에 붙으면 라인 버퍼링 → 즉시 출력. \r 진행표시도 라인으로 surface.
             # (PYTHONUNBUFFERED 는 파이썬 자식 보조.) PTY 불가 환경은 파이프로 폴백.
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if kind == "package":
+                # 폐쇄망 번들은 PostGIS(동적 레이어·geocode-pg 검색 백엔드)까지 **전체 포함**이 기본이다.
+                # [2026-09-03] WITH_POSTGIS 가 선택 옵션이라 스튜디오 번들에 PostGIS 덤프가 빠진 채 나갔다 —
+                # 게이트웨이 /geocode 는 geocode-pg 로 가므로 폐쇄망에서 검색·건물·필지가 동작하지 않는 번들이었다.
+                env.setdefault("WITH_POSTGIS", "1")
+            if kind == "geocode":
+                # geocode 의 dedup_er 는 상가 전량을 메모리에 올려 약 14.5GB 를 쓴다(15GB 호스트 실측). 부족하면 HDD 스왑 쓰레싱으로
+                # CPU 10% 에 수 시간 정체된다 — 실행 전에 크게 경고한다(서빙·jenkins 정지 권장). 차단은 하지 않는다.
+                try:
+                    mem = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if ":" in l}
+                    avail_gb = mem.get("MemAvailable", 0) / 1048576
+                    if avail_gb < 14:
+                        self._emit(kind, f"⚠ 메모리 경고: 가용 {avail_gb:.1f}GB < 14GB — dedup_er(≈14.5GB)가 스왑 쓰레싱으로 수 시간 정체될 수 있다. "
+                                         "서빙 컨테이너·jenkins 를 잠시 내리고 돌리는 편이 빠르다(완료 후 재기동).")
+                except Exception:
+                    pass
+            if kind in PG_TARGETS and not (kind == "package" and env.get("WITH_POSTGIS") == "0") \
+                    and not _ensure_postgis(lambda m: self._emit(kind, m)):
+                raise RuntimeError("PostGIS 접속 불가 — 실행하지 않음")
             rc = self._stream(kind, cmd, env)
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
             record_build_sig(kind)   # 성공 시그니처 기록 → 다음 빌드에서 변경없으면 자동 건너뜀
+            if kind in MBTILES_TARGETS:
+                # tileserver-gl 은 기동 시 연 mbtiles 핸들을 붙들고 있어 파일을 교체(새 inode)해도 옛 타일을 낸다
+                # ([실측 2026-09-03] admin.mbtiles 재생성 후 수동 재시작 전까지 라벨 미반영). 산출 직후 재시작한다.
+                self._emit(kind, _restart_tileserver())
             if kind in ("geocode", "areas"):   # geocode.sqlite 산출 직후 스냅샷 보존(재적재·재수집 teardown 전에)
                 try:
                     b = backup_geocode_artifact()
@@ -955,6 +1167,16 @@ class Manager:
                 except Exception as e: self._emit(kind, f"[프로필 저장 실패] {e}")
         except Exception as e:
             j["status"] = "error"; self._emit(kind, f"[오류] {e}")
+        finally:
+            # 로그 파일 마감 — 경로를 마지막 줄로 남겨 화면에서 바로 찾아갈 수 있게 한다.
+            fh = j.pop("logfile", None)
+            if fh is not None:
+                try:
+                    fh.write(f"[로그] {j.get('logpath')}\n"); fh.close()
+                except Exception: pass
+                if j.get("logpath"):
+                    self.publish({"kind": kind, "status": j["status"], "progress": j["progress"],
+                                  "line": f"[로그 파일] {j['logpath']}"})
         self.publish({"kind": kind, "status": j["status"], "progress": j["progress"]})
 
     _ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')   # 색/커서 ANSI 이스케이프(TTY 모드에서 도구가 붙임) 제거
@@ -1025,6 +1247,9 @@ STORE_DIR = BUILD_HOME / "store"
 FACILITY_CATALOG = ROOT / "scripts" / "facility-catalog.json"
 LOCALDATA_REGIONS = ROOT / "scripts" / "localdata-regions.json"
 _COLLECT_LOCK = threading.Lock()
+# 파괴 구간(교체) 진입 대기 상한. 수집은 수십 분이 걸리므로 무한 대기 대신 즉시 거절해
+# 사용자에게 "지금은 수집 중"을 알린다(C-11: 락은 파괴 구간에만, 다GB 수신 루프는 락 밖).
+_COLLECT_LOCK_WAIT = 2.0
 _DL_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.localdata.go.kr/"}
 
 
@@ -1052,6 +1277,94 @@ def store_path(sha):
     return STORE_DIR / sha[:2] / sha
 
 
+def _payload_integrity(path):
+    """페이로드 건전성 판정(매직바이트 ↔ 구조 정합) — 네트워크/HTTP 비의존 순수함수.
+    수집(다운로드) 시점에 절단/손상 페이로드를 검지하기 위한 단일 판정원(run_collect·_extract_into 공유, DRY).
+    반환: (verdict, detail)
+      healthy   : 정상 아카이브(zip/tar/7z/gzip) 또는 아카이브 매직이 아닌 평문(csv/txt/pbf/shp 등) — 통과
+      truncated : 아카이브 매직이 있으나 구조 불완전(EOCD/중앙디렉토리 결손, gzip 말미 절단 등) — 거부
+      corrupt   : 0바이트 / 매직-구조 모순 / 식별불가 손상 — 거부
+      unknown   : 판정 불가(7z 검증도구 없음 등) — 호출측 정책에 위임(보수적 통과)
+    경로만 받으므로 임시파일만으로 단위테스트 가능. is_zipfile/is_tarfile 은 말미 EOCD/헤더 수준만 읽어 GB급도 저비용."""
+    import tarfile
+    p = pathlib.Path(path)
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        return ("corrupt", f"stat 실패: {e}")
+    if size == 0:
+        return ("corrupt", "0바이트")
+    with open(p, "rb") as fh:
+        head = fh.read(8)
+    # ① ZIP: local header(PK\x03\x04) / 빈 zip EOCD(PK\x05\x06) / data descriptor(PK\x07\x08)
+    if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+        if zipfile.is_zipfile(p):
+            return ("healthy", "zip")
+        return ("truncated", "ZIP 매직이나 EOCD/중앙디렉토리 결손 — 절단 의심")
+    # ② 7z: 도구 있으면 무결성검증(t), 없으면 unknown(기존 추출분기에 위임)
+    if head[:6] == b"7z\xbc\xaf\x27\x1c":
+        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not tool:
+            return ("unknown", "7z 매직 — 무결성검증 도구 없음")
+        try:
+            r = subprocess.run([tool, "t", str(p)], capture_output=True, timeout=600)
+            return ("healthy", "7z") if r.returncode == 0 else ("corrupt", "7z 무결성검증 실패")
+        except Exception as e:
+            return ("unknown", f"7z 검증 예외: {str(e)[:80]}")
+    # ③ gzip: 말미까지 스트리밍 디코드 시도(상한까지). 성공 healthy / 실패 truncated / 상한초과 unknown
+    if head[:2] == b"\x1f\x8b":
+        import gzip as _gz
+        cap = 256 << 20   # 디코드 상한(대용량 회피) — 초과 시 말미 미확인 → unknown
+        try:
+            read = 0
+            with _gz.open(p, "rb") as g:
+                while True:
+                    chunk = g.read(1 << 20)
+                    if not chunk:
+                        return ("healthy", "gzip")
+                    read += len(chunk)
+                    if read >= cap:
+                        return ("unknown", "gzip — 디코드 상한 초과로 말미 미확인")
+        except Exception as e:
+            return ("truncated", f"gzip 디코드 실패 — 절단 의심: {str(e)[:80]}")
+    # ④ tar(비압축): magic 이 아닌 ustar 헤더 — is_tarfile 로 판정(gzip-tar 은 ③에서 처리)
+    try:
+        if tarfile.is_tarfile(p):
+            return ("healthy", "tar")
+    except Exception:
+        pass
+    # ⑤ 아카이브 매직 아님 → 평문(csv/txt/shp/pbf 등). 평문 본문 절단은 스코프 외(_http_download CL 대조가 보완)
+    return ("healthy", "non-archive")
+
+
+def _collect_integrity_gate(tmp, item_key, sz):
+    """수집(다운로드) 직후·store_put 전 무결성 게이트. truncated/corrupt 면 tmp(.part) 폐기 후 raise.
+    raise 가 run_collect 의 try 말미 staged_sig 갱신을 건너뛰게 해 다음 회차 자동 재수집(자기치유)을 유도하고,
+    store_put 미호출로 손상물의 store 영구보관을 차단한다. tmp 명시 제거로 .part 잔존도 방지.
+    참고(Note 3): extract 모드의 stale 한 손상 staged 는 정상 재수집 성공 시 run_collect 의
+    `(not allreused) or (not _nonempty_dir(dest))` 분기 rmtree+재추출로 자연 치유된다(추가 코드 불요)."""
+    verdict, detail = _payload_integrity(tmp)
+    if verdict in ("truncated", "corrupt"):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"수집 무결성 거부({verdict}): {item_key} — {detail} ({sz/1e6:.1f}MB)")
+
+
+def _assert_full_receipt(item_key, shas, expected_n):
+    """부분 수신 차단 — 목록 개수와 실제 수신 개수의 **동수 불변식**만 본다.
+
+    절대 개수를 상수로 박지 않는다: parcel 은 원본 파일 수가 258→262 로 변동하므로
+    "몇 개여야 한다"는 판정은 정상 증감에서 오탐이 된다. 볼 수 있는 건 "이번 회차에
+    목록으로 뽑은 만큼 전부 받아냈는가" 뿐이다.
+
+    **파괴적 교체 전에** 불러야 한다 — 반쪽 수신물로 staged 를 갈아끼우는 게 이번 사고다.
+    """
+    if len(shas) != expected_n:
+        raise RuntimeError(f"부분 수신: {item_key} — {len(shas)}/{expected_n}파일만 수신, 교체 중단")
+
+
 def _http_download(url, dest, headers=None, retries=3, timeout=900):
     """파일 다운로드 — 302→/error·HTML 에러페이지 감지 + 백오프 재시도. 스트리밍 저장, size 반환."""
     hd = {**_DL_HEADERS, **(headers or {})}
@@ -1062,6 +1375,9 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
             with urllib.request.urlopen(req, timeout=timeout, context=ssl._create_unverified_context()) as r:
                 if "/error" in r.geturl():
                     raise RuntimeError(f"차단/에러 리다이렉트: {r.geturl()}")
+                # 헤더는 응답 컨텍스트가 닫히기 전 취득(절단 대조용). identity/헤더부재일 때만 엄격 대조.
+                cl_raw = r.headers.get("Content-Length")
+                ce = (r.headers.get("Content-Encoding") or "").strip().lower()
                 with open(dest, "wb") as o:
                     head = r.read(1 << 16)
                     low = head[:300].lstrip().lower()
@@ -1074,7 +1390,24 @@ def _http_download(url, dest, headers=None, retries=3, timeout=900):
                         if not chunk:
                             break
                         o.write(chunk)
-            return os.path.getsize(dest)
+            # 크기 대조는 with open 블록이 닫힌 뒤(flush 후) 디스크 크기로 수행.
+            # transport gzip(CE=gzip 등) 또는 chunked(CL 부재) 는 압축/미선언이라 대조 생략(오탐 방지) →
+            # 절단은 _payload_integrity(매직↔구조 정합)가 보완. 재시도 루프 안이라 raise 시 백오프 재시도됨.
+            written = os.path.getsize(dest)
+            # A1: 0바이트는 '성공적으로 0바이트를 받았다'가 아니라 실패다. CL=0 이면 아래
+            # 대조를 정상 통과해버리고(수신 0 == 선언 0), CL 부재면 대조 자체가 생략된다 —
+            # 이번 사고의 262건이 전부 이 틈으로 빠져나갔다. 반환값이 아니라 **예외**여야
+            # 재시도 백오프와 상위 실패처리(A5 배지·A6 status)가 걸린다.
+            if written == 0:
+                raise RuntimeError(f"0바이트 수신: 빈 응답은 성공이 아니다  [url={url}]")
+            if cl_raw is not None and ce in ("", "identity"):
+                try:
+                    expected = int(cl_raw.strip())
+                except (ValueError, AttributeError):
+                    expected = None
+                if expected is not None and written != expected:
+                    raise RuntimeError(f"다운로드 절단: 수신 {written}B / 선언 {expected}B  [url={url}]")
+            return written
         except Exception as e:
             last = e
             if attempt < retries - 1:
@@ -1100,9 +1433,308 @@ def _extract_into(src, dest_dir, orig_name=None):
         tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
         if not tool: raise RuntimeError("7z 미설치 — scripts/setup-build-host.sh")
         subprocess.run([tool, "x", "-y", f"-o{dest_dir}", str(src)], check=True, capture_output=True, timeout=3600); return
+    # zip/tar/7z 어느 추출 분기에도 안 든 페이로드 — 아카이브 매직을 가진 손상물(절단ZIP 등)이
+    # 확장자 없는 <sha> 라는 이유로 .csv 로 둔갑·staged 잠입하는 구멍을 봉쇄(2차 방어).
+    v, d = _payload_integrity(src)
+    if v in ("truncated", "corrupt"):
+        raise RuntimeError(f"손상 아카이브 추출 거부({v}): {d}  [src={src}]")
+    # healthy 평문(아카이브 매직 없음)만 .csv 폴백 복사 유지(11/11b 가 *.csv glob — 계약 보존).
     nm = orig_name or src.name
     if "." not in nm: nm += ".csv"
     shutil.copy2(src, dest_dir / nm)
+
+
+# ── 원자적 디렉터리 교체(_swap_dir) ────────────────────────────────────
+# 사고 재현 경로: `rmtree(dest)` 로 원본을 **먼저 지우고** 새로 채우다 실패하면 남는 게 없다.
+# 여기서는 순서를 뒤집는다 — 옆에 채우고(.incoming), 검증하고, 그 다음에야 교체한다.
+_SWAP_INCOMING_SUFFIX = ".incoming"
+_SWAP_OLD_SUFFIX = ".old"
+_SWAP_PID_NAME = ".swap-pid.json"
+
+
+def _proc_start_key(pid):
+    """PID 의 프로세스 시작시각 문자열. 조회 실패/미존재면 None.
+
+    C-12: PID 는 재사용된다. 고아 판정을 PID 생존만으로 내리면, 재사용된 남의 PID 를
+    보고 '작업 중'이라 오판해 고아가 영원히 남거나, 반대로 살아있는 작업을 지운다.
+    시작시각을 함께 대조하는 두 번째 열쇠다(표준 라이브러리만 — psutil 비의존)."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def _swap_pid_write(staging):
+    """`.incoming` 안에 소유자 표식(PID + 시작시각)을 남긴다."""
+    p = pathlib.Path(staging) / _SWAP_PID_NAME
+    pid = os.getpid()
+    p.write_text(json.dumps({"pid": pid, "start": _proc_start_key(pid), "at": time.time()}),
+                 encoding="utf-8")
+    return p
+
+
+def _swap_owner_alive(staging):
+    """`.incoming` 의 소유 프로세스가 아직 살아있는가(= 손대면 안 되는가).
+
+    판정 불가(표식 손상 아님 / 시작시각 조회 실패)면 **살아있다**로 본다 —
+    오판이 파괴가 아니라 잔재를 남기는 쪽으로 기울게 하는 편향이다.
+    반대로 표식 자체가 없으면 고아로 본다(정상 경로는 항상 표식을 쓴다)."""
+    f = pathlib.Path(staging) / _SWAP_PID_NAME
+    try:
+        info = json.loads(f.read_text(encoding="utf-8"))
+        pid = int(info.get("pid"))
+    except Exception:
+        return False                      # 표식 없음/깨짐 → 고아
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False                      # 죽음 → 고아
+    except PermissionError:
+        pass                              # 살아있으나 타 사용자 소유 — 시작시각으로 가린다
+    except OSError:
+        return True                       # 판정 불가 → 보수적
+    want = info.get("start")
+    got = _proc_start_key(pid)
+    if not want or got is None:
+        return True                       # 시작시각을 못 얻는 플랫폼 → 보수적
+    return got == want
+
+
+def _dir_stats(root, skip=()):
+    """root 하위 **정규 파일**의 (개수, 바이트합). 심링크는 세지 않는다."""
+    skip = {os.path.realpath(str(s)) for s in skip}
+    n_files = n_bytes = 0
+    for dp, _dn, fns in os.walk(str(root)):
+        for nm in fns:
+            fp = os.path.join(dp, nm)
+            if os.path.realpath(fp) in skip or os.path.islink(fp):
+                continue
+            try:
+                n_bytes += os.stat(fp).st_size
+            except OSError:
+                continue
+            n_files += 1
+    return n_files, n_bytes
+
+
+def _rm_path(p, ignore_errors=False):
+    """디렉터리/파일 어느 쪽이든 제거(교체 잔재 정리 전용)."""
+    p = pathlib.Path(p)
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=ignore_errors)
+        return
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
+def _assert_same_device(*paths):
+    """존재하는 경로들이 같은 파일시스템인지 검증한다(C-7 잔여 — EXDEV 전제 강제).
+
+    `.incoming`/`.old` 를 `dest.parent` 안에 만드는 설계상 rename 양끝은 늘 같은
+    디렉터리 엔트리라 EXDEV 는 구조적으로 불가하다. 다만 dest 자체가 마운트포인트인
+    경우가 남으므로 전제를 코드로 못박는다 — 복사 폴백을 두지 않는 이유는 §docstring 참조."""
+    devs = {}
+    for p in paths:
+        try:
+            devs[str(p)] = os.stat(str(p)).st_dev
+        except OSError:
+            continue
+    if len(set(devs.values())) > 1:
+        raise RuntimeError(
+            "교체 거부 — 서로 다른 파일시스템이라 원자적 rename 불가(EXDEV): "
+            + ", ".join(f"{k}(dev={v})" for k, v in devs.items()))
+
+
+def _swap_replace(src, dst):
+    """rename 한 번. EXDEV 는 원인이 드러나는 메시지로 바꿔 올린다(무성 폴백 금지)."""
+    try:
+        os.replace(str(src), str(dst))
+    except OSError as e:
+        if getattr(e, "errno", None) == errno.EXDEV:
+            raise RuntimeError(
+                f"교체 중단 — 크로스 디바이스(EXDEV) rename 실패: {src} → {dst}. "
+                "dest 와 같은 볼륨에 스테이징을 잡아야 한다") from e
+        raise
+
+
+def _swap_rollback_old(old, on=None):
+    """① `.old` 처리. dest 가 없으면 롤백(원본 회수), 있으면 완료된 교체의 잔재로 보고 폐기."""
+    old = pathlib.Path(old)
+    if not (old.exists() or old.is_symlink()):
+        return []
+    dest = old.parent / old.name[: -len(_SWAP_OLD_SUFFIX)]
+    if not (dest.exists() or dest.is_symlink()):
+        _swap_replace(old, dest)                       # ①직후 사망 → 원본 복구
+        if on: on(f"   복구: {old.name} → {dest.name} 롤백(원본 회수)")
+        return [("rollback", str(dest))]
+    _rm_path(old, ignore_errors=True)                  # ②완료 후 사망 → 정상 종료 처리
+    if on: on(f"   정리: 완료된 교체의 잔재 {old.name} 삭제")
+    return [("drop-old", str(old))]
+
+
+def _swap_sweep_incoming(staging, on=None):
+    """② `.incoming` 처리. 소유자가 살아있으면 절대 손대지 않는다."""
+    staging = pathlib.Path(staging)
+    if not (staging.exists() or staging.is_symlink()):
+        return []
+    if _swap_owner_alive(staging):
+        return [("keep-incoming", str(staging))]
+    _rm_path(staging, ignore_errors=True)
+    if on: on(f"   정리: 고아 스테이징 {staging.name} 삭제")
+    return [("drop-incoming", str(staging))]
+
+
+def _swap_recover(dest, on=None):
+    """dest 한 곳의 교체 잔재를 복구한다.
+
+    C-13: **`.old` 롤백이 `.incoming` 스윕보다 먼저다.** 순서를 뒤집으면
+    'dest 부재 ∧ 두 잔재 공존'(= ① 직후 사망) 상태에서 되돌릴 원본을 잃는다."""
+    dest = pathlib.Path(dest)
+    acts = _swap_rollback_old(dest.parent / (dest.name + _SWAP_OLD_SUFFIX), on=on)
+    acts += _swap_sweep_incoming(dest.parent / (dest.name + _SWAP_INCOMING_SUFFIX), on=on)
+    return acts
+
+
+def _sweep_swap_residue(roots, on=None, max_depth=4):
+    """프로세스 **시동 시 1회** 호출용 전역 스윕. 실행 중에는 부르지 마라.
+
+    C-13 을 전역 수준에서도 지킨다 — `.old` 를 전량 되돌린 뒤에야 `.incoming` 으로 넘어간다.
+    BUILD_HOME 전체 워크(수백만 파일)를 피하려고 깊이를 제한한다(dest 는 전부 얕다)."""
+    if isinstance(roots, (str, pathlib.PurePath)):
+        roots = [roots]
+    olds, incs = [], []
+    for root in roots:
+        root = pathlib.Path(root)
+        if not root.is_dir():
+            continue
+        base = str(root).rstrip(os.sep).count(os.sep)
+        for dp, dns, _fns in os.walk(str(root)):
+            # 이름 수집이 깊이 프루닝보다 **먼저** — 순서를 뒤집으면 경계 깊이의 잔재를 놓친다.
+            for nm in list(dns):
+                if nm.endswith(_SWAP_OLD_SUFFIX):
+                    olds.append(pathlib.Path(dp) / nm); dns.remove(nm)
+                elif nm.endswith(_SWAP_INCOMING_SUFFIX):
+                    incs.append(pathlib.Path(dp) / nm); dns.remove(nm)
+            if dp.count(os.sep) - base >= max_depth:
+                dns[:] = []
+    acts = []
+    for p in olds:                      # ① 전량 롤백 먼저
+        acts += _swap_rollback_old(p, on=on)
+    for p in incs:                      # ② 그 다음 스윕
+        acts += _swap_sweep_incoming(p, on=on)
+    return acts
+
+
+def _swap_dir(dest, fill, *, keep_old=False, on=None):
+    """dest 를 **파괴하지 않고** 통째로 교체한다(원자적 교체 프리미티브).
+
+    호출자가 `_COLLECT_LOCK` 을 보유한 상태로 호출한다 — 이 함수는 **락을 절대 획득하지
+    않는다**(C-6). `threading.Lock` 은 재진입 불가라, 이미 락을 쥔 `run_collect` 안에서
+    여기서 다시 잡으면 그 자리에서 자기교착한다. 상호배제는 전적으로 호출자 책임이다.
+
+    dest     : pathlib.Path — 최종 목적지 디렉터리
+    fill     : callable(staging: pathlib.Path) -> None
+               staging 에 내용물을 채우는 콜백. 예외를 던지면 staging 만 지우고 재전파한다.
+    keep_old : True 면 `.old` 백업을 남긴다(디버깅용, 기본 False)
+    on       : 진행 로그 콜백(선택) — `_unzip_recursive` 와 같은 관행
+
+    반환: (n_files, n_bytes) — 교체된 내용물의 실측치
+    실패: staging 만 삭제하고 예외 재전파. **dest 는 처음부터 끝까지 무손상.**
+
+    순서 — ① `dest.parent/<name>.incoming` 에 전량 채움 → ② 비어있지 않음 검증
+           → ③ dest → `.old` rename → ④ `.incoming` → dest rename → ⑤ `.old` 삭제.
+    ③④ 사이에서 죽으면 dest 가 잠깐 사라지지만, 시동 스윕(`_sweep_swap_residue`)의
+    `.old` 롤백이 원본을 되돌린다.
+
+    EXDEV: 스테이징을 `dest.parent` 안에 만들어(C-7) rename 양끝을 같은 디렉터리 엔트리로
+    고정하므로 크로스 디바이스는 구조적으로 발생하지 않는다. 그럼에도 전제를 `_assert_same_device`
+    로 검사하고 EXDEV 를 명확한 예외로 올린다. **복사 기반 폴백은 두지 않는다** — 3.6GB 복사는
+    원자성을 잃어 이 함수가 막으려는 '교체 도중 반쪽 상태'를 되살리기 때문이다.
+    """
+    dest = pathlib.Path(dest)
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = parent / (dest.name + _SWAP_INCOMING_SUFFIX)
+    old = parent / (dest.name + _SWAP_OLD_SUFFIX)
+
+    # 0) 이전 시도의 잔재부터 — C-13 과 같은 순서(.old 롤백 → .incoming 스윕)를 쓴다.
+    _swap_rollback_old(old, on=on)
+    if staging.exists() or staging.is_symlink():
+        if _swap_owner_alive(staging):
+            raise RuntimeError(f"교체가 이미 진행 중이다(살아있는 소유자): {staging}")
+        _swap_sweep_incoming(staging, on=on)
+    if staging.exists() or staging.is_symlink():
+        raise RuntimeError(f"스테이징 정리 실패 — 수동 확인 필요: {staging}")
+
+    staging.mkdir(parents=True)
+    pidf = _swap_pid_write(staging)
+    _assert_same_device(staging, parent, dest)
+
+    try:
+        fill(staging)
+        n_files, n_bytes = _dir_stats(staging, skip=[pidf])
+        if n_files <= 0 or n_bytes <= 0:
+            raise RuntimeError(
+                f"교체 거부 — 스테이징이 비었다(파일 {n_files}개 / {n_bytes}바이트): {dest}")
+    except BaseException:
+        _rm_path(staging, ignore_errors=True)      # dest 는 아직 손도 대지 않았다
+        raise
+
+    _rm_path(pidf, ignore_errors=True)             # 표식은 dest 로 넘기지 않는다
+    dest_there = dest.exists() or dest.is_symlink()
+    if dest_there:
+        _swap_replace(dest, old)                   # ③ 원본 대피
+    try:
+        _swap_replace(staging, dest)               # ④ 신품 게시
+    except BaseException:
+        if dest_there and not (dest.exists() or dest.is_symlink()):
+            os.replace(str(old), str(dest))        # ④ 실패 → 즉시 롤백
+            if on: on(f"   롤백: {old.name} → {dest.name}(교체 실패, 원본 회수)")
+        _rm_path(staging, ignore_errors=True)
+        raise
+    if dest_there and not keep_old:
+        _rm_path(old, ignore_errors=True)          # ⑤ 여기서 죽어도 시동 스윕이 정리한다
+    if on: on(f"   교체 완료: {dest.name} ({n_files}개 / {n_bytes:,}바이트)")
+    return n_files, n_bytes
+
+
+def _swap_file(dest, src, *, on=None):
+    """파일형 목적지(osm `.pbf` 등)를 **파괴하지 않고** 교체한다 — `_swap_dir` 의 파일 짝.
+
+    기존 `shutil.copy2(sp, dest)` 는 dest 를 먼저 truncate 하고 쓰기 때문에, 복사 도중
+    죽거나 원본이 반쪽이면 dest 가 그 자리에서 깨진다. 형제 `.incoming` 에 먼저 받고
+    크기 게이트를 통과한 뒤에만 `os.replace` 로 갈아끼워 그 창을 없앤다.
+
+    `_swap_dir` 과 같은 계약 — **락을 절대 획득하지 않는다**(C-6). 상호배제는 호출자 몫.
+    스테이징이 `dest.parent` 안이라 EXDEV 는 구조적으로 발생하지 않는다(C-7).
+
+    반환: (1, n_bytes)
+    실패: 스테이징만 삭제하고 예외 재전파. **dest 는 무손상.**
+    """
+    dest = pathlib.Path(dest); src = pathlib.Path(src)
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = parent / (dest.name + _SWAP_INCOMING_SUFFIX)
+    _rm_path(staging, ignore_errors=True)          # 이전 시도의 잔재
+    _assert_same_device(staging, parent, dest)
+    try:
+        shutil.copy2(str(src), str(staging))
+        n_bytes = staging.stat().st_size
+        if n_bytes <= 0:
+            raise RuntimeError(f"교체 거부 — 원본이 0바이트다: {src}")
+    except BaseException:
+        _rm_path(staging, ignore_errors=True)      # dest 는 아직 손도 대지 않았다
+        raise
+    _swap_replace(staging, dest)                   # 원자적 교체(같은 디렉터리 → EXDEV 불가)
+    if on: on(f"   교체 완료: {dest.name} ({n_bytes:,}바이트)")
+    return 1, n_bytes
 
 
 def _vworld_cookie():
@@ -1336,32 +1968,42 @@ def run_collect(selected):
         MGR.publish({"kind": "collect", "status": "running", "progress": 0.0})
         STORE_DIR.mkdir(parents=True, exist_ok=True)
         tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
-        total = len(selected); done = 0; changed = []
+        total = len(selected); done = 0; changed = []; failed = 0
         for item_key in selected:
             try:
                 src, urls, dest, mode = _collect_plan(item_key)
                 hdrs = _collect_headers(src)   # vworld_session 이면 로그인 세션 쿠키 주입
-                MGR._emit("collect", f"⇩ {item_key} 다운로드 ({len(urls)}파일)…")
+                expected_n = len(urls)   # A2 동수 불변식 기준 — 루프 진입 전에 확정한다
+                MGR._emit("collect", f"⇩ {item_key} 다운로드 ({expected_n}파일)…")
                 shas = []
                 if mode == "file":
                     destp = pathlib.Path(dest); destp.parent.mkdir(parents=True, exist_ok=True)
                     tmp = tmpdir / (item_key.replace(":", "_") + ".part")
                     sz = _http_download(urls[0], tmp, headers=hdrs)
+                    _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트
                     sha, reused = store_put(tmp); shas.append(sha)
+                    _assert_full_receipt(item_key, shas, expected_n)   # 교체 전 마지막 관문
                     if not reused or not destp.exists():
-                        shutil.copy2(store_path(sha), destp)
+                        # copy2 는 dest 를 먼저 truncate 한다 — 형제 .incoming 경유 원자 교체로 대체.
+                        _swap_file(destp, store_path(sha), on=lambda m: MGR._emit("collect", f"  {m}"))
                     MGR._emit("collect", f"  {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ' → 배치'}")
                 else:
                     allreused = True
                     for i, u in enumerate(urls):
                         tmp = tmpdir / (item_key.replace(":", "_") + f"_{i}.part")
                         sz = _http_download(u, tmp, headers=hdrs)
+                        _collect_integrity_gate(tmp, item_key, sz)   # 다운로드 직후·store_put 전 무결성 게이트(루프 내)
                         sha, reused = store_put(tmp); shas.append(sha); allreused = allreused and reused
-                        MGR._emit("collect", f"  파일{i+1}/{len(urls)} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
+                        MGR._emit("collect", f"  파일{i+1}/{expected_n} {sz/1e6:.1f}MB sha={sha[:8]}{' (변경없음)' if reused else ''}")
+                    _assert_full_receipt(item_key, shas, expected_n)   # 교체 전 마지막 관문
                     if (not allreused) or (not _nonempty_dir(pathlib.Path(dest))):
-                        shutil.rmtree(dest, ignore_errors=True)
-                        for sha in shas:
-                            _extract_into(store_path(sha), dest)
+                        # 예전엔 rmtree(dest) 를 **먼저** 때린 뒤 추출했다 — 추출물이 0건이면
+                        # 그대로 빈 디렉터리가 남았다(이번 사고). 형제 .incoming 에 다 채운
+                        # 뒤에만 갈아끼운다. 채우다 실패하면 dest 는 손도 대지 않는다.
+                        def _fill(staging, _shas=list(shas)):
+                            for s in _shas:
+                                _extract_into(store_path(s), staging)
+                        _swap_dir(dest, _fill, on=lambda m: MGR._emit("collect", f"  {m}"))
                 cur_sha = ",".join(shas); prev = ver.get(item_key, {}).get("staged_sig")
                 rec = ver.setdefault(item_key, {})
                 rec["staged_sig"] = cur_sha; rec["current"] = time.strftime("%Y-%m-%d")
@@ -1369,8 +2011,19 @@ def run_collect(selected):
                 save_versions({item_key: rec})
                 changed.append(item_key) if cur_sha != prev else None
                 MGR._emit("collect", f"  {'✓ 갱신' if cur_sha != prev else '= 변경 없음'}: {item_key}")
+                # save_versions 뒤에 둔다 — 그쪽이 _STATE_COLS 전량을 rec 값으로 덮어써
+                # 먼저 쓰면 낡은 배지로 되돌아간다.
+                _set_validation(item_key, "collect_ok",
+                                f"{len(shas)}파일 수집 {'갱신' if cur_sha != prev else '변경 없음'}")
             except Exception as e:
+                failed += 1
                 MGR._emit("collect", f"  ✗ {item_key}: {str(e)[:140]}")
+                # 실패를 상태 컬럼에 남겨 **낡은 `ok` 배지를 덮는다** — 남겨두면 UI 상
+                # 정상으로 보여 소실이 무증상으로 굳는다(이번 사고의 고착 원인).
+                try:
+                    _set_validation(item_key, "collect_failed", str(e)[:200])
+                except Exception as e2:   # 상태 기록 실패가 원래 원인을 가리지 않게
+                    MGR._emit("collect", f"  ! 상태 기록 실패: {str(e2)[:100]}")
             done += 1
             MGR.jobs["collect"]["progress"] = done / max(total, 1)
             MGR.publish({"kind": "collect", "status": "running", "progress": done / max(total, 1)})
@@ -1380,9 +2033,14 @@ def run_collect(selected):
             if bt:
                 MGR._emit("collect", f"  ▶ OSM 변환 빌드 enqueue: {', '.join(bt)}")
                 MGR.enqueue(bt)
-        MGR.jobs["collect"]["status"] = "done"
-        MGR._emit("collect", f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
-        MGR.publish({"kind": "collect", "status": "done", "progress": 1.0})
+        # A6: 예외 없이 끝나도 item 실패가 있으면 error 다. 예전엔 262건 전부 실패해도
+        # done 이라 UI·SSE 어디에도 사고가 드러나지 않았다. 예외 이탈 시엔 여기 도달
+        # 자체를 못 하므로 _collect_guarded 의 error 와 경합하지 않는다.
+        st = "error" if failed else "done"
+        MGR.jobs["collect"]["status"] = st
+        MGR._emit("collect", f"실패 {failed}건 — 수집 종료(변경 {len(changed)}/{total})" if failed
+                  else f"OK: 수집 완료 — 변경 {len(changed)}/{total}")
+        MGR.publish({"kind": "collect", "status": st, "progress": 1.0})
         return changed
 
 
@@ -1449,29 +2107,120 @@ def save_manifest(name=None, with_bundle=False):
     return man
 
 
+class _UploadRejected(Exception):
+    """업로드 거부 — `code` 는 그대로 HTTP 상태로 나간다."""
+
+    def __init__(self, msg, code=400):
+        super().__init__(msg)
+        self.code = code
+
+
+def _apply_upload(key, name, dest, tmp, written, nbytes):
+    """수신이 끝난 임시파일을 **검증한 뒤에만** staged 로 적재한다(C-9).
+
+    예전에는 게이트가 하나도 없었다. 연결이 끊겨 `written < nbytes` 여도 그대로
+    `rmtree(dest)` → 반쪽 파일 추출 → 성공 응답이 나갔고, `_record_upload` 도 부르지
+    않아 파일을 갈아끼워도 옛 `ok` 검증 배지가 남았다. 수집 경로만 고치면 같은 사고가
+    이 통로로 그대로 재현된다.
+
+    락은 **파괴 구간에만** 잡는다(C-11). 다GB 스트리밍과 무결성 검사를 락 안에 넣으면
+    업로드가 도는 내내 수집이 통째로 막힌다. 수신 루프는 아예 이 함수 밖(핸들러)에 있고,
+    여기서도 `store_put` 까지는 락 없이 진행한다. `_swap_dir`/`_swap_file` 은 락을 잡지
+    않으므로(C-6) 획득 지점은 아래 한 곳뿐이다.
+
+    반환: sha — 실패는 전부 `_UploadRejected`. **어느 실패 경로에서도 dest 는 무손상.**
+    """
+    if nbytes <= 0:
+        raise _UploadRejected("본문 길이 없음 — 빈 업로드는 적재하지 않는다", 400)
+    if written != nbytes:
+        raise _UploadRejected(
+            f"수신 불완전 — {written:,}/{nbytes:,}바이트만 도착했다. 기존 파일은 그대로 두었다", 400)
+    try:
+        _collect_integrity_gate(tmp, key, written)     # truncated/corrupt 면 tmp 폐기 후 raise
+    except RuntimeError as e:
+        raise _UploadRejected(f"업로드 무결성 거부: {str(e)[:120]}", 400) from e
+
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+    sha, _ = store_put(tmp)                            # 여기까지 dest 는 손도 대지 않았다
+    sp = store_path(sha)
+
+    if not _COLLECT_LOCK.acquire(timeout=_COLLECT_LOCK_WAIT):
+        raise _UploadRejected("수집이 진행 중이라 적재할 수 없다 — 수집이 끝난 뒤 다시 시도하라", 409)
+    try:
+        if dest.suffix:                                # 파일형(osm .pbf)
+            _swap_file(dest, sp)
+        else:
+            _swap_dir(dest, lambda staging: _extract_into(sp, staging))
+        _record_upload(key, name, written)             # 이력 + 검증배지 pending 리셋
+        # `_record_upload` 가 건드린 뒤에 읽어야 pending 이 살아남는다
+        # (`validation_status` 도 `_STATE_COLS` 라 옛 스냅샷을 쓰면 방금 리셋한 배지를 되돌린다).
+        ver = load_versions(); rec = ver.setdefault(key, {})
+        rec["staged_sig"] = sha
+        rec["current"] = time.strftime("%Y-%m-%d"); rec["file"] = name
+        save_versions({key: rec})
+    finally:
+        _COLLECT_LOCK.release()
+    return sha
+
+
 def load_manifest(mid):
-    """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로."""
+    """프로필 SHA들을 store 에서 staged 로 재구성 + DB 상태 복원 → 다음 빌드가 그 파일로.
+
+    **원본이 store 에 없으면 dest 에 손도 대지 않는다**(C-8). 예전에는 `rmtree(dest)` 를
+    먼저 하고 `sp.exists()` 를 나중에 봤기 때문에, store 가 빈 프로필 하나를 불러오는 것만으로
+    staged 약 5.0GB 가 소리 없이 사라졌다. 게다가 서명 기록이 `if` 블록 **바깥**이라 복원하지도
+    않은 키에 `staged_sig` 가 찍혔고, 다음 수집이 그 거짓 서명을 보고 "이미 최신"이라 판단해
+    재수집조차 하지 않았다 — 소실이 영구화되는 경로다.
+
+    반환: {"id", "name", "restored": n, "skipped": [{"key","reason","missing","total"}, …]}
+    """
     p = MANIFESTS_DIR / f"{mid}.json"
     if not p.is_file():
         raise RuntimeError("프로필 없음")
-    man = json.loads(p.read_text(encoding="utf-8")); ver = load_versions(); restored = 0
-    for key, info in (man.get("sources") or {}).items():
-        sha = info.get("sha"); dest = _item_dest(key)
-        if sha and dest:
-            if dest.suffix:   # 파일형(osm .pbf)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                sp = store_path(sha.split(",")[0])
-                if sp.exists(): shutil.copy2(sp, dest)
-            else:
-                shutil.rmtree(dest, ignore_errors=True)
-                for s in sha.split(","):
-                    sp = store_path(s)
-                    if sp.exists(): _extract_into(sp, dest)
+    man = json.loads(p.read_text(encoding="utf-8"))
+    restored = 0; skipped = []
+
+    def _skip(key, reason, missing=0, total=0):
+        skipped.append({"key": key, "reason": reason, "missing": missing, "total": total})
+
+    # 수집과 동시에 돌면 서로의 staged 를 덮는다 — 파괴 구간을 락으로 감싼다(C-11).
+    # `_swap_dir`/`_swap_file` 은 락을 잡지 않으므로(C-6) 여기가 유일한 획득 지점이다.
+    if not _COLLECT_LOCK.acquire(timeout=_COLLECT_LOCK_WAIT):
+        raise RuntimeError("수집이 진행 중이라 복원할 수 없다 — 수집이 끝난 뒤 다시 시도하라")
+    try:
+        ver = load_versions()
+        for key, info in (man.get("sources") or {}).items():
+            sha = (info or {}).get("sha"); dest = _item_dest(key)
+            if not sha or not dest:
+                _skip(key, "원본 서명 없음" if not sha else "알 수 없는 항목")
+                continue
+            shas = [s for s in str(sha).split(",") if s]
+            miss = [s for s in shas if not store_path(s).exists()]
+            if not shas or miss:
+                # ① 선검증 — 파일형·디렉터리형 **양쪽** 모두. 하나라도 없으면 그 키는 통째로
+                #    건너뛴다(반쪽 복원 금지). dest 는 이 시점까지 한 번도 건드리지 않았다.
+                _skip(key, "store 에 원본 없음", missing=len(miss) or 1, total=len(shas))
+                continue
+            try:
+                if dest.suffix:            # 파일형(osm .pbf) — `.incoming` 경유 원자적 교체
+                    _swap_file(dest, store_path(shas[0]))
+                else:                      # 디렉터리형 — `.incoming` 에 전량 추출 후 교체
+                    def fill(staging, _shas=shas):
+                        for s in _shas:
+                            _extract_into(store_path(s), staging)
+                    _swap_dir(dest, fill)
+            except Exception as e:
+                # ② 교체가 깨져도 dest 무손상이 두 프리미티브의 계약이다. 서명은 남기지 않는다.
+                _skip(key, f"복원 실패: {str(e)[:80]}", missing=0, total=len(shas))
+                continue
             restored += 1
-        rec = ver.setdefault(key, {}); rec["staged_sig"] = sha
-        rec["current"] = info.get("current"); rec["file"] = info.get("file")
-        save_versions({key: rec})
-    return {"id": mid, "name": man.get("name"), "restored": restored}
+            # ③ 서명·상태 기록은 **성공한 키에만**(옛 1578 을 `if` 안으로 들여쓴 자리).
+            rec = ver.setdefault(key, {}); rec["staged_sig"] = sha
+            rec["current"] = info.get("current"); rec["file"] = info.get("file")
+            save_versions({key: rec})
+    finally:
+        _COLLECT_LOCK.release()
+    return {"id": mid, "name": man.get("name"), "restored": restored, "skipped": skipped}
 
 
 def rename_manifest(mid, name):
@@ -1655,6 +2404,18 @@ class H(BaseHTTPRequestHandler):
             prep = prepare_sources(emit=_pemit)   # 업로드 데이터 적재(미업로드는 직전 재사용)
             res = MGR.enqueue(targets)   # {queued, fresh}
             return self._json({"queued": res["queued"], "fresh": res["fresh"], "prepared": prep})
+        if self.path == "/api/targets/mark-fresh":   # 서명만 갱신(산출물 동일 확인 시) — 사유 필수
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or b"{}")
+            kind = b.get("kind"); reason = (b.get("reason") or "").strip()
+            if kind not in TARGETS(): return self._json({"error": "잘못된 kind"}, 400)
+            if len(reason) < 4: return self._json({"error": "사유(4자 이상)가 필요합니다"}, 400)
+            if (MGR.jobs.get(kind) or {}).get("status") in ("running", "queued"):
+                return self._json({"error": "실행 중/대기 중인 타깃은 갱신할 수 없습니다"}, 409)
+            rec = mark_fresh(kind, reason)
+            MGR.publish({"kind": kind, "status": "fresh", "progress": 1.0, "line": f"[서명 갱신] {kind}: {reason}"})
+            return self._json({"ok": True, "kind": kind, "state": rec, "fresh": target_freshness(kind)})
         if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -1747,6 +2508,7 @@ class H(BaseHTTPRequestHandler):
             tmpdir = BUILD_HOME / "tmp"; tmpdir.mkdir(parents=True, exist_ok=True)
             tmp = tmpdir / ("up_" + key.replace(":", "_") + "_" + name.replace("/", "_"))
             nbytes = int(self.headers.get("Content-Length", "0")); written = 0
+            # 수신은 락 **밖**에서(C-11). 다GB 업로드가 도는 내내 수집이 막히면 안 된다.
             try:
                 with open(tmp, "wb") as o:
                     rem = nbytes
@@ -1754,13 +2516,16 @@ class H(BaseHTTPRequestHandler):
                         ch = self.rfile.read(min(1 << 20, rem))
                         if not ch: break
                         o.write(ch); rem -= len(ch); written += len(ch)
-                STORE_DIR.mkdir(parents=True, exist_ok=True)
-                sha, _ = store_put(tmp)
-                shutil.rmtree(dest, ignore_errors=True); _extract_into(store_path(sha), dest)
-                ver = load_versions(); rec = ver.setdefault(key, {})
-                rec["staged_sig"] = sha; rec["current"] = time.strftime("%Y-%m-%d"); rec["file"] = name
-                save_versions({key: rec})
             except Exception as e:
+                _rm_path(tmp, ignore_errors=True)
+                return self._json({"error": f"수신 실패: {str(e)[:120]}"}, 500)
+            try:
+                sha = _apply_upload(key, name, dest, tmp, written, nbytes)
+            except _UploadRejected as e:
+                _rm_path(tmp, ignore_errors=True)
+                return self._json({"error": str(e), "size": written, "expected": nbytes}, e.code)
+            except Exception as e:
+                _rm_path(tmp, ignore_errors=True)
                 return self._json({"error": f"적재 실패: {str(e)[:120]}"}, 500)
             return self._json({"ok": True, "key": key, "size": written, "sha": sha[:8]})
         if self.path == "/api/collect/check":   # 항목별(하위 포함) 최신일 조회
@@ -1951,6 +2716,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
+function markFresh(kind){const r=prompt('서명만 갱신할 사유(산출물이 동일하다는 근거, 4자 이상):'); if(!r)return;
+  fetch('/api/targets/mark-fresh',{method:'POST',body:JSON.stringify({kind,reason:r})}).then(x=>x.json()).then(d=>{if(d.error)return alert(d.error);logln('  [서명 갱신] '+kind+': '+r);loadTargets&&loadTargets();}).catch(e=>alert('실패: '+e));}
 function tbadge(f){return f==='fresh'?'<span class="tb fresh">↻ 최신</span>'
   :f==='stale'?'<span class="tb stale">⟳ 변경됨</span>'
   :f==='missing'?'<span class="tb miss">⊘ 산출물 없음</span>'
@@ -1958,7 +2725,7 @@ function tbadge(f){return f==='fresh'?'<span class="tb fresh">↻ 최신</span>'
 // 최신(fresh)인 타겟은 기본 체크해제 — 그대로 두면 빌드 시 건너뜀. 다시 체크하면 강제 재빌드.
 function loadTargets(){return fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
-  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${t.fresh==='fresh'?'':'checked'}> ${t.label} ${tbadge(t.fresh)}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
+  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${t.fresh==='fresh'?'':'checked'}> ${t.label} ${tbadge(t.fresh)}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}${t.fresh==='stale'?` <a class=mut title="산출물이 실제로 최신인데 스크립트 로그·주석 변경으로 stale 로 잡힌 경우만. 사유를 기록합니다." onclick="markFresh('${t.kind}')">서명갱신</a>`:''}</label>`).join('');
 });}
 let _tt; function refreshTargetsSoon(){clearTimeout(_tt);_tt=setTimeout(loadTargets,800);}   // 빌드 종료 후 배지·체크 갱신(디바운스)
 loadTargets();
@@ -1993,7 +2760,10 @@ es.onmessage=e=>{const d=JSON.parse(e.data);
 function fmt(d){const x=String(d||'').replace(/\D/g,'');return x.length===8?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x.length===6?`${x.slice(0,4)}-${x.slice(4,6)}`:(d||'−');}
 function srcStatus(s){return s.status==='update'?'🔴 업데이트 있음':(s.status==='current'?'🟢 최신':'—');}
 function vbadge(s){if(!s.uploadable)return '';
-  const m={ok:'🟢 검증 OK',warn:'🟡 검증 경고',fail:'🔴 검증 실패',pending:'⏳ 검증 대기'},v=s.validation;
+  // collect_* 2키: run_collect(A5)가 같은 축에 기록한다. 없으면 m[v]||v 로 떨어져
+  // 아이콘·색 없는 회색 영문이 되는데, 가장 눈에 띄어야 할 수집 실패가 가장 안 띈다.
+  const m={ok:'🟢 검증 OK',warn:'🟡 검증 경고',fail:'🔴 검증 실패',pending:'⏳ 검증 대기',
+           collect_ok:'🟢 수집 OK',collect_failed:'🔴 수집 실패'},v=s.validation;
   const lab=v?(m[v]||v):(s.file?'⏳ 검증 대기':'<span class=mut>미업로드</span>');
   const btn=s.file?` <a onclick="validateSource('${s.key}')">[${v&&v!=='pending'?'재검증':'검증'}]</a>`:'';
   return `<div class=src-meta>${lab}${s.validation_msg?` · <span class=mut>${s.validation_msg}</span>`:''}${btn}</div>`;}
@@ -2165,7 +2935,12 @@ function editProfile(id){const el=document.querySelector('#pf_'+id+' .pname');if
     fetch('/api/profiles/rename',{method:'POST',body:JSON.stringify({id,name:n})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error);loadBuilds();});};
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();save();}else if(e.key==='Escape'){done=true;renderProfRows();}};inp.onblur=save;}
 function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원할까요? (현재 staged 덮어씀)'))return;
-  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건) — 갱신할 항목만 체크 후 빌드');loadCollect(false);});}
+  fetch('/api/profiles/load',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.error)return alert(d.error);
+    var sk=d.skipped||[];
+    logln('↻ 프로필 불러옴: '+d.name+' (복원 '+d.restored+'건 / 건너뜀 '+sk.length+'건) — 갱신할 항목만 체크 후 빌드');
+    if(sk.length){sk.forEach(function(s){logln('   ⚠ 건너뜀 '+s.key+': '+s.reason+(s.total?' ('+s.missing+'/'+s.total+' 누락)':''));});
+      alert('건너뛴 항목 '+sk.length+'건 — store 에 원본이 없어 복원하지 못했습니다.\n기존 staged 파일은 그대로 두었습니다. 해당 항목은 다시 수집해야 합니다:\n\n'+sk.map(function(s){return '· '+s.key+' — '+s.reason;}).join('\n'));}
+    loadCollect(false);});}
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 function loadVw(){fetch('/api/secrets/vworld').then(r=>r.json()).then(d=>{const s=$('#vwState');if(s)s.textContent=d.set?'· 설정됨 ✓':'· 미설정';});}
 function saveVw(){const j=$('#vwPjsess'),b=$('#vwVworld');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({pjsessionid:j.value,vworld:b.value})}).then(r=>r.json()).then(d=>{j.value='';b.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}

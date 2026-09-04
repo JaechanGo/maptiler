@@ -11,6 +11,9 @@ kind 별로 기존분 멱등 교체. attrs 에 원본 행 전체를 jsonb 로 �
 """
 import argparse, csv, io, json, os, subprocess, sys, tempfile
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))   # PYTHONSAFEPATH=1 대비
+from _common.csvheur import pick_coord_index        # noqa: E402
+
 # 헤더 키워드 우선순위(앞쪽 우선). 부분일치.
 NAME_KW = ["시설명", "기관명", "관서명", "119안전센터명", "병원명", "의료기관명", "명칭", "설치장소", "상호", "name"]
 ADDR_KW = ["도로명주소", "소재지도로명주소", "주소", "소재지", "설치위치", "road"]
@@ -31,16 +34,31 @@ def read_rows(path):
     sys.exit(f"CSV 인코딩 판별 실패: {path}")
 
 
-def pick(header, kws, override):
+def pick(header, kws, override, rows=None, rng=None):
+    """헤더 키워드로 컬럼 **인덱스**를 고른다. 반환 계약을 바꾸지 말 것(호출부가 r[i] 로 소비).
+
+    rows·rng 를 주면 좌표 컬럼 전용으로 값 검증이 붙는다: 후보가 둘 이상일 때
+    표본값이 십진수 + 유효범위(rng)인 컬럼을 우선한다(_common/csvheur.py).
+    이름 순서만 보면 `위도` 가 `위도(도)`(DMS 정수)에 먼저 걸려 좌표를 정수 격자로
+    뭉갠다 — 민방위대피시설에서 실제로 lat 37(진짜 37.577)이 적재된 적이 있다.
+    후보가 하나뿐이거나 전부 비십진이면 종전 선택을 그대로 준다(회귀 0).
+    """
     if override:
         return header.index(override) if override in header else sys.exit(f"지정 컬럼 없음: {override}")
     norm = [h.strip().lower().replace(" ", "") for h in header]
+    cand = []
     for kw in kws:
         k = kw.lower()
         for i, h in enumerate(norm):
-            if k in h:
-                return i
-    return None
+            if k in h and i not in cand:
+                cand.append(i)
+    if not cand:
+        return None
+    if rows and rng and len(cand) > 1:
+        best = pick_coord_index(cand, rows, rng[0], rng[1])
+        if best is not None:
+            return best
+    return cand[0]
 
 
 SQL = r"""
@@ -83,8 +101,8 @@ def main():
     header, rows = read_rows(csv_path)
     iname = pick(header, NAME_KW, args.name_col)
     iaddr = pick(header, ADDR_KW, args.addr_col)
-    ilat  = pick(header, LAT_KW,  args.lat_col)
-    ilon  = pick(header, LON_KW,  args.lon_col)
+    ilat  = pick(header, LAT_KW,  args.lat_col, rows, (33, 39))     # 값검증(십진+한반도 bbox)으로
+    ilon  = pick(header, LON_KW,  args.lon_col, rows, (124, 132))   # DMS '도' 컬럼 회피(11b:130-131 과 동일 범위)
     print(f"컬럼 감지: name={header[iname] if iname is not None else '—'} "
           f"addr={header[iaddr] if iaddr is not None else '—'} "
           f"lat={header[ilat] if ilat is not None else '—'} "

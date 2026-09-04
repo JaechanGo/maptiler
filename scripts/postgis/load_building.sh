@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # GIS건물통합정보 SHP(VWorld, 시도별) → PostGIS building (시도 LIST 파티션) (Phase 2)
-# 10-gen-buildings.sh 와 동일 컬럼/휴리스틱: A16=높이(m,결측多), A26=지상층수.
+# (구)10-gen-buildings.sh 와 동일 컬럼/휴리스틱 — 해당 스크립트는 T028 에서 폐기, 본 파일이 유일 구현.
+#   A16=높이(m,결측多), A26=지상층수.
 #   render_height = A16>0?A16 : (A26>0?A26*3.3 : 6).  기존 buildings.mbtiles 대체.
 # sido_cd 는 파일명 AL_D010_<시도2>_<YYYYMMDD>.shp(전체분) / CH_D010_*(변동분) 에서 추출.
 #
@@ -116,7 +117,7 @@ load_one() {
   echo "  [$idx/${N}] $lyr (시도 $sido) → ${cnt}건"
 }
 
-# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
+# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n / bash<4.3 은 폴링 폴백).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
 # fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
 # jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료.
@@ -136,7 +137,16 @@ for shp in "${SHPS[@]}"; do
   if [ -z "$sido" ]; then echo "  ✗ 시도코드 추출 실패: $lyr (--sido 로 지정)"; continue; fi
   i=$((i+1))
   load_one "$shp" "$i" "$sido" &
-  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+  # ★ wait -n 은 bash 4.3+ 전용 — 4.2(CentOS 7)에서 "invalid option" 으로 죽으면 set -e 가 워커를
+  #   전부 정리해 **적재가 중도 절단**된다([실측 2026-09-02 .244] building 16.3M → 10.7M 로 유실).
+  #   load_parcel.sh 와 동일 폴백.
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+    if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
+      wait -n
+    else
+      sleep 0.5
+    fi
+  done
 done
 wait
 # 워커가 각자 스테이징을 정리하지만, 비정상 종료 잔여분(_stg_building_*)까지 일괄 정리.

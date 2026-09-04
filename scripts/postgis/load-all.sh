@@ -9,9 +9,15 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/_pg-env.sh"
 BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
-STEPS="${STEPS:-schema admin parcel building geocode facility}"
+STEPS="${STEPS:-schema admin parcel building geocode lawd facility}"
 has(){ case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
 run(){ echo; echo "━━ $* ━━"; "$@"; }
+# 접속 선검사 — PostGIS 가 내려가 있으면 단계마다 PQconnectdb 실패만 누적된다([실측 2026-09-04] 7단계 연속 ✗ 뒤 error).
+# 부분 적재·TRUNCATE 가 섞이기 전에 즉시 중단(종료코드 2). 스튜디오는 실행 전 _ensure_postgis 로 먼저 올린다.
+if ! psql_q -c "SELECT 1" >/dev/null 2>&1; then
+  echo "✗ PostGIS 접속 불가(${PGHOST}:${PGPORT}) — 기동 후 재실행: cd server && COMPOSE_PROFILES=postgis docker compose start postgis" >&2
+  exit 2
+fi
 fail=0   # 적재 단계 실패 누적 — 하나라도 실패하면 종료코드 1(빌드그래프가 단계 실패로 인지). set -e 미사용이라 직접 추적.
 
 # 0) 스키마(멱등)
@@ -41,11 +47,41 @@ fi
 if has parcel; then
   PARCEL="$BUILD_HOME/staged/parcel"
   if [ -d "$PARCEL" ]; then
-    run "$HERE/load_parcel.sh" --shp "$PARCEL" --fresh \
-      || { echo "  ✗ 연속지적 적재 실패 — parcel 미완·GiST/pnu 인덱스 누락 가능. 재실행: STEPS=parcel $0" >&2; fail=1; }
+    # load-all 의 parcel 은 항상 --fresh(TRUNCATE 후 재적재) → ji_main/ji_sub/san/geom_pt 전부 NULL 로 리셋.
+    # 적재 성공 직후 ji_main 자동복구(backfill_parcel_jibun.sql)를 체인한다(--fresh 한정 트리거가 구조로 보장).
+    #   · opt-out: PARCEL_SKIP_BACKFILL=1 (백업 복원 직전 시간절약·schema 미선행 단독 parcel 적재 등).
+    #   · 전제: san/ji_main/ji_sub 컬럼·parcel_jibun_lookup 인덱스(schema 단계=21-parcel-jibun.sql 산출) 선존.
+    #     schema 미선행 단독 STEPS=parcel 은 PARCEL_SKIP_BACKFILL=1 또는 STEPS="schema parcel" 로 돌릴 것.
+    #   · geom_pt 는 자동 체인 제외(런타임 COALESCE 폴백·비차단) — 필요 시 STEPS=backfill 수동 경로.
+    if run "$HERE/load_parcel.sh" --shp "$PARCEL" --fresh; then
+      if [ -z "${PARCEL_SKIP_BACKFILL:-}" ]; then
+        run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_parcel_jibun.sql" \
+          || { echo "  ✗ backfill_parcel_jibun.sql 실패 — 사전조건(컬럼·인덱스 존재)/가드 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
+      fi
+    else
+      echo "  ✗ 연속지적 적재 실패 — parcel 미완·GiST/pnu 인덱스 누락 가능. 재실행: STEPS=parcel $0" >&2; fail=1
+    fi
   else
     echo "  (건너뜀) 연속지적 SHP 없음: $PARCEL"
   fi
+fi
+
+# 2.5) parcel 정규화 백필 (옵트인 전용 — 기본 STEPS 미포함, 자동 stale 편입 금지: Global Constraint L20)
+#      jibun(san/본번/부번) + geom_pt 대표점. parcel 적재 이후 의존. 둘 다 증분 가드(WHERE ... IS NULL).
+#      ⚠ ji_main 은 parcel 단계에 자동 체인됨(PARCEL_SKIP_BACKFILL=1 로 opt-out). 이 backfill 토큰은
+#         geom_pt 포함 전체 수동 백필·부분실패 재시도 경로로 유지한다(정규 full-build 기본 STEPS 미포함).
+#         STEPS="parcel backfill" 동시지정은 backfill_parcel_jibun.sql 의 인덱스를 2회 통째 재빌드(수 분)하므로
+#         비권장 — ji_main 은 자동 체인이 채우니 geom_pt 만 필요하면 이 토큰을 단독으로 쓸 것.
+#      ⚠ 사전조건(N1): parcel 적재 완료 + 21-parcel-jibun.sql 의 san/ji_main/ji_sub/geom_pt 컬럼·
+#         parcel_jibun_lookup 인덱스가 schema 선행으로 이미 존재해야 함. STEPS=backfill 단독 호출 시
+#         컬럼/인덱스 부재면 즉시 실패(ON_ERROR_STOP=1) — schema 단계를 먼저 돌릴 것.
+#      ⚠ 39.9M 급 대량 UPDATE(파티션별 독립 커밋) — STEPS="backfill" 로 명시 호출할 때만.
+#      실행 순서: jibun(인덱스 단독 DROP/CREATE 래핑 동반) → geom_pt(파티션별). 둘 다 ON_ERROR_STOP=1, fail 누적.
+if has backfill; then
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_parcel_jibun.sql" \
+    || { echo "  ✗ backfill_parcel_jibun.sql 실패 — 인덱스 재생성/가드/사전조건(컬럼·인덱스 존재) 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/backfill_geom_pt.sql" \
+    || { echo "  ✗ backfill_geom_pt.sql 실패 — 파티션별 UPDATE 확인. 재실행: STEPS=backfill $0" >&2; fail=1; }
 fi
 
 # 3) 건물통합정보 (시도 파티션)
@@ -61,16 +97,96 @@ if has building; then
   else
     echo "  (건너뜀) 건물 SHP 없음: $GIS"
   fi
+  # juso 건물도형 패치 — AL_D010 이 놓친 신축(신개발지구, 수년 지연) 증분 보완.
+  # AL_D010 적재 **직후**에 돌아야 dedup(기존 건물 공간 대조)이 최신 기준으로 선다.
+  # 원천 없으면 스크립트가 스스로 건너뛴다(옵션 원천 — 실패로 치지 않음).
+  run "$HERE/load_building_juso_all.sh" \
+    || { echo "  ✗ juso 건물 패치 실패 — 신축 보완 미완(기본 건물은 적재됨). 재실행: STEPS=building $0" >&2; fail=1; }
 fi
 
 # 4) 주소 + POI (geocode.sqlite 재사용 — 09-gen-geocode.py 산출 필요)
 if has geocode; then
   GDB="$BUILD_HOME/geocode.sqlite"
   if [ -f "$GDB" ]; then
-    run python3 "$HERE/load_geocode.py" --db "$GDB" \
-      || { echo "  ✗ geocode 적재 실패 — address/poi 미완 가능. 재실행: STEPS=geocode $0" >&2; fail=1; }
+    # [T049 swap 계약] --mode swap(기본)은 --phase address|poi 필수 — 한 번에 한 테이블, address 먼저.
+    #   ★ 종전 호출은 --phase 없이 불러 **항상 즉시 실패**했고(2026-09-03 실측 "✗ --mode swap 은 --phase 가 필수다"),
+    #     fail=1 만 남긴 채 다음 단계로 흘러 PostGIS 의 address/poi 가 옛 판으로 남았다 — 13-qc 는 sqlite 만 보고
+    #     package.sh 게이트는 parcel/building 만 세어 옛 address/poi 가 pg_dump 로 번들에 실렸다(package.sh 게이트 보강 병행).
+    #   phase 마다 swap(적재·인덱스·검증·RENAME) → finalize(_old DROP·정식명 환원)로 닫는다: 디스크 피크를 한 테이블분으로
+    #   묶고, 다음 스왑의 "_old 가 이미 있다" 거부를 막는다. 롤백 경로는 geocode.sqlite 재적재(원천 보존).
+    gc_ok=1
+    for ph in address poi; do
+      run python3 "$HERE/load_geocode.py" --db "$GDB" --mode swap --phase "$ph" \
+        && run python3 "$HERE/load_geocode.py" --db "$GDB" --mode swap --phase "$ph" --finalize \
+        || { echo "  ✗ geocode 적재 실패(phase=$ph) — ${ph}_new/${ph}_old 잔재 확인 후 재실행: STEPS=geocode $0" >&2; fail=1; gc_ok=0; break; }
+    done
+    if [ "$gc_ok" = 1 ]; then
+      run python3 "$HERE/backfill_poi_tier.py" \
+        || { echo "  ✗ backfill_poi_tier 실패 — tier_minzoom 미갱신. 재실행: STEPS=geocode $0" >&2; fail=1; }
+    else
+      echo "  (건너뜀) backfill_poi_tier — geocode 적재 실패 상태에서 옛 poi 에 tier 를 덧씌우지 않는다" >&2
+    fi
   else
     echo "  (건너뜀) geocode.sqlite 없음: $GDB (09-gen-geocode.py 먼저)"
+  fi
+fi
+
+# 4.5) 지역 사전 — lawd_dong(address.bcode 파생, 멱등 SQL) + lawd_sigungu(navi 권위 빌더).
+#       ⚠ 반드시 geocode(address 최종) 이후·facility 앞. lawd_dong 은 address 기반이므로 순서 의존
+#         (스펙 DAG: D2(address) → C2-lawd). facility 는 lawd 와 무관 → 상대순서 무방하나 plan §2.3 배치 준수.
+#       R2: A2(backfill)도 load-all.sh 를 수정(STEPS 가산)하므로 conductor 머지 조율 대상.
+if has lawd; then
+  # (a) lawd_dong: 소스=DB(address). psql -f 멱등 SQL(would_rows 가드 내장).
+  #     가드 위반/address 미적재 시 RAISE EXCEPTION → ON_ERROR_STOP=1 비-0 → fail=1(거짓 PASS 차단).
+  run psql -v ON_ERROR_STOP=1 -f "$HERE/build_dong_dict.sql" \
+    || { echo "  ✗ build_dong_dict.sql 실패 — would_rows 가드 또는 address 미적재. 재실행: STEPS=geocode,lawd $0" >&2; fail=1; }
+
+  # (b) lawd_sigungu: navi staged/7z 소스 있을 때만(비치명 skip). build_sigungu_dict.sh 내부도 exit0 skip 이중방어.
+  #     R4: navi 권위표기 보존(address 파생표기 drift·sigungu_nm LIKE 회귀 회피) — build_sigungu_dict.sh 헤더 근거 참조.
+  NAVI_7Z="$BUILD_HOME/sources/juso_navi/202605_내비게이션용DB_전체분.7z"
+  NAVI_STAGED="$BUILD_HOME/staged/navi"
+  if [ -d "$NAVI_STAGED" ] || [ -f "$NAVI_7Z" ]; then
+    run env bash "$HERE/build_sigungu_dict.sh" \
+      || { echo "  ✗ build_sigungu_dict.sh 실패: navi 소스 적재 오류" >&2; fail=1; }
+  else
+    echo "  (건너뜀) navi 소스 없음 — lawd_sigungu 재생성 skip(기존 254 보존): $NAVI_STAGED / $NAVI_7Z"
+  fi
+
+  # (c) lawd_code: 법정동코드 전체자료(code.go.kr) 원본 적재. **lawd_ri 의 유일한 진실 원천.**
+  #     원본 인자를 안 주면 fetch_lawd_code.sh 로 스스로 취득한다 → **네트워크 의존**이라
+  #     build_sigungu_dict.sh 와 같은 등급의 **비치명 skip** 으로 감싼다.
+  #     ⚠ 단 조용히 넘기지 않는다 — 조용한 skip 이 T018/T021 의 미배선을 만든 원인이다(R9).
+  #     (a) 와 무관하나 (d)(e) 가 이것을 읽으므로 순서상 여기다.
+  if run python3 "$HERE/load_lawd_code.py"; then
+    # (d) lawd_ri 재구축: (c) 의존. 폐기된 build_ri_dict.sql(address 역산) 대체.
+    #     원본 기반이라 건물 없는 리도 살아난다. 실패는 치명 — 사전이 반쯤 갱신된 상태를 남기지 않는다.
+    run psql -v ON_ERROR_STOP=1 -f "$HERE/build_ri_dict_from_lawd_code.sql" \
+      || { echo "  ✗ build_ri_dict_from_lawd_code.sql 실패 — lawd_ri 미갱신. 재실행: STEPS=lawd $0" >&2; fail=1; }
+
+    # (e) lawd_sido_remap: 전남·광주 통합(46·29 → 12) 매핑표. (a)+(c) 의존
+    #     — 우리 DB 의 옛 코드(lawd_dong)와 원본 신구 코드(lawd_code)를 맞춰 만들기 때문이다.
+    run psql -v ON_ERROR_STOP=1 -f "$HERE/build_sido_remap.sql" \
+      || { echo "  ✗ build_sido_remap.sql 실패 — lawd_sido_remap 미갱신(API 는 fail-open)" >&2; fail=1; }
+  else
+    # (c) 실패 시 (d)(e) 를 **호출하지 않는다**. lawd_code 없이 돌리면 어차피 실패하는 데다,
+    #     사전·매핑표가 반쯤 갱신된 부분 상태가 아무것도 안 한 것보다 나쁘다((f) 와 같은 원칙).
+    echo "  ⚠ load_lawd_code.py 실패/원본 없음 — lawd_ri 재구축·lawd_sido_remap 생성을 건너뜁니다(부분 갱신 방지)" >&2
+  fi
+
+  # (f) VWorld 30505 → lawd_code_v2 → lawd_sgg_remap (인천 자치구 개편)
+  #     [근거: VWorld dsId=30505 OLD_LAWDCD] — 옛→신 대응은 원천이 한 행에 함께 주는
+  #     OLD_LAWDCD 컬럼에서만 나온다. 명칭 조인으로 되살리지 말 것(폐기된 build_incheon_remap.sql).
+  #     **파일 존재 가드**: 두 자산이 아직 없는 리비전에서도 이 단계가 빌드를 죽이지 않는다
+  #     → S7 을 S2·S3 보다 먼저 커밋해도 안전하다(순서 제약 없음).
+  if [ -f "$HERE/load_lawd_code_v2.py" ] && [ -f "$HERE/build_incheon_remap_from_old_lawdcd.sql" ]; then
+    if ! run python3 "$HERE/load_lawd_code_v2.py"; then
+      echo "  ⚠ load_lawd_code_v2.py 실패 — lawd_sgg_remap 생성을 건너뜁니다(부분 치환 방지)" >&2
+    elif ! run psql -v ON_ERROR_STOP=1 -f "$HERE/build_incheon_remap_from_old_lawdcd.sql"; then
+      # 표가 없으면 API 가 fail-open(현행 응답) 이므로 전체 빌드를 멈출 이유가 없다 — (c) 와 같은 등급.
+      echo "  ⚠ build_incheon_remap_from_old_lawdcd.sql 실패 — 인천 치환은 fail-open 으로 비활성" >&2
+    fi
+  else
+    echo "  ℹ lawd_code_v2 자산 미배치 — 인천 치환 단계 건너뜀(현행 동작 유지)"
   fi
 fi
 
@@ -99,6 +215,16 @@ if has facility; then
   else echo "  (건너뜀) 공공시설 CSV 폴더 없음: $FSRC"; fi
 fi
 
+# 6) 타일 캐시 3겹 교체 — 데이터가 갈렸는데 캐시(martin L1·게이트웨이 L2·브라우저)가 옛 세대를
+#    서빙하는 사고 방지(2026-08-31 실측). 서빙 스택 미가동 호스트에선 스스로 건너뛴다(비치명).
+#    opt-out: TILECACHE_SKIP=1 (연속 부분 적재 중 마지막 1회만 돌리고 싶을 때).
+if [ -z "${TILECACHE_SKIP:-}" ]; then
+  run "$HERE/refresh_tile_cache.sh" \
+    || { echo "  ✗ 타일 캐시 교체 실패 — 수동 재실행: $HERE/refresh_tile_cache.sh" >&2; fail=1; }
+else
+  echo "  (건너뜀) TILECACHE_SKIP=1 — 캐시 교체는 수동으로: $HERE/refresh_tile_cache.sh"
+fi
+
 echo; echo "━━ 적재 요약 ━━"
 psql -P pager=off -c "
   SELECT 'admin_boundary' t, count(*) FROM admin_boundary
@@ -107,6 +233,8 @@ psql -P pager=off -c "
   UNION ALL SELECT 'address', count(*) FROM address
   UNION ALL SELECT 'poi', count(*) FROM poi
   UNION ALL SELECT 'public_facility', count(*) FROM public_facility
+  UNION ALL SELECT 'lawd_dong',    count(*) FROM lawd_dong
+  UNION ALL SELECT 'lawd_sigungu', count(*) FROM lawd_sigungu
   ORDER BY t;"
 if [ "$fail" = 0 ]; then
   echo "OK: load-all 완료"

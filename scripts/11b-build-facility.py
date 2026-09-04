@@ -9,9 +9,13 @@
 """
 import csv, glob, json, os, re, subprocess, sys, unicodedata
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))       # PYTHONSAFEPATH=1 대비
+from _common.csvheur import _nk, pick_coord                          # noqa: E402
+from _common.region import parse_region_kr, SIDO_SOURCE, CANON_SIDO, LEGACY_SIDO   # noqa: E402  시도 검증 파서(공용)
+
 N = lambda s: unicodedata.normalize("NFC", s or "")
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/geocode-build/staged/facility")
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/geocode-build/poi-all/facility_clean.csv")
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "staged/facility")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "poi-all/facility_clean.csv")
 
 # 항목key → 시설명(한글) 라벨
 LABELS = {}
@@ -22,8 +26,16 @@ except Exception:
     pass
 
 # 컬럼 휴리스틱(소문자·공백제거 후 정확→부분 일치). 14종 표준데이터의 흔한 헤더 변형 포함.
-NAME_HINTS  = ["명칭", "시설명", "사업장명", "상호명", "상호", "화장실명", "발급기명", "관리기관명", "기관명", "장소명",
-               "센터명", "설치장소", "위치명", "소재지명", "보관소명", "대피시설명", "수목명", "업소명", "시설물명"]
+NAME_HINTS  = ["명칭", "시설명", "사업장명", "상호명", "상호", "화장실명", "발급기명", "장소명",
+               "센터명", "설치장소", "위치명", "소재지명", "보관소명", "대피시설명", "수목명", "업소명", "시설물명",
+               ]
+# ★ 기관명 계열은 NAME_HINTS 에서 분리한 **2순위 폴백**이다. 시설 자체의 이름이 아니라 '관리 주체'라,
+#   진짜 이름 컬럼이 있으면 절대 이겨선 안 된다. 같은 리스트에 뒤로 두는 것만으로는 부족했다 —
+#   find_col 은 (1) 전 힌트 정확일치 → (2) 전 힌트 부분일치 순이라, 헤더가 '자전거보관소명'이면
+#   '보관소명'은 (1)에서 안 걸리고 '관리기관명'이 (1)에서 걸려 여전히 이긴다.
+#   [실측 2026-09-01] 그 결과 부천 원미구 전 자전거보관소가 '원미구 건설안전과' 한 이름으로 적재됨
+#   (원천엔 '상동호수공원'·'상원고 건너편'이 정상 존재). 리스트를 나눠 단계 자체를 분리한다.
+NAME_FALLBACK_HINTS = ["관리기관명", "기관명"]
 # 발급기명: 무인민원발급기 설치정보의 위치명(예 '종각역','종로구청'). 관리기관명(='서울특별시 종로구')보다 우선해야 라벨이 유의미.
 DORO_HINTS  = ["소재지도로명주소", "도로명주소", "소재지도로명", "도로명전체주소", "설치장소주소"]
 JIBUN_HINTS = ["소재지지번주소", "지번주소", "소재지지번", "소재지번주소", "소재지"]
@@ -33,10 +45,10 @@ TMX_HINTS   = ["좌표정보(x)", "좌표정보x", "tm_x", "tmx", "x좌표값", 
 TMY_HINTS   = ["좌표정보(y)", "좌표정보y", "tm_y", "tmy", "y좌표값", "epsg5174y"]
 
 
-def _nk(c):
-    return re.sub(r"\s+", "", N(c).lower())
-
-
+# _nk(헤더 키 정규화) 와 pick_coord(좌표 컬럼 값검증) 는 scripts/_common/csvheur.py 가 정본이다(위 import).
+# postgis/load_facility.py 가 같은 값검증을 인덱스 계약으로 쓴다 — 실사고 기록은 그 모듈 docstring 에 있다.
+# find_col 은 여기 남는다: 컬럼**명**을 돌려주며 소비자가 DictReader 라, 인덱스를 돌려주는
+# load_facility.pick() 과 통합하면 양쪽 호출부를 다 고쳐야 한다(T028 §11 배제 기록).
 def find_col(cols, hints):
     keys = {_nk(c): c for c in cols if c}
     for h in hints:                      # 1) 정확 일치
@@ -50,41 +62,8 @@ def find_col(cols, hints):
     return None
 
 
-def pick_coord(cols, rows, hints, lo, hi):
-    """좌표(위/경도) 컬럼 선택 — 이름이 힌트에 걸리는 후보 중 **표본값이 십진수(소수점)+유효범위(lo~hi)**
-    인 비율이 가장 높은 컬럼을 채택. 한 파일에 위도(EPSG4326)·WGS84위도(십진수)와 위도(도)/(분)/(초)
-    (DMS 분해)가 함께 있을 때, 이름 순서만 보면 정수 '도' 컬럼을 먼저 잡아 좌표를 정수격자로 뭉개는 사고가
-    났음(예: 민방위대피시설 → lat 37, 진짜 37.577). 값으로 검증해 십진 컬럼을 우선. 십진 후보 없으면 None."""
-    nh = [_nk(h) for h in hints]
-    cand = [c for c in cols if c and any(h == _nk(c) or h in _nk(c) for h in nh)]
-    best, best_score = None, 0.0
-    for c in cand:
-        good = seen = 0
-        for r in rows[:200]:                 # 앞 200행 표본
-            v = str(r.get(c) or "").strip()
-            if not v:
-                continue
-            seen += 1
-            try:
-                f = float(v)
-            except ValueError:
-                continue
-            if "." in v and lo <= f <= hi:   # 십진수 AND 유효범위
-                good += 1
-        score = good / seen if seen else 0.0
-        if score > best_score:
-            best, best_score = c, score
-    return best
-
-
-def parse_region(*addrs):
-    for a in addrs:
-        t = N(a or "").split()
-        if len(t) >= 2:
-            sgg = t[1] + (" " + t[2] if len(t) >= 3 and t[2].endswith("구") else "")  # 시+구(예: 수원시 영통구) — navi sigungu 포맷에 맞춤
-            emd = next((x for x in t[2:5] if x.endswith(("동", "읍", "면", "리", "가"))), "")
-            return t[0], sgg, emd
-    return "", "", ""
+# parse_region 은 _common/region.py 의 parse_region_kr 로 대체(11-build-localdata 와 동일 결함 —
+# 실측 facility 90행: '경기도수원시'·'세종특별자치시종'·'원창로239번길' 이 시도로 적재).
 
 
 def tm5174_to_wgs(pairs):
@@ -100,18 +79,29 @@ def tm5174_to_wgs(pairs):
 
 
 def read_csv(path):
-    """인코딩 자동판별 — utf-8(BOM) 우선 strict 시도 후 cp949. 표준데이터는 cp949 가 다수."""
-    for enc in ("utf-8-sig", "cp949"):
+    """인코딩 자동판별 — utf-8(BOM) 우선 strict 시도. 표준데이터는 cp949 가 다수.
+
+    후보 목록과 실패 시 중단 정책은 postgis/load_facility.py `read_rows()` 관례를
+    따른다(T028 §4.5 — 인코딩은 그쪽이 우수했다).
+    종전에는 최후에 errors="replace" 로 깨진 문자를 그대로 상호명에 실었다. 그
+    이름은 지오코딩 색인에 들어가 조용히 남으므로, 적재보다 중단이 낫다.
+
+    빈 파일은 실패가 아니다 — rows == [] 로 돌려주고 main() 이 건너뛴다.
+    load_facility 의 `if rows:` 재시도는 이식하지 않는다: 이식하면 0바이트 CSV 가
+    후보를 모두 소진해 빌드 전체를 죽인다(수집이 0바이트를 남긴 전례가 있다).
+    OSError 는 더 이상 삼키지 않는다 — 파일 부재를 인코딩 실패로 오인해 보고했다.
+    """
+    for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
             with open(path, encoding=enc, newline="", errors="strict") as fp:
                 return list(csv.DictReader(fp)), enc
-        except (UnicodeError, OSError):
+        except (UnicodeDecodeError, LookupError):
             continue
-    with open(path, encoding="cp949", newline="", errors="replace") as fp:
-        return list(csv.DictReader(fp)), "cp949(replace)"
+    sys.exit(f"CSV 인코딩 판별 실패: {path}")
 
 
 def main():
+    print(f"[region] 시도 집합 원천={SIDO_SOURCE} (현행 {len(CANON_SIDO)}·폐지 {len(LEGACY_SIDO)})", file=sys.stderr)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     files = sorted(glob.glob(os.path.join(SRC, "**", "*.csv"), recursive=True))
     w = csv.writer(open(OUT, "w", encoding="utf-8", newline=""))
@@ -126,7 +116,8 @@ def main():
         if not rows:
             continue
         cols = list(rows[0].keys())
-        c_name = find_col(cols, NAME_HINTS)
+        # 시설명 계열을 정확·부분 일치까지 모두 소진한 뒤에야 기관명으로 폴백(위 ★ 참조).
+        c_name = find_col(cols, NAME_HINTS) or find_col(cols, NAME_FALLBACK_HINTS)
         c_lat = pick_coord(cols, rows, LAT_HINTS, 33, 39)    # 값검증(십진+범위)으로 DMS '도' 컬럼 회피
         c_lon = pick_coord(cols, rows, LON_HINTS, 124, 132)
         c_tmx, c_tmy = find_col(cols, TMX_HINTS), find_col(cols, TMY_HINTS)
@@ -146,7 +137,7 @@ def main():
                 doro_s = N(doro).strip(); jibun_s = N(jibun).strip()
                 if not (doro_s or jibun_s):
                     skipped += 1; continue                       # 주소도 비면 못 씀
-                sido, sgg, emd = parse_region(doro, jibun)       # 도로명 우선(09 의 navi 조인키)
+                sido, sgg, emd = parse_region_kr(doro, jibun, org_code=r.get("개방자치단체코드"))       # 도로명 우선(09 의 navi 조인키)
                 w.writerow([nm, label, sido, sgg, emd, "", "", "", "", "생활편의", doro_s, jibun_s]); ng += 1
             elif mode == "wgs":
                 try:
@@ -156,18 +147,18 @@ def main():
                     continue
                 if not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
-                sido, sgg, emd = parse_region(jibun, doro)
+                sido, sgg, emd = parse_region_kr(jibun, doro, org_code=r.get("개방자치단체코드"))
                 w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
             else:
                 x = str(r.get(c_tmx) or "").strip(); y = str(r.get(c_tmy) or "").strip()
                 if not x or not y:
                     continue
-                tm_rows.append((nm, jibun, doro)); tm_coords.append((x, y))
+                tm_rows.append((nm, jibun, doro, r.get("개방자치단체코드"))); tm_coords.append((x, y))
         if tm_rows:
-            for (nm, jibun, doro), (lon, lat) in zip(tm_rows, tm5174_to_wgs(tm_coords)):
+            for (nm, jibun, doro, org), (lon, lat) in zip(tm_rows, tm5174_to_wgs(tm_coords)):
                 if lon is None or not (124 <= lon <= 132 and 33 <= lat <= 39):
                     skipped += 1; continue
-                sido, sgg, emd = parse_region(jibun, doro)
+                sido, sgg, emd = parse_region_kr(jibun, doro, org_code=org)
                 w.writerow([nm, label, sido, sgg, emd, lon, lat, "", "", "생활편의", N(doro).strip(), N(jibun).strip()]); n += 1
         total += n; geopend += ng
         if n or ng:

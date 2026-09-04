@@ -4,6 +4,7 @@
 build_style.py(조각 병합 후 theme.json 색 적용)와 build-studio.py(색 편집기 UI/미리보기)가
 공유한다. theme.json 형식: {"<object key>": "#rrggbb", ...}.
 """
+import json
 import re
 
 # 객체 정의: key, 라벨, 적용 대상 [(layer_id, paint_prop), ...]
@@ -46,13 +47,17 @@ POI_TIERS_DEFAULT = [
     {"key": "t2", "label": "중간", "minzoom": 16},
     {"key": "t3", "label": "낮음", "minzoom": 17},
 ]
+
+CACHE_DEFAULT = {
+    "static_long": "public, max-age=604800",
+    "static_short": "public, max-age=300, stale-while-revalidate=3600",
+    "dyn": "public, max-age=3600, stale-while-revalidate=86400",
+}
 POI_TIER_FALLBACK = "t3"   # 미지정 카테고리 기본 티어
 CAT_TIER_DEFAULT = {       # 카테고리→티어 기본(대분류 + 랜드마크성 중/소분류). 고급설정에서 변경.
     "cat1": {"음식": "t3", "소매": "t3", "수리·개인": "t3", "과학·기술": "t3", "교육": "t2",
              "예술·스포츠": "t3", "시설관리·임대": "t2", "부동산": "t3", "숙박": "t2", "보건의료": "t2"},
     "cat2": {"병원": "t1", "대학": "t1"},
-    "cat": {"종합병원": "t1", "일반병원": "t1", "요양병원": "t1", "치과병원": "t1", "한방병원": "t1",
-            "대학교": "t1", "호텔/리조트": "t1", "백화점": "t1", "대형마트": "t1", "관공서": "t1"},
 }
 
 # 데이터 출처 토글 — "이 지도에 어떤 데이터를 쓸지" 체크.
@@ -63,6 +68,7 @@ SOURCE_GROUPS = [
     {"key": "base",      "label": "기본도(OSM)",       "kind": "src_visibility", "src": "openmaptiles"},
     {"key": "buildings", "label": "건물(GIS·2D/3D)",   "kind": "src_visibility", "src": "buildings"},
     {"key": "dong",      "label": "동(棟) 라벨",         "kind": "src_visibility", "src": "dong"},
+    {"key": "admin",     "label": "행정구역 경계·라벨(국가)", "kind": "src_visibility", "src": "admin"},
     {"key": "sangga",    "label": "상가(소상공인)",      "kind": "poi_source",     "source": "sangga"},
     {"key": "localdata", "label": "인허가(LOCALDATA)",   "kind": "poi_source",     "source": "localdata"},
     {"key": "terrain",   "label": "지형(3D)",            "kind": "terrain"},
@@ -158,8 +164,8 @@ def _index(style):
 
 
 def build_poi_icon_match(icons, overrides=None):
-    """대분류(cat1) 기본 + 중분류(cat2)·소분류(cat) 오버라이드 → 중첩 match 식.
-    평가 우선순위: 소분류 > 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
+    """대분류(cat1) 기본 + 중분류(cat2) 오버라이드 → 중첩 match 식.
+    평가 우선순위: 중분류 > 대분류 > fallback (가장 구체적인 것이 이김)."""
     overrides = overrides or {}
     expr = ["match", ["get", "cat1"]]                     # 대분류 기본(가장 안쪽 default)
     for g in ICON_GROUPS:
@@ -172,12 +178,6 @@ def build_poi_icon_match(icons, overrides=None):
         for name, slug in mid.items():
             m += [name, slug]
         m.append(expr); expr = m
-    sub = overrides.get("cat") or {}
-    if sub:
-        s = ["match", ["get", "cat"]]
-        for name, slug in sub.items():
-            s += [name, slug]
-        s.append(expr); expr = s
     return expr
 
 
@@ -197,6 +197,30 @@ def current_icons(style):
     return out
 
 
+def sanitize_cache(c):
+    """theme['cache'] 정제(주입 방지) — 화이트리스트 키 + 안전문자(영숫자/쉼표/등호/하이픈/공백)만."""
+    if not isinstance(c, dict):
+        return None
+    out = {}
+    for k in ("static_long", "static_short", "dyn"):
+        v = c.get(k)
+        if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9,= \-]{1,120}", v):
+            out[k] = v.strip()
+    return out or None
+
+
+def render_nginx_cache_block(cache):
+    """theme cache → gateway-nginx 마커 사이 map 블록 텍스트(끝에 개행 포함)."""
+    c = {**CACHE_DEFAULT, **(cache or {})}
+    return (
+        'map $uri $static_cc {\n'
+        '    default              "%s";\n'
+        '    ~^/(fonts|sprites)/  "%s";\n'
+        '}\n'
+        'map $request_uri $dyn_cc { default "%s"; }\n'
+    ) % (c["static_short"], c["static_long"], c["dyn"])
+
+
 def sanitize_icons(icons):
     """theme['icons'] 정제(주입 방지) — 유효 그룹키 + ASCII slug([a-z0-9_-])만."""
     if not isinstance(icons, dict):
@@ -210,11 +234,11 @@ def sanitize_icons(icons):
 
 
 def sanitize_icon_overrides(ov):
-    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}, cat:{소분류명:slug}}, slug ASCII."""
+    """theme['icon_overrides'] 정제 — {cat2:{중분류명:slug}}, slug ASCII."""
     if not isinstance(ov, dict):
         return {}
     out = {}
-    for lvl in ("cat2", "cat"):
+    for lvl in ("cat2",):
         m = ov.get(lvl)
         if not isinstance(m, dict):
             continue
@@ -228,15 +252,15 @@ def sanitize_icon_overrides(ov):
 
 
 def current_icon_overrides(style):
-    """poi-icon 중첩 match 에서 중/소 오버라이드 추출 → {cat2:{...}, cat:{...}}."""
+    """poi-icon 중첩 match 에서 중분류 오버라이드 추출 → {cat2:{...}}."""
     e = _gate_inner(_index(style).get(POI_ICON_LAYER, {}).get("layout", {}).get("icon-image"))
-    out = {"cat2": {}, "cat": {}}
+    out = {"cat2": {}}
     while isinstance(e, list) and len(e) >= 4 and e[0] == "match" and isinstance(e[1], list) and len(e[1]) == 2 and e[1][0] == "get":
         field = e[1][1]
         if field == "cat1":
             break
         for name, slug in zip(e[2:-1:2], e[3:-1:2]):
-            if field in ("cat2", "cat") and isinstance(name, str):
+            if field == "cat2" and isinstance(name, str):
                 out[field][name] = slug
         e = e[-1]
     return out
@@ -251,7 +275,7 @@ def apply_icons(style, icons, overrides=None):
     cur.update(icons or {})
     idx[POI_ICON_LAYER].setdefault("layout", {})["icon-image"] = build_poi_icon_match(cur, overrides)
     ov = overrides or {}
-    return (len(icons or {})) + len(ov.get("cat2") or {}) + len(ov.get("cat") or {})
+    return (len(icons or {})) + len(ov.get("cat2") or {})
 
 
 # ── POI 카테고리 그룹별 글자색 (cat1 → 그룹색, 미지정 그룹은 '시설 라벨' 단일색 fallback) ──
@@ -359,33 +383,28 @@ def _tier_value_expr(tiers, cat_tier, value_of):
     conv = lambda m: {name: tval[tk] for name, tk in (m or {}).items() if tk in tval}
     expr = _cat_match("cat1", conv((cat_tier or {}).get("cat1")), default)
     expr = _cat_match("cat2", conv((cat_tier or {}).get("cat2")), expr)
-    expr = _cat_match("cat", conv((cat_tier or {}).get("cat")), expr)
     return expr
 
 
 def apply_poi_tiers(style, tiers, cat_tier):
-    """poi-label의 text/icon을 '카테고리 티어 줌 이상에서만 표시'로 게이트 + 티어순 sort-key. 반환 적용 수."""
+    """poi-label의 text/icon 티어순 sort-key + 레이어/소스 minzoom 설정. 반환 적용 수.
+    # T10: 서버(poi_mvt)가 tier_minzoom<=z 로 줌필터 → 클라 줌게이트 불필요(받은 피처만 렌더). 정렬키·minzoom은 유지."""
     L = _index(style).get(POI_ICON_LAYER)   # poi-label
     if L is None or not tiers:
         return 0
-    mz = _tier_value_expr(tiers, cat_tier, lambda t, i: t.get("minzoom", 15))
     sk = _tier_value_expr(tiers, cat_tier, lambda t, i: i)   # 티어 index = 충돌 우선순위(낮을수록 먼저)
     lay = L.setdefault("layout", {})
     inner_icon = _gate_inner(lay.get("icon-image"))
-    # 카테고리별 줌 게이트 — style-spec은 ["zoom"]을 step/interpolate 최상위 입력으로만 허용한다.
-    # ["case",[">=",["zoom"],mz],V,""](불법: zoom을 case/비교 안에 중첩)를, 줌 step의 각 stop에서
-    # '데이터식 mz'를 그 stop 줌값과 비교하는 형태로 표현(동작 동일, mz<=현재stop줌이면 V, 아니면 "").
-    zlevels = sorted({int(t.get("minzoom", 15)) for t in tiers})
-    def _zoom_gate(value):
-        g = ["step", ["zoom"], ""]
-        for z in zlevels:
-            g += [z, ["case", ["<=", mz, z], value, ""]]
-        return g
-    lay["text-field"] = _zoom_gate(["get", "name"])
+    lay["text-field"] = ["get", "name"]
     if inner_icon is not None:
-        lay["icon-image"] = _zoom_gate(inner_icon)
+        lay["icon-image"] = inner_icon
     lay["symbol-sort-key"] = sk
     L["minzoom"] = min(t.get("minzoom", 15) for t in tiers)
+    # 소스 minzoom도 표시 줌(tier 최소)에 맞춰 자동 정렬 — z(min)~ 미만 거대타일 페치 차단(데이터는 전수 보존).
+    src_name = L.get("source")
+    src = (style.get("sources") or {}).get(src_name) if src_name else None
+    if isinstance(src, dict):
+        src["minzoom"] = min(int(t.get("minzoom", 15)) for t in tiers)
     return 1
 
 
@@ -405,7 +424,7 @@ def sanitize_cat_tiers(ct):
     if not isinstance(ct, dict):
         return None
     out = {}
-    for lvl in ("cat1", "cat2", "cat"):
+    for lvl in ("cat1", "cat2"):
         m = ct.get(lvl)
         if isinstance(m, dict):
             clean = {name: tk for name, tk in m.items()
@@ -707,6 +726,84 @@ def extra_targets():
     return EXTRA_TARGETS
 
 
+# 배치(PLACEMENT) — 라벨/아이콘 위치 layout 속성: 세로 offset / 기준점(anchor) / 충돌 시 생략(bool).
+LABEL_ANCHORS = ["center", "left", "right", "top", "bottom",
+                 "top-left", "top-right", "bottom-left", "bottom-right"]
+# default = 해당 prop 의 MapLibre 스펙 기본값. UI 는 값 미설정 시 빈칸 대신 이 기본값을 표시한다.
+PLACEMENT_TARGETS = [
+    {"key": "off_poi",    "label": "시설 라벨 세로 위치", "layer": "poi-label",       "prop": "text-offset",   "type": "offset", "default": 0},
+    {"key": "ta_poi",     "label": "시설 라벨 기준점",    "layer": "poi-label",       "prop": "text-anchor",   "type": "anchor", "default": "center"},
+    {"key": "ia_poi",     "label": "시설 아이콘 기준점",  "layer": "poi-label",       "prop": "icon-anchor",   "type": "anchor", "default": "center"},
+    {"key": "topt_poi",   "label": "시설 라벨 충돌 시 생략",  "layer": "poi-label",       "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_dong",  "label": "동 라벨 충돌 시 생략",    "layer": "dong-label",      "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_civic", "label": "공공시설 라벨 충돌 시 생략", "layer": "poi-civic-label", "prop": "text-optional", "type": "bool", "default": False},
+    {"key": "topt_peak",  "label": "봉우리 라벨 충돌 시 생략",  "layer": "peak-label",      "prop": "text-optional", "type": "bool", "default": False},
+]
+
+
+def placement_targets():
+    return PLACEMENT_TARGETS
+
+
+def apply_placement(style, cfg):
+    """cfg({key:value}) → 대상 layout 속성 설정. offset=text-offset[1](세로, x는 보존/0),
+    anchor=enum 문자열, bool=text-optional. 반환: 적용 수."""
+    if not cfg:
+        return 0
+    idx = _index(style); tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; n = 0
+    for k, v in cfg.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        L = idx.get(t["layer"])
+        if L is None:
+            continue
+        lay = L.setdefault("layout", {})
+        if t["type"] == "offset":
+            cur = lay.get(t["prop"])
+            x = cur[0] if isinstance(cur, list) and cur and isinstance(cur[0], (int, float)) else 0
+            lay[t["prop"]] = [x, round(float(v), 2)]
+        elif t["type"] == "anchor":
+            lay[t["prop"]] = v
+        else:  # bool
+            lay[t["prop"]] = bool(v)
+        n += 1
+    return n
+
+
+def current_placement(style):
+    idx = _index(style); out = {}
+    for t in PLACEMENT_TARGETS:
+        v = idx.get(t["layer"], {}).get("layout", {}).get(t["prop"])
+        if t["type"] == "offset":
+            out[t["key"]] = v[1] if isinstance(v, list) and len(v) >= 2 and isinstance(v[1], (int, float)) else None
+        elif t["type"] == "anchor":
+            out[t["key"]] = v if (isinstance(v, str) and v in LABEL_ANCHORS) else None
+        else:  # bool
+            out[t["key"]] = v if isinstance(v, bool) else None
+    return out
+
+
+def sanitize_placement(pl):
+    if not isinstance(pl, dict):
+        return {}
+    tmap = {t["key"]: t for t in PLACEMENT_TARGETS}; out = {}
+    for k, v in pl.items():
+        t = tmap.get(k)
+        if not t:
+            continue
+        if t["type"] == "offset":
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and -10 <= v <= 10:
+                out[k] = round(float(v), 2)
+        elif t["type"] == "anchor":
+            if isinstance(v, str) and v in LABEL_ANCHORS:
+                out[k] = v
+        elif t["type"] == "bool":
+            if isinstance(v, bool):
+                out[k] = v
+    return out
+
+
 # 속성별 색 그라데이션 — 건물 높이(render_height)에 따른 색 보간.
 GRADIENT_TARGETS = [
     {"key": "bld_height", "label": "건물 높이별 색", "attr": "render_height", "amax": 100,
@@ -811,6 +908,14 @@ def sanitize_extras(ex):
     return out
 
 
+def apply_building_pitch3d(style, v):
+    """건물 2D/3D pitch 전환 임계값을 style.metadata 에 기록(데모가 읽음). None/무효면 키 제거(기본=현재상태)."""
+    md = style.setdefault("metadata", {})
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 85:
+        md["cuvia:building_pitch_3d"] = round(float(v), 1); return 1
+    md.pop("cuvia:building_pitch_3d", None); return 0
+
+
 def apply_theme(style, theme):
     """theme({key:#hex}) 를 style 에 적용(평면 객체 + POI 그룹 match). 반환: 적용 수."""
     idx = _index(style); n = 0
@@ -825,6 +930,8 @@ def apply_theme(style, theme):
             if L is None:
                 continue
             L.setdefault("paint", {})[prop] = color; n += 1
+    # 건물 2D/3D pitch 전환 임계값 — style.metadata에 기록(기본: 키 없음=현재상태 유지)
+    n += apply_building_pitch3d(style, theme.get("building_pitch_3d"))
     # POI 카테고리 그룹별 글자색 — 평면색 직후(방금 깐 '시설 라벨' 평면색을 fallback으로 감쌈)
     n += apply_poi_cat_colors(style, sanitize_poi_colors(theme.get("poi_colors") or {}))
     # 글꼴(layout text-font)
@@ -852,6 +959,11 @@ def apply_theme(style, theme):
     n += apply_extras(style, sanitize_extras(theme.get("extras") or {}))
     # 속성별 색 그라데이션(건물 높이)
     n += apply_gradient(style, sanitize_gradient(theme.get("gradient") or {}))
+    # 라벨/아이콘 배치(text-offset·anchor·text-optional)
+    n += apply_placement(style, sanitize_placement(theme.get("placement") or {}))
+    # 객체 오버라이드(클릭 편집 — 완전개별/객체그룹/유형그룹) — 맨 끝: 테마가 다 입혀진
+    # 베이스 레이어를 복제해야 오버라이드 안 한 속성이 테마와 일치한다.
+    n += apply_overrides(style, sanitize_overrides(theme.get("overrides")) or [])
     return n
 
 
@@ -976,3 +1088,138 @@ def current_colors(style):
         d = _match_default(raw)
         out[o["key"]] = to_hex(d if d is not None else raw)
     return out
+
+
+# ── 객체 오버라이드(클릭 편집) — 완전개별/객체그룹/유형그룹 범위의 부분 스타일 ──────────
+# theme.json["overrides"] = [{layer, conds:[{key,op,value}...], color?, opacity?, width?, hide?, label?}]
+# 클라이언트가 보낸 값은 신뢰하지 않는다 — 레이어·키 허용목록 + 값 타입 검증 후
+# 서버가 MapLibre 표현식으로 '컴파일'한다(원시 표현식 주입 금지, 기존 sanitize_* 와 동일 원칙).
+OVERRIDE_LAYERS = {
+    "Building 3D": {"id": "int", "name": "str", "levels": "int"},
+    "building-2d": {"id": "int", "name": "str", "levels": "int"},
+    "road-motorway": {"class": "str"}, "road-primary": {"class": "str"},
+    "road-secondary": {"class": "str"}, "road-minor": {"class": "str"},
+    "railway": {"class": "str"},
+    "landcover": {"class": "str"}, "park": {"class": "str"},
+    "water": {"class": "str"}, "waterway": {"class": "str"},
+    "parcel-line": {"pnu": "str"},
+    "poi-label": {"name": "str", "cat1": "str"},
+    "place-label": {"name": "str"}, "dong-label": {"name": "str"},
+}
+_OVR_OPS = {"int": ("==", ">=", "<", "any"), "str": ("==", "prefix", "any")}   # any=무조건 참(레이어 전체)
+_OVR_PAINT = {   # 레이어 type → (color, opacity, width) paint prop
+    "fill": ("fill-color", "fill-opacity", None),
+    "fill-extrusion": ("fill-extrusion-color", "fill-extrusion-opacity", None),
+    "line": ("line-color", "line-opacity", "line-width"),
+    "symbol": ("text-color", "text-opacity", None),
+    "circle": ("circle-color", "circle-opacity", None),
+}
+_OVR_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_OVR_STR = re.compile(r"^[^\x00-\x1f\x7f]{1,64}$")   # 제어문자 금지·64자 상한
+
+
+def sanitize_overrides(ovr):
+    """overrides 목록 정제. list 아니면 None(키 미포함=유지), list 면 항상 list 반환([]=전부 삭제)."""
+    if not isinstance(ovr, list):
+        return None
+    out = []
+    for o in ovr[:200]:
+        if not isinstance(o, dict):
+            continue
+        keys = OVERRIDE_LAYERS.get(o.get("layer"))
+        if not keys:
+            continue
+        conds = []
+        for c in (o.get("conds") or [])[:3]:
+            if not isinstance(c, dict):
+                continue
+            t = keys.get(c.get("key"))
+            if not t:
+                continue
+            op = c.get("op") or "=="
+            if op not in _OVR_OPS[t]:
+                continue
+            if op == "any":                       # 레이어 전체 — 값 불요
+                conds.append({"key": c["key"], "op": "any", "value": 0})
+                continue
+            v = c.get("value")
+            if t == "int":
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    continue
+                v = int(v)
+            else:
+                if not isinstance(v, str) or not _OVR_STR.match(v):
+                    continue
+            conds.append({"key": c["key"], "op": op, "value": v})
+        if not conds:
+            continue
+        clean = {"layer": o["layer"], "conds": conds}
+        if isinstance(o.get("color"), str) and _OVR_HEX.match(o["color"]):
+            clean["color"] = o["color"]
+        if isinstance(o.get("opacity"), (int, float)) and not isinstance(o.get("opacity"), bool) \
+                and 0 <= o["opacity"] <= 1:
+            clean["opacity"] = round(float(o["opacity"]), 3)
+        if isinstance(o.get("width"), (int, float)) and not isinstance(o.get("width"), bool) \
+                and 0 < o["width"] <= 40:
+            clean["width"] = round(float(o["width"]), 2)
+        if o.get("hide") is True:
+            clean["hide"] = True
+        if not (clean.get("hide") or clean.get("color") or clean.get("opacity") is not None
+                or clean.get("width") is not None):
+            continue   # 바꾸는 게 없으면 무의미
+        if isinstance(o.get("label"), str) and _OVR_STR.match(o["label"][:80] or "x"):
+            clean["label"] = o["label"][:80]
+        out.append(clean)
+    return out
+
+
+def _ovr_cond_expr(c):
+    g = ["get", c["key"]]
+    if c["op"] == "any":
+        return ["==", 1, 1]
+    if c["op"] == "prefix":
+        return ["==", ["slice", ["coalesce", g, ""], 0, len(c["value"])], c["value"]]
+    if c["op"] in (">=", "<"):
+        return [c["op"], ["coalesce", g, -1], c["value"]]
+    return ["==", ["coalesce", g, "" if isinstance(c["value"], str) else -1], c["value"]]
+
+
+def apply_overrides(style, overrides):
+    """정제된 overrides 를 스타일에 굽는다 — '제외+클론' 방식.
+    베이스 레이어(와 같은 베이스의 앞선 클론)에서 선택분을 필터로 제외하고, 선택분만 그리는
+    클론 레이어(id ovr-N)를 베이스 바로 뒤에 삽입한다. 이중 그리기(반투명 겹침·라벨 중복)가
+    없고, 나중 항목이 교집합을 이긴다. hide 는 제외만 하고 클론을 안 만든다. 반환: 적용 수."""
+    if not overrides:
+        return 0
+    layers = style.get("layers") or []
+    n = 0
+    for i, o in enumerate(overrides):
+        base = next((l for l in layers if l.get("id") == o["layer"]), None)
+        if base is None:
+            continue
+        conds = [_ovr_cond_expr(c) for c in o["conds"]]
+        cond = conds[0] if len(conds) == 1 else ["all"] + conds
+        clone = json.loads(json.dumps(base))          # 제외 추가 '전' 상태를 복제
+        # 베이스 + 같은 베이스의 기존 클론에서 이 선택분 제외(마지막 정의 우선)
+        neg = ["!", cond]
+        for L in layers:
+            if L is base or (isinstance(L.get("metadata"), dict)
+                             and L["metadata"].get("cuvia:ovr-base") == o["layer"]):
+                L["filter"] = ["all", L["filter"], neg] if L.get("filter") else neg
+        if o.get("hide"):
+            n += 1
+            continue
+        clone["id"] = f"ovr-{i}"
+        clone.setdefault("metadata", {})["cuvia:ovr-base"] = o["layer"]
+        clone["filter"] = ["all", clone["filter"], cond] if clone.get("filter") else cond
+        cp, op_, wp = _OVR_PAINT.get(base.get("type"), (None, None, None))
+        paint = clone.setdefault("paint", {})
+        if o.get("color") and cp:
+            paint[cp] = o["color"]
+        if o.get("opacity") is not None and op_:
+            paint[op_] = o["opacity"]
+        if o.get("width") is not None and wp:
+            paint[wp] = o["width"]
+        layers.insert(layers.index(base) + 1, clone)
+        n += 1
+    return n

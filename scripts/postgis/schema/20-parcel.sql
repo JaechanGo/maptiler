@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS parcel (
 ) PARTITION BY LIST (sido_cd);
 
 -- 17 시도 파티션 + default. 강원(51/구42)·전북(52/구45)은 신·구 코드 모두 수용.
+-- ★TODO(다음 연속지적도 갱신 시): 광주(29)·전남(46) → 통합 12 전환 여부 확인.
+--   AL_D010 은 20260809 부터 12 파일 하나로만 나온다(21-building.sql 은 이미 12 전환 완료).
+--   연속지적도도 12 로 나오기 시작하면 building 과 동일하게 ('12') 신설·29/46 정의 제거 +
+--   기존 DB 는 데이터 이전 후 DROP. 29/46 정의를 방치하면 낡은 적재분이 원천 갱신을 영영
+--   못 받는 함정이 된다(building 에서 실측 — 21-building.sql 주석 참조). 현행 원천은 아직 29/46.
 DO $$
 DECLARE
     rec record;

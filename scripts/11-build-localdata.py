@@ -7,9 +7,11 @@
 사용: python3 build-localdata.py <인허가정보_DIR> <출력CSV>
 """
 import csv, glob, os, re, subprocess, sys, unicodedata
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # PYTHONSAFEPATH=1 대비
+from _common.region import parse_region_kr, SIDO_SOURCE, CANON_SIDO, LEGACY_SIDO   # noqa: E402  시도 검증 파서(공용)
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/Downloads/인허가정보")
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/geocode-build/localdata/localdata_clean.csv")
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "localdata/localdata_clean.csv")
 N = lambda s: unicodedata.normalize("NFC", s or "")
 
 # 비물리(지도 장소 아님) 업종 — 카테고리/업종명에 이 키워드 포함 시 제외
@@ -20,13 +22,8 @@ EXC = [N(x) for x in ["통신판매","방문판매","다단계","전화권유","
     "소독","청소","위생관리","보관","도매","저수조","고압가스","석연탄","운반","운송","수입"]]
 def noise(cat): c=N(cat); return any(k in c for k in EXC)
 
-def parse_region(jibun, doro):
-    for addr in (N(jibun), N(doro)):
-        t = addr.split()
-        if len(t) >= 2:
-            emd = next((x for x in t[2:4] if x.endswith(("동","읍","면","리","가"))), "")
-            return t[0], t[1], emd
-    return "", "", ""
+# parse_region 은 _common/region.py 의 parse_region_kr 로 대체 — 첫 토큰을 검증 없이 시도로 올려
+# 시도명 270종·PostGIS biz 1,188행 오염을 만든 원인(실측 2026-09-02). 근거는 그 모듈 docstring.
 
 def convert(pairs):
     if not pairs: return []
@@ -38,6 +35,7 @@ def convert(pairs):
     return out
 
 def main():
+    print(f"[region] 시도 집합 원천={SIDO_SOURCE} (현행 {len(CANON_SIDO)}·폐지 {len(LEGACY_SIDO)})", file=sys.stderr)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     files = sorted(glob.glob(os.path.join(SRC,"**","*.csv"), recursive=True))
     w = csv.writer(open(OUT,"w",encoding="utf-8",newline=""))
@@ -57,7 +55,7 @@ def main():
             cat=N(row.get("업태구분명")).strip() or 업종
             full=f"{cat} {업종}"
             if noise(full): dropped+=1; continue          # 비물리 제외
-            sido,sgg,emd=parse_region(row.get("지번주소"), row.get("도로명주소"))
+            sido,sgg,emd=parse_region_kr(row.get("지번주소"), row.get("도로명주소"), org_code=row.get("개방자치단체코드"))   # 검증 실패 시 코드 폴백→빈값(추정 금지)
             doro=N(row.get("도로명주소")).strip(); jibun=N(row.get("지번주소")).strip()   # ER dedup 건물키 조인용 — 보존
             phone=N(row.get("전화번호")).strip(); opened=(row.get("인허가일자") or "").strip()
             rows.append([nm, full, sido, sgg, emd, phone, opened, daebun, doro, jibun]); coords.append((x,y))

@@ -3,6 +3,17 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/versions.sh"   # MAPLIBRE_VERSION 등 자산 버전 핀(01-download-data.sh 공용 단일출처)
+
+# Docker 표준 bin 경로 PATH 보강 — build-studio 가 축소된 PATH(node 경로 위주)로 이 스크립트를
+# 호출하면 `docker pull`/`buildx` 의 자격증명 헬퍼(docker-credential-desktop, credsStore=desktop)
+# 를 못 찾아 "executable file not found in $PATH" 로 [3/4] Docker 이미지 단계가 종료코드 1로 실패한다.
+# → Docker Desktop·Homebrew·/usr/local 의 bin 을 중복 없이 보강해 pull/buildx/creds 헬퍼를 모두 해석.
+for _dbin in /Applications/Docker.app/Contents/Resources/bin /usr/local/bin /opt/homebrew/bin; do
+  if [ -d "$_dbin" ]; then
+    case ":$PATH:" in *":$_dbin:"*) ;; *) PATH="$PATH:$_dbin" ;; esac
+  fi
+done
+export PATH
 # 산출물(images.tar + 멀티GB tgz)도 iCloud 밖에 둔다(기본 BUILD_HOME/dist). DIST 로 재정의 가능.
 DIST="${DIST:-${BUILD_HOME:-$HOME/geocode-build}/dist}"
 mkdir -p "$DIST"
@@ -19,7 +30,7 @@ GEOCODE_DB="$BUILD_HOME/geocode.sqlite"
 # 번들/QC 정본은 BUILD_HOME/tiles 이므로, repo/tiles 에만 있거나 더 최신인 산출물을 여기로 모은다
 # (APFS clonefile=즉시·무추가공간; 타 볼륨이면 일반 복사 폴백). → 번들이 5종을 빠짐없이 담는다.
 mkdir -p "$TILES_DIR"
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles admin.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ -s "$ROOT/tiles/$mb" ] && { [ ! -s "$TILES_DIR/$mb" ] || [ "$ROOT/tiles/$mb" -nt "$TILES_DIR/$mb" ]; }; then
     echo "  ↪ tiles 통합: tiles/$mb → $TILES_DIR/$mb"
     cp -c "$ROOT/tiles/$mb" "$TILES_DIR/$mb" 2>/dev/null \
@@ -27,6 +38,37 @@ for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 P
       || { echo "오류: tiles 통합 복사 실패: tiles/$mb → $TILES_DIR/$mb (대용량 복사 중단/축출 의심 — repo 가 iCloud면 'brctl download tiles/$mb' 로 materialize 후 재시도)" >&2; exit 1; }
   fi
 done
+
+# route 통합 — 길찾기 그래프(FEAT-007). 07 이 repo route/{car,foot,bicycle} 에 쓰므로 tiles 와 동일하게
+# BUILD_HOME/route 로 모은다(번들 정본). customize 완주 마커(.mldgr)가 더 최신일 때만 교체.
+ROUTE_DIR="$BUILD_HOME/route"
+for rp in car foot bicycle; do
+  if [ -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ] && \
+     { [ ! -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || \
+       [ "$ROOT/route/$rp/south-korea.osrm.mldgr" -nt "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ]; }; then
+    echo "  ↪ route 통합: route/$rp → $ROUTE_DIR/$rp"
+    rm -rf "$ROUTE_DIR/$rp"; mkdir -p "$ROUTE_DIR"
+    # clonefile(-c) 실패 시(타 볼륨) 부분 생성된 목적지가 남는다 — 그대로 cp -R 하면
+    # 기존 디렉토리 '안으로' 복사돼 route/car/car 중첩이 생기므로 반드시 지우고 폴백.
+    cp -Rc "$ROOT/route/$rp" "$ROUTE_DIR/$rp" 2>/dev/null \
+      || { rm -rf "$ROUTE_DIR/$rp"; cp -R "$ROOT/route/$rp" "$ROUTE_DIR/$rp"; } \
+      || { echo "오류: route 통합 복사 실패: route/$rp" >&2; exit 1; }
+  fi
+done
+# 길찾기 그래프 게이트 — compose osrm-car/foot/bike 가 ../route/{car,foot,bicycle}/south-korea.osrm 고정 참조.
+# 없는 채 반출하면 폐쇄망에서 osrm 컨테이너 crash-loop + 데모 길찾기 실패. 레거시(길찾기 제외) 번들은 SKIP_ROUTE=1.
+ROUTE_BUNDLE=""
+if [ -n "${SKIP_ROUTE:-}" ]; then
+  echo "  (건너뜀) 길찾기 그래프 — SKIP_ROUTE=1 (osrm 서비스는 폐쇄망에서 기동 실패 상태로 남음)"
+else
+  for rp in car foot bicycle; do
+    [ -s "$ROUTE_DIR/$rp/south-korea.osrm.mldgr" ] || {
+      echo "오류: $ROUTE_DIR/$rp/south-korea.osrm.mldgr 없음 — 길찾기 그래프 미빌드." >&2
+      echo "  → scripts/07-gen-route-graph.sh 실행(또는 Build Studio '길찾기 그래프' 단계) 후 재패키징." >&2
+      echo "    길찾기 없이 반출하려면 SKIP_ROUTE=1 로 재실행." >&2; exit 1; }
+  done
+  ROUTE_BUNDLE="route"
+fi
 
 # Build Studio 로 가져온 style.json(staged/style) 이 있으면 그대로 사용, 없으면 기본 조립.
 echo "[1/4] 스타일 조립(최신화)"
@@ -41,7 +83,7 @@ fi
 # tileserver-config.json 이 참조하는 베이스 mbtiles 3종(korea/terrain/dong) — 하나라도 빠진 번들은
 # 폐쇄망에서 TileServer-GL 기동 실패/레이어 누락으로 이어지므로 패키징 단계에서 차단한다.
 # (buildings/poi/parcel 등 동적 레이어는 PostGIS→martin 서빙 — pg_dump 로 별도 번들, 위 WITH_POSTGIS)
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles admin.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn) 서빙
   if [ ! -s "$TILES_DIR/$mb" ]; then
     if [ "$mb" = terrain.mbtiles ]; then
       echo "오류: $TILES_DIR/$mb 없음 — 지형타일은 정적 산출물(빌드 그래프 'terrain' 단계=03-gen-terrain.sh)." >&2
@@ -165,7 +207,7 @@ echo "[3/4] Docker 이미지 (linux/amd64 강제 — 폐쇄망 x86_64 용)"
 TAGS=()
 while IFS= read -r _tag; do
   TAGS+=("$_tag")
-done < <(grep -E '^\s+image:' "$ROOT/server/docker-compose.yml" | awk '{print $2}')
+done < <(grep -E '^\s+image:' "$ROOT/server/docker-compose.yml" | awk '{print $2}' | sort -u)   # osrm-car/foot 동일 태그 중복 제거
 
 # W2: compose 파일에서 이미지 태그를 하나도 파싱하지 못한 경우는 이후 처리가 무의미하다.
 if [ "${#TAGS[@]}" -eq 0 ]; then
@@ -226,8 +268,12 @@ echo "[4/4] 산출물 번들"
 # geocode.sqlite 만 geocode/ 하위 레이아웃으로 스테이징(APFS clonefile=즉시·무추가공간)한 뒤 묶는다.
 STAGE="$BUILD_HOME/.pkg-stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE/geocode"
+# APFS clonefile(-c) → 하드링크 → 일반 복사 순 폴백. 리눅스(ext4/xfs)는 -c 가 없어 곧장 7.2GB 를
+# 복사하는데, 디스크가 빠듯한 배포호스트에서 이것만으로 패키징이 실패한다(.244 실측: 여유 17GB).
+# 하드링크는 같은 파일시스템이면 0바이트·즉시이고, tar 는 STAGE 안의 유일한 참조를 일반 파일로 담는다.
 cp -c "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
-  || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # clonefile 불가 시(타 볼륨) 일반 복사 폴백
+  || ln "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite" 2>/dev/null \
+  || cp "$GEOCODE_DB" "$STAGE/geocode/geocode.sqlite"   # 타 볼륨이면 일반 복사 폴백
 
 # WITH_POSTGIS: PostGIS 데이터 덤프(동적 레이어·지오코더 backbone) → postgis/cuvia.dump (pg_dump -Fc)
 STAGE_POSTGIS=""
@@ -262,8 +308,26 @@ if [ -n "${WITH_POSTGIS:-}" ]; then
   [ "$pcnt" -ge "$PARCEL_MIN" ]   || { echo "오류: parcel 행수 $pcnt < 임계 $PARCEL_MIN — 적재 미완 의심(STEPS=parcel 재적재). 우회=PARCEL_MIN=0" >&2; pg_gate=1; }
   [ "$bcnt" -ge "$BUILDING_MIN" ] || { echo "오류: building 행수 $bcnt < 임계 $BUILDING_MIN — 적재 미완 의심(STEPS=building). 우회=BUILDING_MIN=0" >&2; pg_gate=1; }
   [ "$vidx" -eq 3 ]               || { echo "오류: parcel/building 핵심 인덱스 유효 $vidx/3 — --fresh 적재가 인덱스 재생성 전 중단된 정황. load_parcel/building.sh 재실행 필요." >&2; pg_gate=1; }
+  # ── address/poi 신선도 게이트 ── [실측 2026-09-03] load-all.sh 가 load_geocode.py 를 --phase 없이 불러 상시 실패했는데
+  #   13-qc 는 sqlite 만 보고 위 게이트는 parcel/building 만 세어, 옛 address/poi(시도 오염·시설명 오매핑 포함)가
+  #   pg_dump 로 번들에 실렸다. 적재는 sqlite 전량 복사라 행수가 **정확히** 같아야 한다(load_geocode 의 검증과 동일 기준).
+  #   부분/지역 번들 등 의도적 불일치는 PG_GEOCODE_MATCH=0 으로 우회.
+  if [ "${PG_GEOCODE_MATCH:-1}" = 1 ] && [ -f "$GEOCODE_DB" ]; then
+    acnt=$(pg_psql "SELECT count(*) FROM address" 2>/dev/null | tr -dc 0-9 || true); acnt=${acnt:-0}
+    ocnt=$(pg_psql "SELECT count(*) FROM poi" 2>/dev/null | tr -dc 0-9 || true); ocnt=${ocnt:-0}
+    read -r exp_a exp_p < <(python3 - "$GEOCODE_DB" <<'PYEOF'
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+a = c.execute("SELECT count(*) FROM places").fetchone()[0]
+p = c.execute("SELECT count(*) FROM places WHERE kind IN ('biz','facility') AND lon IS NOT NULL AND lat IS NOT NULL").fetchone()[0]
+print(a, p)
+PYEOF
+)
+    [ "$acnt" = "$exp_a" ] || { echo "오류: PostGIS address $acnt ≠ geocode.sqlite places $exp_a — load_geocode(swap) 미반영·옛 판. 재실행: STEPS=geocode scripts/postgis/load-all.sh (우회=PG_GEOCODE_MATCH=0)" >&2; pg_gate=1; }
+    [ "$ocnt" = "$exp_p" ] || { echo "오류: PostGIS poi $ocnt ≠ geocode.sqlite biz/facility(좌표有) $exp_p — 위와 동일" >&2; pg_gate=1; }
+  fi
   [ "$pg_gate" = 0 ] || { echo "✗ PostGIS 무결성 게이트 실패 — 손상 DB 번들링 차단." >&2; exit 1; }
-  echo "  ✓ PostGIS 무결성 OK — parcel $pcnt · building $bcnt · 핵심 인덱스 3/3 유효"
+  echo "  ✓ PostGIS 무결성 OK — parcel $pcnt · building $bcnt · 핵심 인덱스 3/3 유효 · address/poi = sqlite (${acnt:-미검} / ${ocnt:-미검})"
 
   echo "  PostGIS 덤프(pg_dump -Fc → postgis/cuvia.dump)"
   if [ "$PG_MODE" = container ]; then
@@ -279,13 +343,17 @@ fi
 # M2: vendor/ 는 maplibre·maputnik 등 오프라인 자산 전체를 포함하며 의도적으로 통째로 번들링함.
 # C2: 번들 tgz 도 원자적으로 기록 (tmp → final rename 방식, 01-download-data.sh 와 동일 관례)
 # `tar && mv`로 묶으면 set -e가 tar 실패를 전파하지 못해 stale 번들로 0종료한다 → 분리.
-tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
+# COPYFILE_DISABLE=1: macOS tar 의 AppleDouble(._*) 리소스포크 동반을 차단한다 —
+#   폐쇄망에서 풀면 style/layers/._*.json 같은 바이너리 쓰레기가 glob('*.json') 에 걸려
+#   build_style 이 UnicodeDecodeError 로 죽는다(2026-08-31 .244 실측, 595개 유입).
+COPYFILE_DISABLE=1 tar -czf "$DIST/cuvia-map-bundle.tgz.tmp" \
   -C "$ROOT"       style demo vendor server scripts/deploy.sh scripts/13-qc-check.py \
+                   scripts/13i-route-qc.py \
                    scripts/style-studio.py scripts/style_objects.py scripts/build_style.py \
                    scripts/build-style.sh scripts/start-style-studio.sh \
                    docs/integration-guide.md docs/data-licenses.md docs/data-sources.md \
                    THIRD-PARTY-NOTICES.md \
-  -C "$BUILD_HOME" tiles \
+  -C "$BUILD_HOME" tiles $ROUTE_BUNDLE \
   -C "$STAGE"      geocode $STAGE_POSTGIS \
   || { echo "오류: 번들 tar 실패" >&2; rm -f "$DIST/cuvia-map-bundle.tgz.tmp"; rm -rf "$STAGE"; exit 1; }
 mv "$DIST/cuvia-map-bundle.tgz.tmp" "$DIST/cuvia-map-bundle.tgz"

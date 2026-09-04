@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """korea.mbtiles → OSM 지오코딩 소스(osm.sqlite) 재추출 (무의존 MVT 디코드).
-scripts/07-gen-geocode.py 의 extract_mbtiles 로직 재현 — iCloud evict된 geocode.sqlite 대체용.
+scripts/09-gen-geocode.py 의 extract_mbtiles 로직 재현(07 은 T028 에서 폐기) — iCloud evict된 geocode.sqlite 대체용.
 출력 places(id,name,type,subtype,lon,lat) 를 09-gen-geocode.py 의 --osm 입력으로 사용.
 """
-import gzip, math, os, sqlite3, sys, re, unicodedata
+import gzip, math, os, sqlite3, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
+from _common.textnorm import norm                                     # noqa: E402
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo 루트(이식성 — Mac 절대경로 하드코딩 제거)
 MB = os.environ.get("KOREA_MBTILES") or os.path.join(_ROOT, "tiles/korea.mbtiles")
-OUT = os.path.expanduser("~/geocode-build/osm.sqlite")
+OUT = os.path.join(os.environ.get("BUILD_HOME") or os.path.expanduser("~/geocode-build"), "osm.sqlite")
 EXTENT = 4096; Z = 14
 
 def rv(b, p):
@@ -40,7 +43,6 @@ def tile_lonlat(tx, ty, px, py):
     lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yn))))
     return lon, lat
 
-def norm(s): return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', s)).strip()
 def station_display(name, is_station):
     name = norm(name)
     return name + '역' if (is_station and not name.endswith('역')) else name
@@ -95,6 +97,7 @@ def extract():
                 yield (station_display(nm, is_station), typ, cls, lon, lat)
 
 def main():
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)   # ~/geocode-build/ 없으면 생성 (unable to open database file 예방)
     tmp = OUT + ".tmp"
     if os.path.exists(tmp): os.remove(tmp)
     db = sqlite3.connect(tmp)

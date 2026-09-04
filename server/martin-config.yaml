@@ -2,6 +2,12 @@
 # auto_publish=false + 명시적 table 소스 → tiger 스키마/파티션 자식(parcel_11…) 노이즈 제외,
 # 부모 파티션 테이블(parcel/building)만 서빙(PG가 파티션 라우팅). 소스별 minzoom 으로 대용량 보호.
 # 연결은 DATABASE_URL 환경변수(docker-compose). L1 캐시=Moka(cache_size_mb), L2=게이트웨이 nginx.
+#
+# ★ bounds 를 소스마다 **명시**한다 — 없으면 martin 이 기동 시 각 테이블의 공간범위를 직접 계산하는데,
+#   대용량 테이블에서 그 쿼리가 내부 타임아웃에 걸려 포기하고(로그: "Timeout computing public.<t>.geom
+#   bounds ... aborting query") **bounds 미상 → 전 타일 404** 가 된다. 카탈로그에는 소스가 보이므로
+#   원인 파악이 어렵다(실측 2026-09-01 .244: /dyn/building·poi 전부 404, ST_Extent(building) 실측 2분 18초).
+#   값은 한국 전역 실측 범위(building ST_Extent = 124.618,33.114 ~ 132.450,38.613)에 여유를 준 고정 상수다.
 listen_addresses: '0.0.0.0:3000'
 cache_size_mb: 512
 
@@ -13,6 +19,7 @@ postgres:
       schema: public
       table: admin_boundary
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: MULTIPOLYGON
       minzoom: 6
@@ -30,6 +37,7 @@ postgres:
       schema: public
       table: parcel
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: MULTIPOLYGON
       minzoom: 16
@@ -46,6 +54,7 @@ postgres:
       schema: public
       table: building
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: MULTIPOLYGON
       minzoom: 13
@@ -57,28 +66,14 @@ postgres:
         name: text
         render_height: float4
         levels: int4
-
-    poi:                       # 상가·인허가·생활편의(Phase 4)
-      schema: public
-      table: poi
-      srid: 4326
-      geometry_column: geom
-      geometry_type: POINT
-      minzoom: 11
-      maxzoom: 22
-      properties:
-        kind: text
-        name: text
-        subtype: text
-        cat1: text
-        cat2: text
-        source: text
-        is_primary: int2
+        id: int8               # 행 고유키 — 스타일 스튜디오 '완전 개별 객체' 선택 필터용
+                               # (name/levels/render_height 조합은 같은 단지 동들이 겹쳐 근사임)
 
     public_facility:           # 병원/경찰/소방/AED/대피소
       schema: public
       table: public_facility
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: POINT
       minzoom: 10
@@ -92,6 +87,7 @@ postgres:
       schema: public
       table: cctv
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: POINT
       minzoom: 12
@@ -107,6 +103,7 @@ postgres:
       schema: public
       table: safemap
       srid: 4326
+      bounds: [124.5, 33.0, 132.6, 38.7]   # 한국 전역(고정) — 기동 시 bounds 계산 회피
       geometry_column: geom
       geometry_type: GEOMETRY
       minzoom: 9
@@ -115,3 +112,8 @@ postgres:
         kind: text
         name: text
         grade: text
+
+  functions:                 # T8: POI tier 디클러터 함수소스 (postgres 하위 = tables 형제). poi_mvt(z,x,y)=tier_minzoom<=z 필터.
+    poi_mvt:                  # ★빈 {} 는 v0.18에서 OptOneMany 파싱오류 → schema/function 명시 필수
+      schema: public
+      function: poi_mvt

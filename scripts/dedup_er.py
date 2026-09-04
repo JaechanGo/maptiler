@@ -15,26 +15,16 @@
 성능: 3×3 셀블로킹으로 O(Σ cell_k²). corenrm/trigram·밀도·전화빈도는 1패스 사전계산(쌍마다 재계산 안 함).
   과밀셀은 셀중심 거리순 상한(MAX_CELL)으로 비교폭주 차단(누락분 로그). 전역 비교쌍 집합 미보관(union 멱등).
 """
-import math, re, sys, unicodedata
+import math, os, re, sys, unicodedata
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))        # PYTHONSAFEPATH=1 대비
+from _common.textnorm import _BRANCH_TOK, biznrm_nfkc as biznrm, corenrm   # noqa: E402
 
 # ---- 정규화 ----
-_CORP   = re.compile(r"(주식회사|유한회사|유한책임회사|합자회사|합명회사|재단법인|사단법인|의료법인|\(주\)|㈜|\(유\)|\(재\)|\(사\))")
-# 지점표시 토큰(공백분리 마지막 토큰에만 적용 → '파리바게뜨신촌점' 같은 무공백 상호를 깎지 않음)
-_BRANCH_TOK = re.compile(r"^(본점|직영점|가맹점|영업소|지점|\d{1,3}호점|.{1,5}점)$")
-_PUNCT  = re.compile(r"[\s()\[\]{}<>（）【】·.,/&\-]+")
+# biznrm(NFKC 판)·corenrm·_BRANCH_TOK 은 scripts/_common/textnorm.py 가 정본이다(위 import).
+# 09-gen-geocode.py 는 NFC 판(biznrm_nfc)을 쓴다. 전수 9,061행이 갈라지며 의도된 것으로,
+# 여기 ER 의 core 키는 반드시 NFKC 여야 한다 — 근거는 textnorm 모듈 docstring 참조.
 _REP    = re.compile(r"^(1[5-6]\d{2}|070|060|1588|1577|1644|1666)")
-
-def biznrm(s):                                   # 09 의 biznrm 과 동일사상(괄호/구두점/공백 제거+lower)
-    return _PUNCT.sub("", unicodedata.normalize("NFKC", s or "")).lower()
-
-def corenrm(s):
-    t = unicodedata.normalize("NFKC", s or "")
-    t = _CORP.sub("", t)
-    toks = t.split()
-    if len(toks) >= 2 and _BRANCH_TOK.match(toks[-1]):   # 마지막 공백토큰이 지점표시면 제거
-        toks = toks[:-1]
-    core = biznrm(" ".join(toks))
-    return core or biznrm(s)                      # 전부 깎이면 원본 폴백
 
 def branch_of(s):
     toks = unicodedata.normalize("NFKC", s or "").split()

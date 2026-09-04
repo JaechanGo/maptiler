@@ -14,13 +14,13 @@
   · 주소(도로명+건물번호) : road 컬럼 매칭 + 본번/부번 INTEGER 정밀, 없으면 부번→본번→도로 단계 폴백,
                             행정구역 토큰은 region 가산.  ← '전부 AND'로 0건 나는 문제 방지
   · 이름(역/지명/POI/건물명): name+bld 컬럼 prefix 검색(도로명 질의엔 잡음 억제).
-환경변수 GEOCODE_DB(기본 ~/geocode-build/geocode.sqlite), GEOCODE_PORT(기본 8082).
+환경변수 GEOCODE_DB(기본 $BUILD_HOME/geocode.sqlite, BUILD_HOME 기본 ~/geocode-build), GEOCODE_PORT(기본 8082).
 """
 import json, math, os, pathlib, re, sqlite3, sys, unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-DB_PATH = os.environ.get('GEOCODE_DB', os.path.expanduser('~/geocode-build/geocode.sqlite'))
+DB_PATH = os.environ.get('GEOCODE_DB') or os.path.join(os.environ.get('BUILD_HOME') or os.path.expanduser('~/geocode-build'), 'geocode.sqlite')
 PORT = int(os.environ.get('GEOCODE_PORT', '8082'))
 NEAR_WIN = (0.01, 0.05, 0.2)        # 역지오코딩 최근접 검색 윈도(도)
 TOKEN_RE = re.compile(r'[^\w가-힣]+', re.UNICODE)
@@ -54,6 +54,8 @@ def point_in_ring(lon, lat, ring):
     return inside
 
 
+# ※scripts/_common/textnorm.py 와 동일 구현(수동 동기화). 컨테이너 빌드 컨텍스트가 server/ 라
+#   import 불가 — 변경 시 양쪽을 함께 고칠 것. 동기화는 test_textnorm.py 의 등가성 테스트가 강제한다.
 def norm(s): return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', s or '')).strip()
 def rnorm(s): return re.sub(r'[.\s]', '', unicodedata.normalize('NFC', s or ''))
 
@@ -70,8 +72,12 @@ def addr_str(r):                            # 표시용 풀 도로명(법정동 
     return s
 
 
-def road_str(r):                            # 표준 도로명주소(법정동 제외)
-    s = f'{r["sido"]} {r["sigungu"]} {r["road"]} {r["main_no"]}'
+def road_str(r):                            # 표준 도로명주소(읍·면 포함, 동 제외)
+    # 도로명주소법 시행령 §3① 3호: 행정구·읍·면은 주소 본문에 쓴다. 동(洞)은 7호 참고항목이라 뺀다.
+    # emd 한 칸에 읍/면/동이 섞여 들어오므로 접미사로 가른다. 표시용 addr_str 은 항상 넣으므로 계약이 다르다.
+    emd = _g(r, 'emd')
+    em = f'{emd} ' if (emd and str(emd).endswith(('읍', '면'))) else ''
+    s = f'{r["sido"]} {r["sigungu"]} {em}{r["road"]} {r["main_no"]}'
     if r["sub_no"]: s += f'-{r["sub_no"]}'
     if r["bld"]: s += f' ({r["bld"]})'
     return s

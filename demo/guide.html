@@ -162,6 +162,12 @@ map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));</pre
       <tr><td>글리프(폰트)</td><td class="mono">/fonts/{fontstack}/{range}.pbf</td></tr>
       <tr><td>지오코딩(검색)</td><td class="mono">/geocode?q=증미역 <span class="note">· 게이트웨이 경유</span></td></tr>
       <tr><td>역지오코딩</td><td class="mono">/reverse?lon=126.86&amp;lat=37.55 <span class="note">· 게이트웨이 경유</span></td></tr>
+      <tr><td>길찾기(차량)</td><td class="mono">/route/v1/driving/{lon},{lat};{lon},{lat}?steps=true&amp;geometries=geojson <span class="note">· 게이트웨이 경유 · 경유지는 ; 로 연결</span></td></tr>
+      <tr><td>길찾기(도보)</td><td class="mono">/route/v1/walking/{lon},{lat};{lon},{lat} <span class="note">· 별칭 foot</span></td></tr>
+      <tr><td>길찾기(자전거)</td><td class="mono">/route/v1/cycling/{lon},{lat};{lon},{lat} <span class="note">· 별칭 bike, bicycle</span></td></tr>
+      <tr><td>소요시간·거리 매트릭스</td><td class="mono">/table/v1/driving/{coords}?annotations=duration,distance <span class="note">· N×N</span></td></tr>
+      <tr><td>방문순서 최적화</td><td class="mono">/trip/v1/driving/{coords}?roundtrip=true</td></tr>
+      <tr><td>좌표→도로 스냅</td><td class="mono">/nearest/v1/driving/{lon},{lat}</td></tr>
     </tbody>
   </table>
 
@@ -220,6 +226,23 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
 // ↓ 전체 요청/응답 필드는 아래 "지오코딩 API — 요청 / 응답 스키마" 참고</pre>
   </div>
 
+  <h2>길찾기 연동 (경로 안내)</h2>
+  <div class="card">
+    <pre>// 차량 경로 — 출발;경유;도착 (경도,위도 순서, 경유지는 ; 로 연결)
+const r = await fetch('/route/v1/driving/126.9877,37.4292;126.9169,37.4017'
+                    + '?steps=true&amp;overview=full&amp;geometries=geojson').then(x =&gt; x.json());
+if (r.code === 'Ok') {
+  const route = r.routes[0];
+  console.log(route.distance, route.duration);          // 미터, 초
+  map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: route.geometry } });
+  map.addLayer({ id: 'route', type: 'line', source: 'route',
+                 paint: { 'line-color': '#3d8bfd', 'line-width': 5 } });
+  route.legs[0].steps.forEach(s =&gt; console.log(s.maneuver.type, s.maneuver.modifier, s.name));
+}
+// 도보는 /route/v1/walking/… , 자전거는 /route/v1/cycling/…
+// ↓ 전체 파라미터/응답 필드는 아래 "길찾기 API — 차량 · 도보 · 자전거" 참고</pre>
+  </div>
+
   <h2>지오코딩 API — 요청 / 응답 스키마</h2>
   <p class="muted">프론트가 결과 화면을 설계할 수 있도록 요청 파라미터와 응답 필드를 정리했습니다.
     모든 응답은 <code>application/json; charset=utf-8</code> · CORS 허용(<code>*</code>) ·
@@ -237,6 +260,7 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
   <p class="tlabel">응답 예시 — 이름 결과(역)</p>
   <pre>{
   "query": "강남역",
+  "contract_version": "geocode/2",
   "results": [
     {
       "name": "강남역",
@@ -244,6 +268,11 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       "subtype": "지하철",
       "lon": 127.0276,
       "lat": 37.4979,
+      "display": {
+        "main": "강남역",
+        "secondary": "지하철역 · 서울 강남구",
+        "full": "강남역 — 서울특별시 강남구"
+      },
       "category": { "label": "지하철" },
       "address": {
         "road": "서울특별시 강남구 강남대로 396",
@@ -255,9 +284,17 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
           "sigungu": "강남구",
           "emd": "역삼동",
           "haeng_dong": "역삼1동",
+          "ri": null,
+          "san": null,
           "road_name": "강남대로",
           "main_no": "396",
           "sub_no": "0",
+          "bld_main_no": "396",
+          "bld_sub_no": "0",
+          "ji_main": null,
+          "ji_sub": null,
+          "bld_name": "",
+          "zipcode": "06241",
           "b_code": "1168010100",
           "h_code": "1168064000"
         }
@@ -268,6 +305,7 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
   <p class="tlabel">응답 예시 — 상가 결과(업종·전화 포함)</p>
   <pre>{
   "query": "스타벅스 강남",
+  "contract_version": "geocode/2",
   "results": [
     {
       "name": "스타벅스 강남R점",
@@ -275,7 +313,12 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       "subtype": null,
       "lon": 127.0284,
       "lat": 37.4981,
-      "category": { "primary": "음식", "label": "음식 > 카페/디저트", "sub": "카페/디저트" },
+      "display": {
+        "main": "스타벅스 강남R점",
+        "secondary": "음식>카페/디저트 · 서울 강남구",
+        "full": "스타벅스 강남R점 — 서울특별시 강남구"
+      },
+      "category": { "group": "음식", "path": "음식>카페/디저트", "primary": "음식", "label": "음식 > 카페/디저트", "sub": "카페/디저트" },
       "phone": "1522-3232",
       "source": "소상공인시장진흥공단",
       "address": {
@@ -286,7 +329,11 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
         "structure": {
           "sido": "서울특별시", "sigungu": "강남구", "emd": "역삼동",
           "haeng_dong": "역삼1동",
+          "ri": null, "san": null,
           "road_name": "강남대로", "main_no": "390", "sub_no": "0",
+          "bld_main_no": "390", "bld_sub_no": "0",
+          "ji_main": null, "ji_sub": null,
+          "bld_name": "", "zipcode": "06232",
           "b_code": "1168010100", "h_code": "1168064000"
         }
       }
@@ -298,17 +345,30 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
     <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
     <tbody>
       <tr><td class="mono">query</td><td>string</td><td>요청 검색어 echo</td></tr>
+      <tr><td class="mono">contract_version</td><td>string</td><td>응답 분해계약 버전 신호 — 현재 <code>"geocode/2"</code>. 신계약(display/structure/category) 분기 판단용</td></tr>
       <tr><td class="mono">results[]</td><td>array</td><td>매칭 결과 — 관련도 점수순</td></tr>
-      <tr><td class="mono">results[].name</td><td>string</td><td>표시명 — 주소면 풀 도로명주소(법정동·건물명), 그 외는 고유명</td></tr>
-      <tr><td class="mono">results[].kind</td><td>string</td><td>종류 — addr · station · place · dong · poi · biz · road</td></tr>
+      <tr><td class="mono">results[].name</td><td>string</td><td>표시명 — 주소면 풀 도로명주소(법정동·건물명), 그 외는 고유명. <code>display.full</code> alias</td></tr>
+      <tr><td class="mono">results[].kind</td><td>string</td><td>종류 — addr · road · place · station · dong · poi · biz · facility</td></tr>
+      <tr><td class="mono">results[].display</td><td>object</td><td>2단 표기용 <code>{ main, secondary, full }</code>(아래) — 전 kind 항상 부착</td></tr>
       <tr><td class="mono">results[].lon / lat</td><td>number</td><td>좌표 [경도, 위도]</td></tr>
-      <tr><td class="mono">results[].subtype</td><td>string·null</td><td>세부 종류(이름 결과). 주소 결과엔 없음</td></tr>
+      <tr><td class="mono">results[].subtype</td><td>string·null</td><td>세부 종류(이름 결과). 주소 지번경로는 <code>"parcel"</code>, 그 외 주소 결과엔 없음</td></tr>
       <tr><td class="mono">results[].address</td><td>object·null</td><td>구조화 주소(아래). 주소 결과는 자기 주소, 그 외는 최근접 주소 부착</td></tr>
-      <tr><td class="mono">results[].category</td><td>object</td><td>(선택) 업종·분류 — 아래</td></tr>
+      <tr><td class="mono">results[].category</td><td>object</td><td>(선택) 업종·분류 — 아래. 없으면 키 자체 미부착</td></tr>
       <tr><td class="mono">results[].phone</td><td>string</td><td>(선택) 전화번호 — 상가·시설</td></tr>
       <tr><td class="mono">results[].source</td><td>string</td><td>(선택) 데이터 출처</td></tr>
     </tbody>
   </table>
+  <p class="tlabel"><code>display</code> 객체 — 화면 표기용 2단 + 전체</p>
+  <table class="small">
+    <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">main</td><td>string</td><td>주표시(굵게) — 결과명/도로명주소 본문</td></tr>
+      <tr><td class="mono">secondary</td><td>string·null</td><td>보조표시(회색) — 카테고리/유형 · 지역. 없으면 null</td></tr>
+      <tr><td class="mono">full</td><td>string</td><td>전체 1줄 — 마커/입력창 라벨용</td></tr>
+    </tbody>
+  </table>
+  <p class="muted faint" style="margin-top:6px">표기는 <code>display</code> 우선 — 미지원/구버전 응답이면 <code>main=name</code> fallback. 영문 kind 원문은 노출하지 않습니다.</p>
+
   <p class="tlabel"><code>address</code> 객체 — 도로명·지번·우편번호·행정코드</p>
   <table class="small">
     <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
@@ -319,7 +379,14 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       <tr><td class="mono">bld</td><td>string</td><td>건물명 (없으면 빈 문자열)</td></tr>
       <tr><td class="mono">structure.sido / sigungu / emd</td><td>string</td><td>시도 / 시군구 / 읍면동(법정동)</td></tr>
       <tr><td class="mono">structure.haeng_dong</td><td>string·null</td><td>행정동</td></tr>
-      <tr><td class="mono">structure.road_name / main_no / sub_no</td><td>string</td><td>도로명 / 본번 / 부번</td></tr>
+      <tr><td class="mono">structure.ri</td><td>string·null</td><td>리(里). address 무컬럼이라 현재 null 고정</td></tr>
+      <tr><td class="mono">structure.san</td><td>boolean·null</td><td>산(山) 지번 여부 — 지번경로(parcel)와 <span class="mono">/reverse</span>(필지 PIP 병합분)는 boolean, 순방향 address 결과는 null</td></tr>
+      <tr><td class="mono">structure.road_name</td><td>string·null</td><td>도로명</td></tr>
+      <tr><td class="mono">structure.main_no / sub_no</td><td>string·null</td><td><b>도로명 건물 본/부번</b> (지번 본번이 아님 — 지번은 ji_main/ji_sub)</td></tr>
+      <tr><td class="mono">structure.bld_main_no / bld_sub_no</td><td>string·null</td><td>건물 본/부번 — main_no/sub_no 의 의미 명시 alias</td></tr>
+      <tr><td class="mono">structure.ji_main / ji_sub</td><td>integer·null</td><td>지번 본번 / 부번</td></tr>
+      <tr><td class="mono">structure.bld_name</td><td>string·null</td><td>건물명(없으면 빈 문자열)</td></tr>
+      <tr><td class="mono">structure.zipcode</td><td>string·null</td><td>우편번호(structure 내 사본)</td></tr>
       <tr><td class="mono">structure.b_code</td><td>string·null</td><td>법정동코드</td></tr>
       <tr><td class="mono">structure.h_code</td><td>string·null</td><td>행정동코드</td></tr>
     </tbody>
@@ -328,6 +395,8 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
   <table class="small">
     <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
     <tbody>
+      <tr><td class="mono">group</td><td>string·null</td><td>업종 대분류 그룹 (= primary, cat1)</td></tr>
+      <tr><td class="mono">path</td><td>string·null</td><td>분류 경로 — <code>"cat1&gt;cat2"</code>(구분자 <code>&gt;</code>, 공백 없음). display.secondary 우선 키</td></tr>
       <tr><td class="mono">primary</td><td>string</td><td>(선택) 업종 대분류 — 상가(biz)</td></tr>
       <tr><td class="mono">label</td><td>string</td><td>표시 라벨 (예: 음식 &gt; 카페/디저트, 또는 종류명)</td></tr>
       <tr><td class="mono">sub</td><td>string</td><td>(선택) 중분류 — 상가(biz)</td></tr>
@@ -348,6 +417,7 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
   <pre>{
   "lon": 127.0276,
   "lat": 37.4979,
+  "contract_version": "geocode/2",
   "address": {
     "road": "서울특별시 강남구 강남대로 396",
     "parcel": "서울특별시 강남구 역삼동 858",
@@ -368,6 +438,7 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       "lon": 127.0276,
       "lat": 37.4979,
       "dist_m": 8.3,
+      "display": { "main": "강남역", "secondary": "지하철역 · 서울 강남구", "full": "강남역 — 서울특별시 강남구" },
       "category": { "label": "지하철" }
     },
     {
@@ -376,27 +447,97 @@ const rev = await fetch('/reverse?lon=126.8618&amp;lat=37.5575').then(x =&gt; x.
       "subtype": null,
       "lon": 127.0277,
       "lat": 37.498,
-      "dist_m": 15.1
+      "dist_m": 15.1,
+      "display": { "main": "강남대로 396", "secondary": "서울 강남구 역삼동", "full": "서울특별시 강남구 역삼동 강남대로 396" }
     }
   ],
   "areas": [
     { "name": "역삼동", "type": "법정동", "code": "1168010100" },
     { "name": "역삼1동", "type": "행정동", "code": "1168064000" }
   ]
-}</pre>
+}
+<span class="faint"># areas 는 좌표를 포함하는 경계가 없으면 빈 배열 []. nearest[*] 에도 display 부착(geocode 와 동일).</span></pre>
   <p class="tlabel">응답 필드</p>
   <table class="small">
     <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
     <tbody>
       <tr><td class="mono">lon / lat</td><td>number</td><td>요청 좌표 echo</td></tr>
       <tr><td class="mono">address</td><td>object·null</td><td>좌표가 속한 도로명+지번 주소 (구조는 위 <code>address</code> 와 동일)</td></tr>
-      <tr><td class="mono">nearest[]</td><td>array</td><td>최근접 장소 — 거리순. 각 항목은 /geocode results 와 동일 + <code>dist_m</code></td></tr>
+      <tr><td class="mono">nearest[]</td><td>array</td><td>최근접 장소 — 거리순. 각 항목은 /geocode results 와 동일(<code>display</code>·<code>address.structure</code> 부착) + <code>dist_m</code></td></tr>
       <tr><td class="mono">nearest[].dist_m</td><td>number</td><td>요청 좌표로부터의 거리(미터)</td></tr>
-      <tr><td class="mono">areas[]</td><td>array</td><td>좌표를 포함하는 행정경계 (없을 수 있음)</td></tr>
+      <tr><td class="mono">areas[]</td><td>array</td><td>좌표를 포함하는 행정경계. <b>포함하는 경계가 없으면 빈 배열 <code>[]</code></b> (프론트 빈배열 가드 필요)</td></tr>
       <tr><td class="mono">areas[].name / type / code</td><td>string</td><td>경계명 / 종류(법정동·행정동 등) / 행정코드</td></tr>
     </tbody>
   </table>
-  <p class="tlabel"><span class="meth">GET</span>/health → <code>{ "ok": true, "places": 156234, "areas": 4382 }</code> — 인덱스 적재 건수 확인용</p>
+  <h3><span class="meth">GET</span>/health — 적재 상태 확인</h3>
+  <p class="tlabel">정상 응답 — 인덱스 적재 건수 확인용</p>
+  <pre>{ "ok": true, "places": 11281251, "areas": 4382 }</pre>
+  <p class="muted faint" style="margin-top:6px">places = 검색 인덱스 건수(약 11,281,251). areas 수치는 환경별로 상이할 수 있습니다.
+    필수 테이블이 누락되면 503 + degraded 형태로 응답합니다:</p>
+  <pre>{ "ok": false, "degraded": true, "missing_tables": ["address", "admin_boundary"] }</pre>
+
+  <h2>길찾기 API — 차량 · 도보 · 자전거</h2>
+  <p class="muted">OSRM 자체 호스팅(폐쇄망 자급). 게이트웨이가 URL 의 프로필로 엔진을 분기하므로
+    <b>OSRM/Mapbox Directions 표준 URL 을 그대로</b> 쓰면 됩니다. 좌표는 <code>경도,위도</code> 순서이고
+    <b>경유지는 <code>;</code> 로 이어 붙입니다</b>(최대 10지점). 응답은 CORS 허용.</p>
+  <table class="small">
+    <thead><tr><th>프로필</th><th>URL</th><th>별칭</th></tr></thead>
+    <tbody>
+      <tr><td>차량</td><td class="mono">/route/v1/driving/…</td><td class="mono">car</td></tr>
+      <tr><td>도보</td><td class="mono">/route/v1/walking/…</td><td class="mono">foot</td></tr>
+      <tr><td>자전거</td><td class="mono">/route/v1/cycling/…</td><td class="mono">bike, bicycle</td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="meth">GET</span>/route/v1/{프로필}/{좌표들} — 경로 탐색</h3>
+  <p class="tlabel">요청 — 출발;경유;도착 (경도,위도)</p>
+  <pre>const r = await fetch('/route/v1/driving/126.9877,37.4292;126.9769,37.4009;126.9169,37.4017'
+                    + '?steps=true&amp;overview=full&amp;geometries=geojson').then(x =&gt; x.json());</pre>
+  <table class="small">
+    <thead><tr><th>파라미터</th><th>값</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">steps</td><td class="mono">true/false</td><td>턴바이턴 안내 포함 여부(기본 false)</td></tr>
+      <tr><td class="mono">overview</td><td class="mono">full / simplified / false</td><td>경로선 상세도. 지도에 그릴 땐 <code>full</code></td></tr>
+      <tr><td class="mono">geometries</td><td class="mono">geojson / polyline</td><td><b>geojson 권장</b> — MapLibre 소스에 그대로 투입</td></tr>
+      <tr><td class="mono">alternatives</td><td class="mono">true/false</td><td>대안 경로(있을 때만 반환)</td></tr>
+    </tbody>
+  </table>
+  <p class="tlabel">응답 주요 필드</p>
+  <table class="small">
+    <thead><tr><th>필드</th><th>타입</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">code</td><td>string</td><td><code>"Ok"</code> 가 아니면 실패(<code>NoRoute</code>·<code>NoSegment</code> 등) — <b>프론트 가드 필요</b></td></tr>
+      <tr><td class="mono">routes[0].distance</td><td>number</td><td>총 거리(미터)</td></tr>
+      <tr><td class="mono">routes[0].duration</td><td>number</td><td>총 소요시간(초). <b>도로등급·신호 지연 기반 추정 — 실시간 교통 미반영</b></td></tr>
+      <tr><td class="mono">routes[0].geometry</td><td>object</td><td>GeoJSON LineString — 지도 소스로 직결</td></tr>
+      <tr><td class="mono">routes[0].legs[]</td><td>array</td><td>경유지로 나뉜 구간. 각 <code>distance</code>·<code>duration</code>·<code>steps</code></td></tr>
+      <tr><td class="mono">legs[].steps[].maneuver</td><td>object</td><td><code>type</code>(depart/turn/arrive…)·<code>modifier</code>(left/right…)</td></tr>
+      <tr><td class="mono">legs[].steps[].name</td><td>string</td><td>도로명(한국어) — 안내문 조립에 사용</td></tr>
+      <tr><td class="mono">waypoints[]</td><td>array</td><td>입력 좌표의 도로 스냅 결과. <code>name</code>·<code>location</code>·<code>distance</code>(스냅거리 m)</td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="meth">GET</span>/table · /trip · /nearest — 부가 서비스</h3>
+  <pre>// N×N 소요시간·거리 매트릭스 (가까운 지점 찾기)
+await fetch('/table/v1/driving/126.98,37.56;126.75,37.50?annotations=duration,distance');
+// 다중지점 방문 순서 최적화
+await fetch('/trip/v1/driving/126.98,37.56;126.75,37.50;126.91,37.40?roundtrip=true');
+// 좌표 → 가장 가까운 도로 스냅
+await fetch('/nearest/v1/walking/126.9877,37.4292');</pre>
+  <p class="muted faint">데모 우상단 <b>길찾기</b> 패널(<code>demo/js/routing.js</code>)이 위 API 를 그대로 사용합니다 —
+    주소검색 연동·지도 클릭 지정·경유지·턴바이턴 표시의 참고 구현으로 보시면 됩니다.</p>
+
+  <h3>에러 응답</h3>
+  <p class="muted">모든 에러는 <code>application/json</code> 바디로 봉인됩니다(빈 바디·소켓 끊김 없음). 메시지는 절단될 수 있습니다.</p>
+  <table class="small">
+    <thead><tr><th>HTTP</th><th>상황</th><th>응답 바디</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">400</td><td>/reverse 의 lon/lat 누락·형식 오류</td><td class="mono">{ "error": "lon/lat 필요" }</td></tr>
+      <tr><td class="mono">404</td><td>미정의 경로</td><td class="mono">{ "error": "not found", "endpoints": ["/geocode?q=", "/reverse?lon=&amp;lat=", "/health"] }</td></tr>
+      <tr><td class="mono">500</td><td>질의/DB/내부 오류</td><td class="mono">{ "error": "질의 처리 오류: …" } (DB·내부 오류 동형)</td></tr>
+      <tr><td class="mono">503</td><td>PostGIS 연결 실패·테이블 누락</td><td class="mono">{ "error": "PostGIS 연결 실패: …" } 또는 health degraded</td></tr>
+    </tbody>
+  </table>
 
   <footer>
     <p class="warnline">좌표 순서 주의: MapLibre 는 모든 곳에서 <code>[경도(lng), 위도(lat)]</code> 입니다. Leaflet 의 <code>[lat, lng]</code> 와 반대입니다.</p>

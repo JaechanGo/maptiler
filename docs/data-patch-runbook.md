@@ -33,24 +33,118 @@
 각 레이어는 **독립 재빌드 → 산출물 파일 교체 → 컨테이너 재시작**으로 무중단에 가깝게 갱신된다.
 공통: 온라인 PC에서 빌드 → 산출물을 폐쇄망 서버 `~/geocode-build/`(타일은 `tiles/`)에 반입 → `docker compose restart <서비스>`.
 
-### (4) 3D 건물 — `buildings.mbtiles`  ★ 갱신 잦음
-- **다운로드**: data.go.kr [15052097 일별](https://www.data.go.kr/data/15052097/fileData.do)(신축 최신) 또는 [15083092 분기](https://www.data.go.kr/data/15083092/fileData.do), 또는 VWorld 공간정보 다운로드.
-  - **시도별 SHP 17개**(전체데이터, 최신 기준일). VWorld는 로그인+라온K 필요 → data.go.kr이 간단.
-  - 좌표계 **EPSG:5186**(.prj `AUTHORITY["EPSG","5186"]`). 컬럼은 `A0~A28`(generic): **A16=높이(m, 결측多)·A26=지상층수·A27=지하층수**. 컬럼 의미는 페이지의 "컬럼 정의서"로 확인.
-- **빌드**: `bash ~/geocode-build/deploy/build-buildings.sh <SHP폴더>`
-  - 처리: 5186→4326 변환 + `render_height = A16>0?A16:A26×3.3` + tippecanoe(z13–16) + tile-join. 디스크 절약형(시도별 처리·즉시 삭제).
-- **반영**: `tiles/buildings.mbtiles` 교체 → tileserver-config에 `buildings` 데이터 등록 → `docker compose restart tileserver`.
+### (4) 3D 건물 — PostGIS `building` 테이블 (martin 동적타일)  ★ 갱신 잦음
+> `buildings.mbtiles` 방식은 T028 에서 폐기 — 현행은 PostGIS 시도 파티션 + martin `/dyn/building`.
+- **다운로드**: data.go.kr [15052097 일별](https://www.data.go.kr/data/15052097/fileData.do)(신축 최신) 또는 [15083092 분기](https://www.data.go.kr/data/15083092/fileData.do), 또는 VWorld 공간정보 다운로드(AL_D010).
+  - **시도별 SHP**(전체데이터, 최신 기준일). ⚠ 2026 개편 후 광주(29)·전남(46)은 **통합 12 파일 하나**로만 나온다(20260809 실측).
+  - 좌표계 **EPSG:5186**. 컬럼 `A0~A28`(generic): **A1=GIS건물통합식별번호(28자리, 고유키)·A2=PNU·A16=높이(m, 결측多)·A26=지상층수**. 버전별 A코드 변동 가능 — ogrinfo 로 컬럼 정의서 대조.
+- **적재**: `STEPS=building scripts/postgis/load-all.sh` (또는 `scripts/postgis/load_building.sh --shp <폴더> --fresh`)
+  - 처리: 5186→4326 + `render_height = A16>0?A16:A26×3.3(폴백 6)` + ON CONFLICT(sido_cd,bld_mgt_no) 중복 방어.
+  - load-all 은 직후 juso 건물도형 패치(아래 4b)와 **타일 캐시 3겹 교체**까지 자동 체인한다.
+- **반영**: load-all 경유면 자동. 수동 적재였다면 `scripts/postgis/refresh_tile_cache.sh` 필수
+  (martin L1 재시작 → 게이트웨이 L2 퍼지 → 스타일 `/dyn/v<BUILD_ID>/` 버전 범프 — 하나라도 빠지면
+  줌 레벨마다 다른 시대의 캐시 타일이 섞여 보인다. 2026-08-31 실측).
+
+### (4b) juso 건물도형 신축 패치 — 월간  ★ AL_D010 공백 보완
+AL_D010 은 신개발지구 신축이 수년 늦다(과천지식정보타운 실측 — 최신본에도 전무). 행안부
+**건물도형(TL_SGCO_RNADR_MST/DONG)** 으로 증분 보완한다. 전체 흐름은 AL_D010 재적재 **직후**가 원칙
+(dedup 이 최신 건물 기준으로 서야 함 — load-all 이 이 순서를 보장).
+- **다운로드**(수동, 심사 계정): business.juso.go.kr → 전자지도 제공 → **건물도형** 월간 전체분
+  (매월 1일 게시. 기존 신청그룹 재사용: `JsmAddressInfoAplyDetails?reqstGroup=46372`).
+  시도별 zip 을 `$BUILD_HOME/sources/juso_building_shp/` 에 배치.
+- **적재**: `scripts/postgis/load_building_juso_all.sh` — 시도별 해제→적재→삭제.
+  - MST 는 **건물군(단지) 폴리곤** — 동(DONG)이 안에 있거나 기존 건물 3채 이상 품으면 제외,
+    최종 dedup 은 기존 건물과 **겹침 총합 15%** 초과 시 제외(신축=빈 땅 논리). 상세는 스크립트 헤더.
+  - dedup 의 building 조회는 시도 **리터럴** 필수 — 상관식이면 파티션 프루닝 붕괴(경기 30분+).
+- **반영**: 단독 실행 시 `scripts/postgis/refresh_tile_cache.sh` 잊지 말 것(스크립트가 말미에 상기시킴).
+- **검증**: 신개발지구 1곳(예: 과천지식정보타운)을 z16/z17/z18 로 돌며 타워 존재·덮개 부재·전 줌 동일 확인.
+
+### (4c) 위성(정사영상) 베이스맵 — 폐쇄망 반입  ★ 레이어 스위처 '위성' 모드
+데모/뷰어의 레이어 타입(기본/2D/3D/**위성**) 중 위성 모드의 원천. 외부 XYZ(구글·VWorld 실시간)는
+폐쇄망에서 못 쓰므로 **정사영상을 반입해 자체 mbtiles 로 서빙**한다.
+- **다운로드**(수동, 회원가입): 국토지리정보원 **정사영상** — 국토정보플랫폼(map.ngii.go.kr) 국토정보맵에서
+  도엽 단위 TIFF 다운로드(대용량 전송 SW 자동 설치). 도시 12cm·일반 25cm.
+  **라이선스: 무료·"이용허락범위 제한 없음"**(공공데이터포털 15059919) — 재배포·폐쇄망 반입 적합.
+  단 국외 반출 금지(공간정보관리법)·보안시설은 마스킹 제공. 좌표계 무관(변환 스크립트가 3857 재투영).
+  `$BUILD_HOME/sources/ortho/` 에 배치. (저줌 보조가 필요하면 Copernicus Sentinel-2 원시자료(10m,
+  출처표시 재배포 가능)로 전국 배경 합성 가능 — EOx s2maps 완성본은 2018년판부터 비상업(NC)이라 부적합.)
+- **변환**: `scripts/gen_satellite_mbtiles.sh` — VRT 모자이크 → 3857 재투영 → MBTiles(JPEG) → 오버뷰.
+  용량 감: 전국 z15 급 ≈ 4~5GB, 도심 z17 추가 시 수십 GB(반입 매체 계획에 반영).
+- **등록**: mbtiles 를 tiles/ 에 배치한 **후에만** `tileserver-config.json` 의 data 에
+  `"satellite": {"mbtiles": "satellite.mbtiles"}` 추가 → tileserver 재시작.
+  ⚠ 파일 없이 미리 등록하면 tileserver-gl v5 가 **크래시 루프**(2026-09-01 실측) — 그래서 저장소
+  기본 config 에는 satellite 항목이 없다.
+- **활성화**: 데모의 '위성' 버튼은 `/data/satellite.json` 프로브로 자동 활성화(코드 수정 불요).
+  위성 모드는 하이브리드 — 영상 위에 도로·라벨·필지·경계는 유지, 면(녹지·물·건물)만 숨김.
+- **⚠ NGII 다운로드 함정 실측(2026-09-01, 미해결로 보류)**: 국토정보플랫폼 다운로드는 Innorix
+  전용 에이전트 필수. ①설치 안내 페이지(`nlippd…/install/install.html`)에 Apple Silicon 분기
+  버그(`macMchipInstallFileURL` 미정의 ReferenceError) — 맥 설치파일은
+  `nlippd.ngii.go.kr/nlippd/install/INNORIX-Agent.pkg` 직링크로 수동 확보(Apple 공증본)
+  ②CA를 크롬 실행 중 설치하면 신뢰 미반영 — 크롬 완전 재시작 필요 ③신청서 제출(팝업 차단
+  해제 필수) 후 팝업(innorixdownLoad.do)에 파일 목록·[전체 다운로드]까지 뜨는 것 확인했으나
+  에이전트 전송 큐(~/.INNORIX/innorixas/transferInfo)에 작업이 등록되지 않아 실전송 실패.
+  신청분은 마이페이지 > 신청내역관리 > 정사영상에서 재다운로드 가능(만료 전). 재시도 시
+  Windows PC 가 가장 무난. 저줌 대안: Copernicus Sentinel-2(10m·재배포 가능, z13 이하용).
 
 ### (7) 시설/상가 POI — `geocode.sqlite`(biz) + `poi.mbtiles`  ★ 분기 갱신
 - **다운로드**: data.go.kr [15083033](https://www.data.go.kr/data/15083033/fileData.do) — **시도별 CSV 17개**(UTF-8). 컬럼: 상호명·상권업종(대/중/소분류)·도로명주소·**경도/위도(WGS84)**.
-- **지오코딩 적재**: 17개 CSV 병합 후 `python3 scripts/07-gen-geocode.py --poi-csv 상가_전국.csv` (kind=biz). 좌표 이미 4326 → 변환 불필요.
+- **지오코딩 적재**: 17개 CSV 를 한 폴더에 모은다 (kind=biz). 좌표 이미 4326 → 변환 불필요.
+
+  ```
+  # (구) 09-gen-geocode.py --poi-csv-dir <폴더>            ← 폐지. 주소 0행 DB 로 정본을 대체함
+  # (신) 상가/POI 만 갱신하는 경로는 없다. 전체 빌드로 갱신한다:
+  python3 scripts/09-gen-geocode.py \
+      --src   <202607 원천 폴더> \
+      --poi-csv-dir <폴더> \
+      --osm   <osm.sqlite> \
+      --out   <산출 경로> --dedup er
+  ```
+
+  > **주의(T043) — 위 명령은 지금 그대로는 서지 않는다.** 범위가 전국이거나 `--out` 이
+  > `~/geocode-build` 아래를 겨누면 게이트 G0(전국 재빌드 차단)가 `exit 2` 로 멈춘다.
+  > 고장이 아니라 T018 리(里) 백필 처분이 끝날 때까지의 **의도된 정지**다.
+  > 그러므로 **T018 처분 전에는 정본 `geocode.sqlite` 의 분기 POI 갱신이 불가능하다** —
+  > 이것은 우회로가 없는 정지이고, 아래 (a)(b)(c) 가 그 안에서 실제로 할 수 있는 전부다.
+
+  **(a) T018 처분 전 — 검증용 산출물까지만 (정본 교체 불가)**
+
+  ```
+  # 정본 밖 경로에 시도 단위로 만든다. G0 는 두 조건(전국 범위 / 정본 조준) 모두 아닐 때만 통과한다
+  python3 scripts/09-gen-geocode.py \
+      --src <202607 원천 폴더> --only chungbuk \
+      --poi-csv-dir <폴더> --out /tmp/geocode-poi-check.sqlite --dedup er \
+      --taxonomy-out /tmp/poi-taxonomy.json
+  ```
+  `--only` 로 범위를 좁히고 `--out` 을 정본 밖으로 두면 G1~G10 은 그대로 돌아 CSV 적재
+  결과(kind=biz 행수·좌표 범위·무결성)를 확인할 수 있다. **정본은 건드리지 않는다.**
+  `--taxonomy-out` 을 주지 않으면 `style/poi-taxonomy.json` 은 **쓰이지 않는다**(T043 M-1) —
+  부분 빌드의 빈약한 분류로 저장소 파일을 덮어쓰지 않기 위해서다.
+
+  **(b) T018 처분 후 — 정본 전국 재빌드**
+
+  T018 처분(리 백필 완료 + 검증)이 끝난 뒤에야 `--t018-disposed` 를 붙일 수 있다.
+  해제에 필요한 5개 조건은 G0 실패 메시지가 그대로 출력한다. 그 5개를 모두 마친 다음:
+
+  ```
+  python3 scripts/09-gen-geocode.py \
+      --src <202607 원천 폴더> --poi-csv-dir <폴더> --osm <osm.sqlite> \
+      --out ~/geocode-build/geocode.sqlite --dedup er --t018-disposed
+  ```
+  이때 `--taxonomy-out` 없이도 `style/poi-taxonomy.json` 이 갱신된다(정본 빌드이므로).
+
+  **(c) 분류 트리(`style/poi-taxonomy.json`)만 다시 뽑기**
+
+  이미 POI 가 든 DB 가 있으면 빌드를 다시 돌리지 않고 그 DB 에서 트리만 뽑아도 된다.
+  `write_taxonomy()` 는 `--out` DB 를 `mode=ro` 로 읽어 쓰므로, (a)의 산출물이나 정본을
+  읽기전용으로 열어 쓰는 짧은 스크립트로 충분하다. **정본을 읽을 때도 쓰기는 금지**다.
 - **지도 라벨 타일**: `ogr2ogr`(경도/위도→점) → `tippecanoe`(z12–16, `--drop-densest-as-needed --cluster-distance`) → `tiles/poi.mbtiles`.
 - **반영**: `geocode.sqlite` 교체 → `docker compose restart geocode`; `poi.mbtiles` 등록 → restart tileserver.
 
 ### (5)(6) 지오코딩 — `geocode.sqlite`  ★ 월/분기
 - **주소(5)**: 내비게이션용DB(business.juso.go.kr, 심사) `match_build_*.txt`(EPSG:5179, CP949). `.7z`는 `bsdtar -xf …7z match_build_*.txt`로 17개 시도 확인.
 - **이름(6)**: `python3 ~/geocode-build/osm-from-mbtiles.py` → `osm.sqlite`(korea.mbtiles에서 역/지명/POI 재추출).
-- **통합 빌드**: `python3 ~/geocode-build/09-gen-geocode.py --src <내비DB폴더> --osm ~/geocode-build/osm.sqlite [--poi-csv 상가.csv]` → `~/geocode-build/geocode.sqlite`.
+- **통합 빌드**: `python3 scripts/09-gen-geocode.py --src <내비DB폴더> --osm ~/geocode-build/osm.sqlite [--poi-csv-dir <상가CSV폴더>] --source-label 2026.07` → `~/geocode-build/geocode.sqlite`.
+  `--src` 는 **필수**다(T043). 정본을 겨누는 실행은 게이트 G0 가 막으며, 해제는 `--t018-disposed` 로만 가능하다.
   - 5179→4326 순수파이썬 변환 내장(무의존). 본번/부번 정밀 + 폴백.
 - **반영**: `docker compose restart geocode`.
 
@@ -123,7 +217,9 @@ maptiler/ (iCloud repo)               # 소스 코드 본체
 - 핵심: **휴게음식점**(스벅/카페/맥도/패스트푸드)·일반음식점·제과점·대규모점포·병원·의원·약국·미용·숙박·주유(석유판매)·PC방·노래방 등 **물리 시설**.
 - 빌드: `python3 build-localdata.py <인허가정보_DIR> localdata/localdata_clean.csv`
   → 비물리(통신판매·제조·도매·농축·공사·대행) 카테고리 제외 + 영업중 + 5174→4326(gdaltransform) + **NFC 정규화** + 상가포맷 변환.
-- 적재: 상가 CSV들과 함께 한 폴더에 두고 `09-gen-geocode.py --poi-csv-dir <폴더>` → kind=biz.
+- 적재: 상가 CSV들과 함께 한 폴더에 둔다 → kind=biz. **`--poi-csv-dir` 단독 실행은 폐지됐다**
+  (주소 0행 DB 로 정본을 대체하던 경로). 위 (7) '지오코딩 적재' 의 (a)(b)(c) 를 쓰라 —
+  **T018 처분 전에는 (a) 검증까지만 가능하고 정본 교체는 되지 않는다.**
 
 ⚠️ **한글 NFC/NFD 정규화 필수**: 정부 데이터/파일명이 NFD(자모분리)일 수 있어, 키워드 매칭(EXCLUDE)·FTS 검색이 조용히 실패한다. build-localdata·검색 모두 NFC로 통일.
 ⚠️ **중복**: 상가정보 ↔ LOCALDATA 겹침(같은 가게 중복). 검색은 되지만 중복제거·랭킹은 개선 과제.

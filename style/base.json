@@ -11,7 +11,9 @@
     },
     "buildings": {
       "type": "vector",
-      "tiles": ["/dyn/building/{z}/{x}/{y}"],
+      "tiles": [
+        "/dyn/building/{z}/{x}/{y}"
+      ],
       "minzoom": 13,
       "maxzoom": 22,
       "attribution": "© VWorld 건물통합정보"
@@ -104,7 +106,7 @@
           "get",
           "admin_level"
         ],
-        4
+        2
       ],
       "paint": {
         "line-color": "hsl(227, 25%, 38%)",
@@ -348,7 +350,6 @@
         [
           "literal",
           [
-            "city",
             "town",
             "village",
             "suburb",

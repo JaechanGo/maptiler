@@ -23,15 +23,36 @@ else
   echo "⚠ images.tar 경로를 인자로 주세요 (이미 load 했다면 무시)" >&2
 fi
 
+# 번들 파일 권한 정규화 — 빌드호스트(맥 등)에서 tar 로 묶일 때 보존된 700(소유자 전용)·빌드호스트 uid 가
+# 그대로 반입되면, tileserver/geocode 컨테이너 내부 사용자(uid≠빌드호스트)가 bind 마운트
+# (demo/style/glyphs/tiles/geocode)를 못 읽어 EACCES 로 기동 실패한다(/styles.json=[] 증상).
+# 모든 사용자에 읽기 + 디렉토리 진입(a+rX)만 부여(쓰기 미부여 → 안전·멱등). SELinux 는 호스트 정책으로 별도.
+for _d in demo style vendor tiles geocode route; do   # route = OSRM 길찾기 그래프(osrm-car/foot ro 마운트)
+  [ -e "$ROOT/$_d" ] && chmod -R a+rX "$ROOT/$_d" 2>/dev/null || true
+done
+
 # tileserver-config.json 이 베이스 mbtiles 3종(korea/terrain/dong)을 참조하므로, 하나라도 없으면
 # TileServer-GL 이 기동 자체에 실패한다(벡터 단독 degrade 없음) — 사전 검증.
 # (buildings/poi/parcel 동적 레이어는 PostGIS→martin — postgis/cuvia.dump 로 별도 복원)
-for mb in korea.mbtiles terrain.mbtiles dong.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn)
+for mb in korea.mbtiles terrain.mbtiles dong.mbtiles admin.mbtiles; do   # buildings/poi 는 PostGIS→martin(/dyn)
   if [ ! -s "$ROOT/tiles/$mb" ]; then   # -s: 존재+크기>0 (0바이트 evict/잘린 파일도 차단, package.sh와 통일)
     echo "오류: tiles/$mb 가 없거나 0바이트 — 번들이 불완전합니다. 압축 해제 경로를 확인하세요." >&2
     exit 1
   fi
 done
+
+# 길찾기 그래프(route/{car,foot,bicycle}) — compose 의 osrm-car/foot/bike 가 south-korea.osrm 고정 참조.
+# 없으면 osrm 컨테이너가 crash-loop 하고 데모 길찾기가 실패한다 — 배포 시점에 차단.
+# 길찾기 제외 번들(package.sh SKIP_ROUTE=1)을 의도적으로 반입한 경우만 SKIP_ROUTE=1 로 우회.
+if [ -z "${SKIP_ROUTE:-}" ]; then
+  for rp in car foot bicycle; do
+    if [ ! -s "$ROOT/route/$rp/south-korea.osrm.mldgr" ]; then
+      echo "오류: route/$rp/south-korea.osrm.mldgr 가 없거나 0바이트 — 길찾기 그래프 미포함 번들." >&2
+      echo "  → 빌드호스트에서 scripts/07-gen-route-graph.sh 후 재패키징하거나, 길찾기 없이 배포하려면 SKIP_ROUTE=1 로 재실행." >&2
+      exit 1
+    fi
+  done
+fi
 
 # geocode 서비스용 지오코딩 인덱스 — compose 의 geocode 컨테이너가 참조한다.
 if [ ! -s "$ROOT/geocode/geocode.sqlite" ]; then
@@ -171,5 +192,5 @@ echo "  (tileserver:8080·geocode:8082 직결은 loopback 전용 — 외부엔 :
 echo
 echo "스타일 디자인(Style Studio)은 관리툴 — LAN 비노출, SSH 터널 권장:"
 echo "  서버: STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh"
-echo "  PC:   ssh -L 8091:localhost:8091 -L 8080:localhost:8080 <user>@<이서버IP>  # → http://localhost:8091/?token=…"
+echo "  PC:   ssh -L 18082:localhost:18082 -L 8080:localhost:8080 <user>@<이서버IP>  # → http://localhost:18082/?token=…"
 echo "  (프리뷰가 브라우저에서 tileserver:8080 을 직접 호출하므로 8080 도 함께 터널)"

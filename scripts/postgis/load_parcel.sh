@@ -117,7 +117,7 @@ load_one() {
   echo "  [$idx/${N}] $lyr → ${ins}/${cnt}건 (적재/스테이징)"
 }
 
-# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n).
+# 워커 풀: 최대 JOBS 개 동시 실행, 하나 끝나면 다음 투입(wait -n / bash<4.3 은 폴링 폴백).
 # 진행로그 [i/N] 는 완료 순서라 순번이 뒤섞여 보일 수 있음(정상). 워커 SQL 오류 시 즉시 중단(fail-fast).
 # fail-fast(set -e)로 중단될 때 백그라운드 워커와 그 자식(ogr2ogr/psql)까지 정리 — 다음 빌드 단계로 새어나감/락 잔류 방지.
 # jobs -p 는 워커 서브셸 PID. pkill -P 로 손자(ogr2ogr/psql)를 먼저 보내고 서브셸을 종료.
@@ -132,7 +132,18 @@ for shp in "${SHPS[@]}"; do
   case "$shp" in *"(1)"*) echo "  (중복 제외) $(basename "$shp")"; continue;; esac
   i=$((i+1))
   load_one "$shp" "$i" &
-  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+  # ★ wait -n 은 bash 4.3+ 전용 — 4.2(CentOS 7 기본)에서는 "wait: -n: invalid option" 으로 죽고,
+  #   set -e + EXIT 트랩(_kill_workers)이 돌아 **적재 중이던 워커가 전부 Terminated** 된다.
+  #   앞서 --fresh 가 TRUNCATE 를 끝낸 뒤라 parcel 이 0 행으로 남는다([실측 2026-09-02 .244/bash 4.2.46]
+  #   39.9M → 0, GiST/pnu 인덱스도 DROP 된 상태로 방치).
+  #   → 4.3+ 면 wait -n(끝나는 즉시 투입), 4.2 이하면 짧은 폴링으로 같은 효과를 낸다.
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+    if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
+      wait -n
+    else
+      sleep 0.5
+    fi
+  done
 done
 wait
 # 워커가 각자 스테이징을 정리하지만, 비정상 종료 잔여분(_stg_parcel_*)까지 일괄 정리.

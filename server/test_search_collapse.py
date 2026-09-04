@@ -1,0 +1,247 @@
+"""검색 결과 '같은 자리·같은 이름' 접기(collapse_dups) 회귀 테스트.
+
+[실측 2026-09-03 .244] dedup_er 의 대표(is_primary)는 타일 표시층에만 쓰이고 검색은 안 봤다.
+  · '이마트24R춘의역점' / '이마트24 R춘의역점' — localdata 2행, 0m → 둘 다 노출
+  · OSM 역(station) + 정류장/출입구(poi) 같은 이름 10~25m → '대전역 ×8'
+규칙: 정규화 이름 동일 + 30m 이내 → 뒤 항목 버림. 양방향 정류장(50~100m)은 유지(서로 다른 객체).
+"""
+import importlib.util
+import os
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_MOD_PATH = os.environ.get("GEOCODE_MODULE", os.path.join(_HERE, "geocode-api-pg.py"))
+
+
+def _load_module(path=_MOD_PATH):
+    spec = importlib.util.spec_from_file_location("geocode_api_pg", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+M = _load_module()
+
+
+def _it(name, lon, lat, kind="biz", prim=None, source="localdata"):
+    d = {"name": name, "kind": kind, "lon": lon, "lat": lat, "source": source}
+    if prim is not None:
+        d["_prim"] = prim
+    return d
+
+
+class TestCollapseDups(unittest.TestCase):
+    def test_same_spot_variant_spelling_collapses_to_primary(self):
+        # 이름 표기만 다른 같은 점포(0m) — 대표(is_primary=1)가 남아야 한다
+        rows = [(135, _it("이마트24 R춘의역점", 126.785869, 37.504535, prim=0)),
+                (135, _it("이마트24R춘의역점", 126.785869, 37.504535, prim=1))]
+        rows.sort(key=lambda x: (-x[0], 1 if x[1].get("_prim") == 0 else 0))
+        out = M.collapse_dups(rows, 10)
+        self.assertEqual([o["name"] for o in out], ["이마트24R춘의역점"])
+
+    def test_station_and_stop_within_radius_collapse(self):
+        # OSM 역 노드 + 13m 떨어진 동명 poi → 1건(앞선 station 유지)
+        rows = [(150, _it("상동역", 126.753173, 37.505836, kind="station", source="osm")),
+                (140, _it("상동역", 126.753300, 37.505900, kind="poi", source="osm"))]
+        out = M.collapse_dups(rows, 10)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["kind"], "station")
+
+    def test_bidirectional_stops_beyond_radius_kept(self):
+        # 양방향 정류장 ~80m — 서로 다른 객체, 둘 다 유지
+        rows = [(140, _it("상동역", 126.7530, 37.5058, kind="poi", source="osm")),
+                (140, _it("상동역", 126.7539, 37.5058, kind="poi", source="osm"))]
+        out = M.collapse_dups(rows, 10)
+        self.assertEqual(len(out), 2)
+
+    def test_different_names_same_spot_kept(self):
+        rows = [(135, _it("스타벅스 부천점", 126.78, 37.50)),
+                (135, _it("투썸플레이스 부천점", 126.78, 37.50))]
+        self.assertEqual(len(M.collapse_dups(rows, 10)), 2)
+
+    def test_limit_and_none_coords(self):
+        rows = [(150, _it("A", None, None)), (140, _it("B", 126.1, 37.1)),
+                (130, _it("C", 126.2, 37.2)), (120, _it("D", 126.3, 37.3))]
+        out = M.collapse_dups(rows, 2)
+        self.assertEqual([o["name"] for o in out], ["B", "C"])
+
+    def test_exact_key_rule_preserved(self):
+        # 종전 규칙(이름 완전일치 + 좌표 5자리)도 그대로 동작
+        rows = [(135, _it("같은집", 126.7800001, 37.5000001)), (135, _it("같은집", 126.7800002, 37.5000002))]
+        self.assertEqual(len(M.collapse_dups(rows, 10)), 1)
+
+    def test_dup_key_normalization(self):
+        self.assertEqual(M._dup_key("이마트24 R춘의역점"), M._dup_key("이마트24R춘의역점"))
+        self.assertEqual(M._dup_key("Starbucks (부천)"), "starbucks부천")
+        self.assertEqual(M._dup_key(None), "")
+
+
+
+class TestRefineSigungu(unittest.TestCase):
+    def test_prefix_upgrade(self):
+        own = {"sido": "경기도", "sigungu": "부천시"}
+        self.assertEqual(M.refine_sigungu(own, {"sigungu": "부천시 원미구"})["sigungu"], "부천시 원미구")
+
+    def test_no_change_when_not_prefix_or_missing(self):
+        own = {"sigungu": "부천시"}
+        self.assertEqual(M.refine_sigungu(own, {"sigungu": "인천광역시 부평구"})["sigungu"], "부천시")
+        self.assertEqual(M.refine_sigungu(own, {})["sigungu"], "부천시")
+        self.assertEqual(M.refine_sigungu({}, {"sigungu": "부천시 원미구"}), {})
+        self.assertEqual(M.refine_sigungu(own, {"sigungu": "부천시"})["sigungu"], "부천시")
+
+
+class TestNamePathSql(unittest.TestCase):
+    def test_short_prefix_is_materialized(self):
+        sql = M._name_path_sql(["(search_text LIKE %s OR bld LIKE %s)"], True)
+        self.assertTrue(sql.startswith("SELECT * FROM (("))
+        self.assertIn("search_text LIKE %s LIMIT", sql); self.assertIn("bld LIKE %s LIMIT", sql)
+        self.assertEqual(sql.count("%s"), 2)
+        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.SHORT_PREFIX_CAP}"))
+        # 인식 못 하는 형태(다중 cond)는 CTE 폴백
+        sql2 = M._name_path_sql(["a", "b"], True)
+        self.assertTrue(sql2.startswith("WITH c AS MATERIALIZED ("))
+
+    def test_single_infix_is_cte_and_multi_plain(self):
+        sql = M._name_path_sql(["(search_text ILIKE %s OR bld ILIKE %s)"], False)
+        self.assertTrue(sql.startswith("WITH c AS MATERIALIZED ("))     # 단일 토큰 infix 도 CTE(Seq Scan 함정)
+        self.assertTrue(sql.rstrip().endswith(f"LIMIT {M.ADDR_CAP}"))
+        sql2 = M._name_path_sql(["(a ILIKE %s)", "(b = ANY(%s::text[]))"], False)
+        self.assertTrue(sql2.startswith("SELECT *, ST_X(geom) AS lon")); self.assertNotIn("MATERIALIZED", sql2)
+
+
+class TestNarrowByRegion(unittest.TestCase):
+    """지역 좁힘 — 인천 개편(신 코드 DB) 실측 회귀 (2026-09-03)."""
+    CDS = ["28155103", "11140101", "27110101", "26110101"]   # 인천 영종구 운서동(신), 서울 중구, 대구 중구, 부산 중구 동
+
+    def test_old_gu_name_with_sido_falls_back_to_sido(self):
+        # '인천 중구 운서동': 2단이 타도시 중구로 좁혀 비면 → 시도(28)만으로 폴백
+        out = M.narrow_by_region(self.CDS, set(), {"11140", "27110", "26110"}, {"28"})
+        self.assertEqual(out, ["28155103"])
+
+    def test_remap_bidirectional_without_sido(self):
+        # '중구 운서동': 대응표(old 28110147 ∪ new 28155103) 로 인천 동을 특정
+        out = M.narrow_by_region(self.CDS, {"28110147", "28155103"}, {"11140", "27110", "26110"}, set())
+        self.assertEqual(out, ["28155103"])
+
+    def test_other_city_gu_not_hijacked_by_incheon_remap(self):
+        # '대구 중구 동인동': 대응표(인천)에 걸려도 시도 27 과 교차해 비면 → 2단 시군구∧시도 → 대구 중구
+        out = M.narrow_by_region(self.CDS, {"28110147", "28155103"}, {"11140", "27110", "26110"}, {"27"})
+        self.assertEqual(out, ["27110101"])
+
+    def test_no_sido_gu_ambiguous_uses_sgg(self):
+        # '중구 동인동'(시도 없음): 1단(인천) 비면 → 2단 시군구 전부
+        cds = ["11140101", "27110101"]
+        out = M.narrow_by_region(cds, {"28110147"}, {"11140", "27110"}, set())
+        self.assertEqual(out, ["11140101", "27110101"])
+
+    def test_no_dictionary_hit_keeps_all(self):
+        self.assertEqual(M.narrow_by_region(self.CDS, set(), set(), set()), self.CDS)
+
+    def test_all_empty_when_region_hit_but_no_match(self):
+        # 지정 시도에 그 동이 없음 → [] (타지역 혼입 차단)
+        self.assertEqual(M.narrow_by_region(["11140101"], set(), set(), {"28"}), [])
+
+
+class TestNormalizeOwn(unittest.TestCase):
+    def test_legacy_sido_is_remapped_for_display(self):
+        M._HAS_SIDO_REMAP = False    # 치환표 0행(통합 코드 DB) 이어도 표기 정규화는 동작해야 한다
+        own = M.normalize_own({"sido": "광주광역시", "sigungu": "서구"}, {"sido": "전남광주통합특별시", "sigungu": "서구"})
+        self.assertEqual(own["sido"], "전남광주통합특별시")
+        own = M.normalize_own({"sido": "전라남도", "sigungu": "순천시"}, {})
+        self.assertEqual(own["sido"], "전남광주통합특별시")
+
+    def test_current_sido_untouched_and_sigungu_refined(self):
+        own = M.normalize_own({"sido": "경기도", "sigungu": "부천시"}, {"sido": "경기도", "sigungu": "부천시 원미구"})
+        self.assertEqual((own["sido"], own["sigungu"]), ("경기도", "부천시 원미구"))
+        self.assertEqual(M.normalize_own({}, {"sido": "경기도"}), {})
+
+
+class TestRegionCondShortToken(unittest.TestCase):
+    def test_two_char_korean_uses_word_prefix_like(self):
+        c, a = M._region_cond(("search_text", "sigungu"), "부천")
+        self.assertNotIn("ILIKE", c); self.assertIn("search_text LIKE %s", c)
+        self.assertEqual(a[:4], ["부천%", "% 부천%", "부천%", "% 부천%"])
+        self.assertEqual(c.count("%s"), len(a))
+
+    def test_three_char_or_ascii_keeps_infix_ilike(self):
+        c, a = M._region_cond(("search_text",), "이마트")
+        self.assertIn("search_text ILIKE %s", c); self.assertEqual(a, ["%이마트%"])
+        c2, a2 = M._region_cond(("search_text",), "CU")
+        self.assertIn("ILIKE", c2); self.assertEqual(a2, ["%CU%"])
+
+
+class TestSidoInputAlias(unittest.TestCase):
+    def test_old_abbr_gets_merged_names(self):
+        self.assertEqual(M.sido_input_alias("광주"), ("광주", M.SIDO_MERGED_NEW, M.SIDO_MERGED_ABBR))
+        self.assertEqual(M.sido_input_alias("전라남도"), ("전라남도", M.SIDO_MERGED_NEW, M.SIDO_MERGED_ABBR))
+
+    def test_new_abbr_gets_old_names_and_others_untouched(self):
+        self.assertEqual(M.sido_input_alias("전남광주")[1:], M.SIDO_MERGED_OLD)
+        self.assertEqual(M.sido_input_alias("부천"), ("부천",))
+        self.assertEqual(M.sido_input_alias(""), ("",))
+
+
+class TestRegionEqCond(unittest.TestCase):
+    def setUp(self):
+        M._REGION_SGG = frozenset({"부천시 원미구", "부천시 소사구", "부천시 오정구", "강남구", "수원시 영통구"})
+        M._REGION_EMD = frozenset({"상동", "역삼동", "중동", "송정동"})
+
+    def test_sigungu_prefix_and_word_prefix(self):
+        c, a = M.region_eq_cond("부천")
+        self.assertIn("sigungu = ANY(%s::text[])", c); self.assertEqual(a[0], ["부천시 소사구", "부천시 오정구", "부천시 원미구"])
+        c2, a2 = M.region_eq_cond("원미")
+        self.assertEqual(a2[0], ["부천시 원미구"])
+
+    def test_emd_and_sido(self):
+        c, a = M.region_eq_cond("역삼")
+        self.assertIn("emd = ANY", c); self.assertEqual(a[0], ["역삼동"])
+        c3, a3 = M.region_eq_cond("서울")
+        self.assertIn("sido = ANY", c3); self.assertIn("서울특별시", a3[0])
+
+    def test_merged_sido_includes_old_names(self):
+        c, a = M.region_eq_cond("광주")
+        self.assertIn("sido = ANY", c); self.assertTrue({"전남광주통합특별시", "광주광역시", "전라남도"} <= set(a[0]))
+
+    def test_unknown_token_returns_none(self):
+        self.assertIsNone(M.region_eq_cond("홍대")); self.assertIsNone(M.region_eq_cond("이"))
+
+
+class TestBldPathTerms(unittest.TestCase):
+    """건물명(bld) 경로 토큰 분배 — 2자 지역 토큰은 bld 패턴 대신 지역 정확 조건(trigram 0개 → GIN 무력 → 힙 재검사 3s 503 실측)."""
+    def setUp(self):
+        M._REGION_SGG = frozenset({"부천시 원미구", "부천시 소사구", "부천시 오정구", "강남구"})
+        M._REGION_EMD = frozenset({"상동", "역삼동", "삼성동"})
+
+    def test_two_char_region_token_becomes_region_cond(self):
+        bld, conds, args = M.bld_path_terms(["부천", "초등학교"], None)
+        self.assertEqual(bld, ["초등학교"])
+        self.assertEqual(len(conds), 1); self.assertIn("sigungu = ANY(%s::text[])", conds[0])
+        self.assertEqual(args, [["부천시 소사구", "부천시 오정구", "부천시 원미구"]])
+
+    def test_three_char_region_token_stays_bld_pattern(self):
+        bld, conds, args = M.bld_path_terms(["부천시", "초등학교"], None)   # ≥3자는 trgm 인덱스가 쓰이므로 기존 동작 유지
+        self.assertEqual(bld, ["부천시", "초등학교"]); self.assertEqual(conds, []); self.assertEqual(args, [])
+
+    def test_dong_token_excluded_and_non_region_two_char_kept(self):
+        bld, conds, args = M.bld_path_terms(["역삼동", "한빛", "아파트"], "역삼동")
+        self.assertEqual(bld, ["한빛", "아파트"]); self.assertEqual(conds, [])
+
+    def test_all_region_tokens_leave_no_bld_terms(self):
+        bld, conds, args = M.bld_path_terms(["부천", "강남"], None)   # 호출측은 bld_terms 가 비면 경로 진입 안 함
+        self.assertEqual(bld, []); self.assertEqual(len(conds), 2)
+
+
+class TestParseTermsCap(unittest.TestCase):
+    def test_repeated_tokens_deduped_and_capped(self):
+        p = M.parse("경기도 " * 40)
+        self.assertEqual(p["terms"], ["경기도"])
+        p2 = M.parse(" ".join(f"토큰{i}" for i in range(20)))
+        self.assertLessEqual(len(p2["terms"]), M.MAX_TERMS)
+
+    def test_normal_query_unchanged(self):
+        p = M.parse("서울 강남구 스타벅스")
+        self.assertEqual(p["terms"], ["서울", "강남구", "스타벅스"])
+
+
+if __name__ == "__main__":
+    unittest.main()

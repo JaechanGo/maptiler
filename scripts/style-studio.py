@@ -5,8 +5,8 @@
 배포된 지도의 색·POI·글꼴 테마를 현장에서 지정한다(저장 → build_style → tileserver reload).
 원천데이터/tippecanoe 불필요. style_objects + build_style.py + style/ 조각 + glyphs 만 있으면 동작.
 
-기동:  python3 scripts/style-studio.py                      # http://localhost:8091
-       HOST=0.0.0.0 STUDIO_TOKEN=secret PORT=8091 \
+기동:  python3 scripts/style-studio.py                      # http://localhost:18082
+       HOST=0.0.0.0 STUDIO_TOKEN=secret PORT=18082 \
        COMPOSE_FILE=/path/docker-compose.yml python3 scripts/style-studio.py
 - HOST 기본 127.0.0.1(로컬 전용). LAN 노출 시 HOST=0.0.0.0 + STUDIO_TOKEN 설정 권장.
 - STUDIO_TOKEN 설정 시 변경 API(POST)는 X-Studio-Token 헤더 필요. 페이지는 ?token=… 로 받음.
@@ -18,7 +18,7 @@ import style_objects
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_HOME = pathlib.Path(os.environ.get("BUILD_HOME", os.path.expanduser("~/geocode-build")))
 HOST = os.environ.get("HOST", "0.0.0.0")   # 기본 외부(LAN) 노출. 로컬 전용은 HOST=127.0.0.1 (LAN 노출 시 STUDIO_TOKEN 권장)
-PORT = int(os.environ.get("PORT", "8091"))
+PORT = int(os.environ.get("PORT", "18082"))
 TILE_PORT = int(os.environ.get("TILE_PORT", "8080"))            # 미리보기·재시작 대상 tileserver 포트
 COMPOSE_FILE = os.environ.get("COMPOSE_FILE", str(BUILD_HOME / "deploy/docker-compose.yml"))
 STUDIO_TOKEN = os.environ.get("STUDIO_TOKEN", "")               # 설정 시 POST에 X-Studio-Token 요구
@@ -57,10 +57,10 @@ def apply_style_theme(theme, commit_pending=True):
     ic = style_objects.sanitize_icons(theme.get("icons"))   # 카테고리 아이콘(대분류 slug)
     if ic:
         clean["icons"] = {**(clean.get("icons") or {}), **ic}
-    iov = style_objects.sanitize_icon_overrides(theme.get("icon_overrides"))   # 중/소 아이콘 오버라이드
+    iov = style_objects.sanitize_icon_overrides(theme.get("icon_overrides"))   # 중분류 아이콘 오버라이드
     if iov:
         cov = clean.get("icon_overrides") or {}
-        for lvl in ("cat2", "cat"):
+        for lvl in ("cat2",):
             if iov.get(lvl):
                 cov[lvl] = {**(cov.get(lvl) or {}), **iov[lvl]}
         clean["icon_overrides"] = cov
@@ -81,6 +81,18 @@ def apply_style_theme(theme, commit_pending=True):
     gr = style_objects.sanitize_gradient(theme.get("gradient"))   # 속성별 색 그라데이션
     if gr:
         clean["gradient"] = {**(clean.get("gradient") or {}), **gr}
+    pl = style_objects.sanitize_placement(theme.get("placement"))   # 라벨 배치(offset·anchor·생략)
+    if pl:
+        clean["placement"] = {**(clean.get("placement") or {}), **pl}
+    ov = style_objects.sanitize_overrides(theme.get("overrides"))   # 객체 오버라이드(클릭 편집)
+    if ov is not None:                                              # 리스트로 오면 전체 교체([]=전부 삭제)
+        clean["overrides"] = ov
+    # 건물 2D/3D pitch 전환 임계값(숫자 0~85 또는 None/삭제)
+    bpv = theme.get("building_pitch_3d")
+    if isinstance(bpv, (int, float)) and not isinstance(bpv, bool) and 0 <= bpv <= 85:
+        clean["building_pitch_3d"] = round(float(bpv), 1)
+    elif "building_pitch_3d" in theme and (bpv is None or bpv == ""):
+        clean.pop("building_pitch_3d", None)
     if isinstance(theme.get("poi_colors"), dict):   # 시설 그룹별 글자색 — 전체 맵 교체(빈 {}=전부 해제→평면 복원)
         clean["poi_colors"] = style_objects.sanitize_poi_colors(theme.get("poi_colors"))
     pt = style_objects.sanitize_poi_tiers(theme.get("poi_tiers"))   # POI 노출 티어(줌)
@@ -89,10 +101,13 @@ def apply_style_theme(theme, commit_pending=True):
     ctt = style_objects.sanitize_cat_tiers(theme.get("cat_tiers"))   # 카테고리→티어
     if ctt:
         base = clean.get("cat_tiers") or {}
-        for lvl in ("cat1", "cat2", "cat"):
+        for lvl in ("cat1", "cat2"):
             if ctt.get(lvl):
                 base[lvl] = {**(base.get(lvl) or {}), **ctt[lvl]}
         clean["cat_tiers"] = base
+    cc = style_objects.sanitize_cache(theme.get("cache"))   # gateway-nginx 캐시 헤더
+    if cc:
+        clean["cache"] = cc
     pend = ROOT / "style" / "icons" / ".pending"   # 스테이징된 아이콘 업로드를 이제 커밋(저장 시점)
     if commit_pending and pend.is_dir():           # import 경로는 아이콘 스테이징과 무관 → 커밋 안 함
         for f in pend.glob("*.png"):
@@ -105,9 +120,27 @@ def apply_style_theme(theme, commit_pending=True):
     prev_theme = theme_file.read_bytes() if theme_file.is_file() else None   # 빌드 실패 시 롤백용
     theme_file.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     log = []
+    # 서빙 중인 스타일의 /dyn/v<id>/ 캐시 네임스페이스 보존 — BUILD_ID 없이 재조립하면 비버전
+    # /dyn/ 으로 회귀해 브라우저·게이트웨이 L2 캐시를 무효화할 수단을 잃는다(2026-08-31 .244 실측:
+    # 저장할 때마다 버전이 벗겨져, 줌 레벨마다 서로 다른 시대의 캐시 타일이 보이던 원인).
+    # 버전은 '데이터 세대'를 따르므로 스타일 저장은 기존 id 를 그대로 잇는다(없으면 종전대로 비버전).
+    env = os.environ.copy()
+    if "BUILD_ID" not in env:
+        try:
+            cur = json.loads((ROOT / "style" / "style.json").read_text(encoding="utf-8"))
+            for src in (cur.get("sources") or {}).values():
+                for t in (src.get("tiles") or []):
+                    m = re.search(r"/dyn/v([0-9A-Za-z._-]+)/", t or "")
+                    if m:
+                        env["BUILD_ID"] = m.group(1)
+                        break
+                if "BUILD_ID" in env:
+                    break
+        except Exception:
+            pass   # 스타일 부재/파손 시 종전 동작(비버전) 유지
     try:
         r = subprocess.run(["python3", str(ROOT / "scripts/build_style.py")],
-                           capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+                           capture_output=True, text=True, cwd=str(ROOT), timeout=60, env=env)
         log.append(r.stdout.strip() or r.stderr.strip())
         if r.returncode != 0:
             if prev_theme is not None: theme_file.write_bytes(prev_theme)   # theme.json 원복(부분상태 방지)
@@ -171,9 +204,10 @@ class H(BaseHTTPRequestHandler):
                 sizes_cur = style_objects.current_sizes(style); extras_cur = style_objects.current_extras(style)
                 iov_cur = style_objects.current_icon_overrides(style); grad_cur = style_objects.current_gradient(style)
                 poicol_cur = style_objects.current_poi_colors(style)
+                place_cur = style_objects.current_placement(style)
             except Exception:
                 cur = {}; fonts_cur = {}; zoom_cur = {}; opacity_cur = {}; icons_cur = {}; sources_cur = {}
-                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}
+                vis_cur = {}; lang_cur = "ko"; sizes_cur = {}; extras_cur = {}; iov_cur = {}; grad_cur = {}; poicol_cur = {}; place_cur = {}
             objs = [{"key": o["key"], "label": o["label"], "targets": o["targets"],
                      "color": cur.get(o["key"]) or "#888888", "zoom": zoom_cur.get(o["key"]) or {},
                      "visible": bool(vis_cur.get(o["key"], True))}
@@ -194,8 +228,14 @@ class H(BaseHTTPRequestHandler):
                 _thm = json.loads((ROOT / "style/theme.json").read_text(encoding="utf-8"))
             except Exception:
                 _thm = {}
+            # 건물 pitch 임계값 — style.metadata 우선, theme.json fallback
+            _bpv = style.get("metadata", {}).get("cuvia:building_pitch_3d")
+            if _bpv is None:
+                _bpv = _thm.get("building_pitch_3d")
+            building_pitch_3d_cur = _bpv if isinstance(_bpv, (int, float)) and not isinstance(_bpv, bool) else None
             poi_tiers = style_objects.sanitize_poi_tiers(_thm.get("poi_tiers")) or style_objects.POI_TIERS_DEFAULT
             cat_tiers = style_objects.sanitize_cat_tiers(_thm.get("cat_tiers")) or style_objects.CAT_TIER_DEFAULT
+            cache_cur = style_objects.sanitize_cache(_thm.get("cache")) or style_objects.CACHE_DEFAULT
             source_groups = [{"key": g["key"], "label": g["label"], "kind": g["kind"],
                               "src": g.get("src"), "source": g.get("source"),
                               "on": bool(sources_cur.get(g["key"], True))} for g in style_objects.SOURCE_GROUPS]
@@ -211,10 +251,18 @@ class H(BaseHTTPRequestHandler):
                                "extra_objects": [{"key": t["key"], "label": t["label"], "type": t["type"],
                                                   "layer": t["layer"], "prop": t["prop"],
                                                   "value": extras_cur.get(t["key"])} for t in style_objects.extra_targets()],
+                               "placement_objects": [{"key": t["key"], "label": t["label"], "type": t["type"],
+                                                      "layer": t["layer"], "prop": t["prop"],
+                                                      "anchors": (style_objects.LABEL_ANCHORS if t["type"] == "anchor" else None),
+                                                      "default": t.get("default"),
+                                                      "value": place_cur.get(t["key"])} for t in style_objects.placement_targets()],
                                "taxonomy": taxonomy, "icon_overrides": iov_cur,
                                "poi_tiers": poi_tiers, "cat_tiers": cat_tiers,
+                               "cache": cache_cur,
+                               "overrides": style_objects.sanitize_overrides(_thm.get("overrides")) or [],
                                "gradient_objects": [{"key": g["key"], "label": g["label"], **(grad_cur.get(g["key"]) or {})}
                                                     for g in style_objects.gradient_targets()],
+                               "building_pitch_3d": building_pitch_3d_cur,
                                "tile_port": TILE_PORT, "auth": bool(STUDIO_TOKEN)})
         if self.path == "/api/style/export":
             p = ROOT / "style/style.json"
@@ -234,7 +282,8 @@ class H(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
             body = json.loads(self.rfile.read(n) or "{}")
-            return self._json(apply_style_theme(body.get("theme", {})))
+            theme = body.get("theme", {})
+            return self._json(apply_style_theme(theme))
         if self.path == "/api/style/import":
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_STYLE: return self._json({"error": "style.json 과대(4MB 초과)"}, 413)
@@ -255,6 +304,8 @@ class H(BaseHTTPRequestHandler):
                 patch["poi_colors"] = poi_colors
             patch["sizes"] = {k: mm for k, mm in style_objects.current_sizes(imported).items()
                               if isinstance(mm, dict) and mm.get("min") is not None and mm.get("max") is not None}
+            patch["placement"] = {k: v for k, v in style_objects.current_placement(imported).items()
+                                  if v is not None}   # 배치(offset·anchor·생략) — 정확값이라 멱등, 라운드트립 안전
             res = apply_style_theme(patch, commit_pending=False)   # 병합+빌드+재시작 / 아이콘 스테이징은 미커밋
             res["colors"] = colors
             res["imported_layers"] = len(imported["layers"])
@@ -264,7 +315,7 @@ class H(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             level = (q.get("level") or [""])[0]; name = (q.get("name") or [""])[0]
             key = (q.get("group") or [""])[0]
-            if level in ("cat2", "cat") and name:          # 중/소 오버라이드 — 이름→ASCII slug
+            if level == "cat2" and name:          # 중분류 오버라이드 — 이름→ASCII slug
                 import zlib
                 slug = "ov" + format(zlib.crc32(name.encode("utf-8")) & 0xffffffff, "x")
             else:
@@ -347,8 +398,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  details.tx1{border-bottom:1px solid #1a2233} details.tx1>summary{padding:7px 2px;cursor:pointer;font-size:13px;font-weight:600;color:#cfe0ff}
  .txr{display:flex;align-items:center;gap:8px;padding:5px 0 5px 14px;font-size:12px}
  .txr .nm{flex:1;color:#bcc8de} .txr img.ic{width:22px;height:22px;border-radius:5px;border:1px solid #26304a;background:#0a0e16;object-fit:contain}
- .txr .noic{color:#5f6b80;width:22px;text-align:center} .txr .exp,.txr .tup{background:#1a2233;border:1px solid #26304a;color:#8d9bb5;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer}
- .txr .tup{color:#cfe0ff} .subwrap{padding-left:14px}
+ .txr .noic{color:#5f6b80;width:22px;text-align:center} .txr .tup{background:#1a2233;border:1px solid #26304a;color:#cfe0ff;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer}
 </style>
 <div class=top>
  <div class=brand><span class=dot></span>CUVIA Style Studio</div>
@@ -368,7 +418,16 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <button class=tab data-t=icon>아이콘</button>
      <button class=tab data-t=data>데이터</button>
      <button class=tab data-t=zoom>줌·투명도</button>
+     <button class=tab data-t=ovr>객체 편집</button>
      <button class=tab data-t=adv>고급</button>
+   </div>
+   <div class=pane data-p=ovr hidden>
+     <h2>객체 클릭 편집 — 부분 스타일 오버라이드</h2>
+     <p class=hint>미리보기 지도에서 <b>객체(건물·도로·필지·라벨·녹지…)를 클릭</b>하면 편집 모달이 열립니다.
+     <br>범위: <b>완전 개별 / 객체 그룹(단지·법정동·카테고리·도로종류) / 유형 그룹(층수대·등급) / 전체</b>.
+     <br>전체 범위는 기존 색상·투명도 탭과 같은 대상이라 그 탭에서 조정하세요 — 여기선 부분 범위만 담습니다.</p>
+     <div id=ovrlist></div>
+     <p class=hint>변경은 미리보기에 즉시 반영되고, <b>‘저장 &amp; 적용’</b>을 눌러야 theme.json 에 영구 반영됩니다.</p>
    </div>
    <div class=pane data-p=color>
      <h2>객체</h2><div id=rows></div>
@@ -395,9 +454,22 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div class=pane data-p=zoom hidden>
      <h2>노출 레벨(줌) · min–max <span id=zlevel style="color:#5b9bd5;font-weight:500;margin-left:4px">현재 z 14.5</span></h2><div id=zoomrows></div>
      <h2>크기 · 줌 min~max 값 (글자·선·점)</h2><div id=sizerows></div>
+     <h2>라벨 배치 — 세로 위치 · 기준점 · 충돌 시 생략</h2><div id=placerows></div>
      <h2>투명도(불투명도) %</h2><div id=oprows></div>
    </div>
    <div class=pane data-p=adv hidden>
+     <h2>캐시 제어 헤더 (Cache-Control)</h2>
+     <div class=row><label>정적 장기 (fonts·sprites)</label>
+       <input type=text id=csl style="width:200px" placeholder="public, max-age=604800" spellcheck=false></div>
+     <div class=row><label>정적 단기 (tiles·style)</label>
+       <input type=text id=css style="width:200px" placeholder="public, max-age=300, stale-while-revalidate=3600" spellcheck=false></div>
+     <div class=row><label>동적 (dyn·martin)</label>
+       <input type=text id=cdn style="width:200px" placeholder="public, max-age=3600, stale-while-revalidate=86400" spellcheck=false></div>
+     <p class=hint>비워두면 기본값 유지. 저장 후 build_style이 gateway-nginx.conf를 재생성합니다(라이브 적용엔 gateway reload 필요).</p>
+     <h2>건물 2D/3D pitch 자동전환</h2>
+     <div class=row><label>전환 임계값 (도, 비우면 끄기)</label>
+       <input type=number class=zn id=bpitch min=0 max=85 step=1 placeholder="끄기"></div>
+     <p class=hint>지도가 이 각도(pitch) 이상이면 3D 건물만, 미만이면 2D 건물만 표시합니다.<br>비워두면 자동전환 꺼짐(기본) — 2D·3D 둘 다 표시, 수동 버튼 유지.</p>
      <h2>외곽선(halo)·도트 테두리·건물 외곽</h2><div id=extrarows></div>
      <h2>글꼴</h2><div id=fontrows></div>
      <h2>속성별 색 그라데이션</h2><div id=gradrows></div>
@@ -414,7 +486,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 </div>
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script>
- const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{},cat:{}}, INITIOV={cat2:{},cat:{}}, IOVdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={};
+ const $=s=>document.querySelector(s); let OBJ=[], PRE={}, map=null, INIT={}, INITZ={}, OPA=[], INITO={}, TPORT=8080, ICONG=[], SRCG=[], INITS={}, INITV={}, INITLANG='ko', SIZ=[], INITSZ={}, EXTRA=[], INITX={}, INITF={}, TAX={}, IOV={cat2:{}}, INITIOV={cat2:{}}, IOVdirty=false, OVR=[], OVRdirty=false, GRAD=[], INITG={}, PENDING={}, PT=[], CTT={}, INITPT='', INITCTT='', POICOL=[], PCUR={}, INITPC={}, PLACE=[], INITPL={}, INITBP=null, CACHE_DEF={}, INITCACHE={};
  const TOKEN=new URLSearchParams(location.search).get('token')||'';
  function post(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':TOKEN},body});}
  fetch('/api/style/objects').then(r=>r.json()).then(d=>{
@@ -426,7 +498,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    $('#oprows').innerHTML=(OPA=d.opacity_objects||[]).map(orow).join('');
    OPA.forEach(o=>{ INITO[o.key]=Math.round((o.value==null?1:o.value)*100); wireOpacity(o); });
    ICONG=d.icon_groups||[]; $('#iconrows').innerHTML=ICONG.map(irow).join(''); ICONG.forEach(wireIcon);
-   TAX=d.taxonomy||{}; IOV=d.icon_overrides||{cat2:{},cat:{}}; IOV.cat2=IOV.cat2||{}; IOV.cat=IOV.cat||{};
+   TAX=d.taxonomy||{}; IOV=d.icon_overrides||{cat2:{}}; IOV.cat2=IOV.cat2||{};
    INITIOV=JSON.parse(JSON.stringify(IOV)); renderTree();
    POICOL=ICONG; PCUR=d.poi_colors||{};   // 시설 그룹별 글자색 — 아이콘과 동일 그룹(cats 포함) 재사용
    $('#poicolrows').innerHTML=POICOL.map(pcrow).join('');
@@ -439,11 +511,17 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    SIZ.forEach(t=>{INITSZ[t.key]={min:t.min,max:t.max}; wireSize(t);});
    EXTRA=d.extra_objects||[]; $('#extrarows').innerHTML=EXTRA.map(exrow).join('');
    EXTRA.forEach(t=>{INITX[t.key]=t.value; wireExtra(t);});
+   PLACE=d.placement_objects||[]; $('#placerows').innerHTML=PLACE.map(plrow).join('');
+   PLACE.forEach(t=>{INITPL[t.key]=plDisp(t); wirePlace(t);});
    renderFonts(d.fonts||{});
    GRAD=d.gradient_objects||[]; $('#gradrows').innerHTML=GRAD.map(gradrow).join('');
    GRAD.forEach(g=>{INITG[g.key]={on:g.on,low:g.low,high:g.high,max:g.max}; wireGrad(g);});
-   PT=d.poi_tiers||[]; CTT=d.cat_tiers||{cat1:{},cat2:{},cat:{}}; CTT.cat1=CTT.cat1||{}; CTT.cat2=CTT.cat2||{}; CTT.cat=CTT.cat||{};
+   PT=d.poi_tiers||[]; CTT=d.cat_tiers||{cat1:{},cat2:{}}; CTT.cat1=CTT.cat1||{}; CTT.cat2=CTT.cat2||{};
    INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT); renderTiers();
+   CACHE_DEF=d.cache||{}; INITCACHE=JSON.parse(JSON.stringify(CACHE_DEF));
+   $('#csl').value=CACHE_DEF.static_long||''; $('#css').value=CACHE_DEF.static_short||''; $('#cdn').value=CACHE_DEF.dyn||'';
+   INITBP=(d.building_pitch_3d!=null)?d.building_pitch_3d:null;
+   const bpe=$('#bpitch'); if(bpe)bpe.value=(INITBP!=null)?INITBP:'';
    map=new maplibregl.Map({container:'map',
      style:`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,
      // maplibre 워커는 document base 가 없어 스타일의 상대경로 /dyn/* (martin 동적타일=건물·필지·POI)로
@@ -514,6 +592,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    OBJ.forEach(o=>{const e=$('#v_'+o.key); if(e)e.checked=INITV[o.key];}); $('#langsel').value=INITLANG;
    SIZ.forEach(t=>{const i=INITSZ[t.key]||{}; $('#szmin_'+t.key).value=i.min??''; $('#szmax_'+t.key).value=i.max??'';});
    EXTRA.forEach(t=>{ if(t.type==='color'){const v=INITX[t.key]||'#000000',c=$('#xc_'+t.key),h=$('#xh_'+t.key); if(c){c.value=v;h.value=v;}} else {const e=$('#xn_'+t.key); if(e)e.value=INITX[t.key]??'';}});
+   PLACE.forEach(t=>{const e=$('#pl_'+t.key); if(!e)return; if(t.type==='bool')e.checked=!!INITPL[t.key]; else e.value=INITPL[t.key]??'';});
    Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)e.value=INITF[k]||'';}); if($('#font_all'))$('#font_all').value='';
    fetch('/api/icon/discard',{method:'POST',headers:{'X-Studio-Token':TOKEN}}).catch(()=>{});
    PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();});
@@ -521,6 +600,8 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    GRAD.forEach(g=>{const i=INITG[g.key]||{}; const c=$('#g_'+g.key); if(c)c.checked=!!i.on; const lo=$('#glo_'+g.key); if(lo)lo.value=i.low||'#3a4a6b'; const hi=$('#ghi_'+g.key); if(hi)hi.value=i.high||'#9db4e0'; const mx=$('#gmx_'+g.key); if(mx)mx.value=i.max||100;});
    POICOL.forEach(g=>{const cur=INITPC[g.key]; const k=$('#pck_'+g.key); if(k)k.checked=!!cur; const v=cur||pcFb(); const c=$('#pcc_'+g.key),h=$('#pch_'+g.key); if(c){c.value=v;h.value=v;}});
    PT=JSON.parse(INITPT); CTT=JSON.parse(INITCTT); renderTiers();
+   const bpr=$('#bpitch'); if(bpr)bpr.value=(INITBP!=null)?INITBP:'';
+   $('#csl').value=INITCACHE.static_long||''; $('#css').value=INITCACHE.static_short||''; $('#cdn').value=INITCACHE.dyn||'';
    map.setStyle(`http://${location.hostname}:${TPORT}/styles/cuvia/style.json`,{diff:false});
    $('#status').textContent='되돌림 — 서버 스타일 다시 로드'; };
  $('#exp').onclick=()=>location.href='/api/style/export';
@@ -558,12 +639,10 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  function txr(level,name,extra){return `<div class=txr><span class=nm>${name}</span>${txThumb(level,name)}<button class="tup" data-l="${level}" data-n="${encodeURIComponent(name)}">아이콘</button>${extra||''}</div>`;}
  function renderTree(){const order=TAX.cat1_order||[],tree=TAX.tree||{}; let h='';
    order.forEach(c1=>{const mids=tree[c1]||{}; h+=`<details class=tx1><summary>${c1}</summary>`;
-     Object.keys(mids).forEach(c2=>{const subs=mids[c2]||[];
-       h+=txr('cat2',c2, subs.length?`<button class=exp>소 ${subs.length}</button>`:'');
-       if(subs.length) h+=`<div class=subwrap hidden>`+subs.map(s=>txr('cat',s,'')).join('')+`</div>`;});
+     Object.keys(mids).forEach(c2=>{
+       h+=txr('cat2',c2,'');});
      h+=`</details>`;});
    const el=$('#icontree'); if(!el)return; el.innerHTML=h;
-   el.querySelectorAll('.exp').forEach(b=>b.onclick=()=>{const w=b.closest('.txr').nextElementSibling; if(w&&w.classList.contains('subwrap'))w.hidden=!w.hidden;});
    el.querySelectorAll('.tup').forEach(b=>b.onclick=()=>txUpload(b.dataset.l, decodeURIComponent(b.dataset.n)));}
  function txUpload(level,name){const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
    inp.onchange=e=>{const f=e.target.files[0]; if(!f)return; $('#status').textContent='오버라이드 업로드 중…';
@@ -643,6 +722,28 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    EXTRA.forEach(t=>{let v; if(t.type==='color'){v=$('#xh_'+t.key).value; if(!/^#[0-9a-fA-F]{6}$/.test(v))return;}
      else{const e=$('#xn_'+t.key).value; if(e==='')return; v=+e;}
      if(v!==INITX[t.key]){x[t.key]=v; ch=true;}}); return ch?x:null;}
+ // 배치(라벨 offset·anchor·충돌생략) — layout 속성
+ function plDisp(t){ return (t.value!=null)?t.value:t.default; }   // 값 미설정 시 기본값 표시(빈칸 방지)
+ function plrow(t){
+   if(t.type==='offset') return `<div class=row><label>${t.label}</label>
+     <input type=number class=zn id=pl_${t.key} step=0.05 min=-10 max=10 value="${plDisp(t)??0}"></div>`;
+   if(t.type==='anchor'){ const sel=plDisp(t); const o=(t.anchors||[]).map(a=>`<option value="${a}"${a===sel?' selected':''}>${a}</option>`).join('');
+     return `<div class=row><label>${t.label}</label><select class=zn id=pl_${t.key}>${o}</select></div>`;}
+   return `<div class=row><label>${t.label}</label><input type=checkbox id=pl_${t.key}${plDisp(t)?' checked':''}></div>`;}
+ function wirePlace(t){ const e=$('#pl_'+t.key); if(!e)return;
+   if(t.type==='bool') e.onchange=()=>applyPlace(t,e.checked);
+   else if(t.type==='anchor') e.onchange=()=>applyPlace(t,e.value||null);
+   else e.oninput=()=>applyPlace(t, e.value===''?null:+e.value); }
+ function applyPlace(t,v){ if(!map||!map.isStyleLoaded())return; try{
+     if(t.type==='offset'){ if(v==null)return; const c=map.getLayoutProperty(t.layer,'text-offset'); const x=(Array.isArray(c)&&typeof c[0]==='number')?c[0]:0; map.setLayoutProperty(t.layer,t.prop,[x,v]); }
+     else if(t.type==='anchor'){ if(v==null)return; map.setLayoutProperty(t.layer,t.prop,v); }
+     else map.setLayoutProperty(t.layer,t.prop,!!v);
+   }catch(e){} }
+ function placeChanged(){ const p={}; let ch=false;
+   PLACE.forEach(t=>{ if(t.type==='bool'){ const v=$('#pl_'+t.key).checked; if(v!==(INITPL[t.key]===true)){p[t.key]=v; ch=true;} return; }
+     let v; if(t.type==='anchor'){ const s=$('#pl_'+t.key).value; v=s===''?null:s; }
+     else { const e=$('#pl_'+t.key).value; v=e===''?null:+e; }
+     if(v!=null && v!==INITPL[t.key]){p[t.key]=v; ch=true;} }); return ch?p:null; }
  // 글꼴
  const FONTMAP={donglabel:['dong-label'],poilabel:['poi-label'],placelabel:['place-label','road-label']};
  function renderFonts(F){ const av=F.available||[], cur=F.current||{}, labs=F.labels||[];
@@ -687,19 +788,17 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const order=TAX.cat1_order||[],tree=TAX.tree||{}; let h='';
    order.forEach(c1=>{const mids=tree[c1]||{};
      h+=`<details class=tx1><summary>${c1} ${tierSel('cat1',c1)}</summary>`;
-     Object.keys(mids).forEach(c2=>{const subs=mids[c2]||[];
-       h+=`<div class=txr><span class=nm>${c2}</span>${tierSel('cat2',c2)}${subs.length?'<button class=exp>소 '+subs.length+'</button>':''}</div>`;
-       if(subs.length) h+=`<div class=subwrap hidden>`+subs.map(sb=>`<div class=txr><span class=nm>${sb}</span>${tierSel('cat',sb)}</div>`).join('')+`</div>`;});
+     Object.keys(mids).forEach(c2=>{
+       h+=`<div class=txr><span class=nm>${c2}</span>${tierSel('cat2',c2)}</div>`;});
      h+=`</details>`;});
    const el=$('#cattree'); if(!el)return; el.innerHTML=h;
-   el.querySelectorAll('.exp').forEach(b=>b.onclick=()=>{const w=b.closest('.txr').nextElementSibling; if(w&&w.classList.contains('subwrap'))w.hidden=!w.hidden;});
    el.querySelectorAll('.tiersel').forEach(s=>s.onchange=()=>{const lv=s.dataset.l,nm=decodeURIComponent(s.dataset.n);
      CTT[lv]=CTT[lv]||{}; if(s.value)CTT[lv][nm]=s.value; else delete CTT[lv][nm]; applyTiers();});}
  function catMatch(field,pairs,inner){return pairs.length?['match',['get',field]].concat(pairs,[inner]):inner;}
  function buildTierMz(){ const tmz={}; PT.forEach(t=>tmz[t.key]=t.minzoom);
    const fb=tmz['t3']!=null?tmz['t3']:(PT.length?PT[PT.length-1].minzoom:17);
    const conv=(m)=>{const o=[]; Object.keys(m||{}).forEach(nm=>{const v=tmz[m[nm]]; if(v!=null)o.push(nm,v);}); return o;};
-   let e=catMatch('cat1',conv(CTT.cat1),fb); e=catMatch('cat2',conv(CTT.cat2),e); e=catMatch('cat',conv(CTT.cat),e); return e;}
+   let e=catMatch('cat1',conv(CTT.cat1),fb); e=catMatch('cat2',conv(CTT.cat2),e); return e;}
  function applyTiers(){ if(!map||!map.isStyleLoaded()||!map.getLayer('poi-label'))return;
    const mz=buildTierMz(); let ii; try{ii=map.getLayoutProperty('poi-label','icon-image');}catch(e){ii=null;}
    if(Array.isArray(ii)&&ii[0]==='case')ii=ii[2];
@@ -715,6 +814,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    const t=PT.find(x=>x.key===o.value); if(t)o.textContent=t.label+' (z'+t.minzoom+')'; }); }
  $('#save').onclick=()=>{
    const theme={}; OBJ.forEach(o=>theme[o.key]=$('#c_'+o.key).value);
+   const bpv=$('#bpitch').value; theme.building_pitch_3d=(bpv==='')?null:+bpv;
    const z=zoomChanged(); if(Object.keys(z).length) theme.zoom=z;
    const op=opacityChanged(); if(Object.keys(op).length) theme.opacity=op;
    const sc=sourcesChanged(); if(sc) theme.sources=sc;
@@ -722,11 +822,15 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    if($('#langsel').value!==INITLANG) theme.language=$('#langsel').value;
    const szc=sizesChanged(); if(szc) theme.sizes=szc;
    const xc=extrasChanged(); if(xc) theme.extras=xc;
+   const plc=placeChanged(); if(plc) theme.placement=plc;
    const fc=fontsChanged(); if(fc) theme.fonts=fc;
    if(IOVdirty) theme.icon_overrides=IOV;
+   if(OVRdirty) theme.overrides=OVR;
    const grc=gradChanged(); if(grc) theme.gradient=grc;
    const pcc=poiColChanged(); if(pcc) theme.poi_colors=pcc;
    const tc=tiersChanged(); if(tc){ if(tc.poi_tiers)theme.poi_tiers=tc.poi_tiers; if(tc.cat_tiers)theme.cat_tiers=tc.cat_tiers; }
+   const csl=$('#csl').value.trim(), css=$('#css').value.trim(), cdn=$('#cdn').value.trim();
+   if(csl||css||cdn){ theme.cache={}; if(csl)theme.cache.static_long=csl; if(css)theme.cache.static_short=css; if(cdn)theme.cache.dyn=cdn; }
    $('#status').textContent='적용 중…';
    post('/api/style',JSON.stringify({theme})).then(r=>r.json()).then(d=>{
      if(d.ok){  // 적용 성공 → 현재값을 새 기준선으로(되돌리기 일관성)
@@ -737,16 +841,266 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
        OBJ.forEach(o=>{INITV[o.key]=$('#v_'+o.key).checked;}); INITLANG=$('#langsel').value;
        SIZ.forEach(t=>{const mn=$('#szmin_'+t.key).value,mx=$('#szmax_'+t.key).value; INITSZ[t.key]={min:mn===''?null:+mn,max:mx===''?null:+mx};});
        EXTRA.forEach(t=>{INITX[t.key]= t.type==='color'?$('#xh_'+t.key).value : ($('#xn_'+t.key).value===''?null:+$('#xn_'+t.key).value);});
+       PLACE.forEach(t=>{const e=$('#pl_'+t.key); if(!e)return; INITPL[t.key]= t.type==='bool'?e.checked : (t.type==='anchor'?(e.value===''?null:e.value):(e.value===''?null:+e.value));});
        Object.keys(INITF).forEach(k=>{const e=$('#font_'+k); if(e)INITF[k]=e.value;}); if($('#font_all'))$('#font_all').value='';
        INITIOV=JSON.parse(JSON.stringify(IOV)); IOVdirty=false;
+       OVRdirty=false; if(window.renderOvrList)renderOvrList();
        GRAD.forEach(g=>{INITG[g.key]={on:$('#g_'+g.key).checked,low:$('#glo_'+g.key).value,high:$('#ghi_'+g.key).value,max:+$('#gmx_'+g.key).value};});
        INITPC=poiColMap();
        PENDING={}; ICONG.forEach(g=>{const im=$('#ic_'+g.key); if(im)im.src='/style/icons/'+g.icon+'.png?t='+Date.now();}); renderTree();
        INITPT=JSON.stringify(PT); INITCTT=JSON.stringify(CTT);
+       const bpve=$('#bpitch'); INITBP=(bpve&&bpve.value!=='')?+bpve.value:null;
+       INITCACHE={static_long:$('#csl').value,static_short:$('#css').value,dyn:$('#cdn').value};
      }
      $('#status').textContent=d.ok?`✓ 저장 ${d.applied}개 · 타일서버 ${d.reloaded}`:('✗ '+(d.error||'오류'));
    }).catch(e=>$('#status').textContent='✗ 실패: '+e);
  };
+
+ // ══ 객체 클릭 편집(부분 오버라이드) — 서버 apply_overrides 와 대칭(제외+클론) ══
+ const OVRMETA={
+  'Building 3D':{label:'건물(3D)',color:'fill-extrusion-color',opacity:'fill-extrusion-opacity',theme:['building3d','building2d']},
+  'building-2d':{label:'건물(2D)',color:'fill-color',opacity:'fill-opacity',theme:['building2d','building3d']},
+  'road-motorway':{label:'도로(고속)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-primary':{label:'도로(주간선)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-secondary':{label:'도로(보조간선)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'road-minor':{label:'도로(소로)',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['road']},
+  'railway':{label:'철도',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'water':{label:'물·호수',color:'fill-color',opacity:'fill-opacity',theme:['water']},
+  'waterway':{label:'물길',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['water']},
+  'landcover':{label:'산·녹지',color:'fill-color',opacity:'fill-opacity',theme:['greenery']},
+  'park':{label:'공원',color:'fill-color',opacity:'fill-opacity',theme:['greenery']},
+  'boundary':{label:'행정경계',color:'line-color',opacity:'line-opacity',width:'line-width',theme:['boundary']},
+  'parcel-line':{label:'필지 경계',color:'line-color',opacity:'line-opacity',width:'line-width'},
+  'poi-label':{label:'POI 라벨',color:'text-color',opacity:'text-opacity',theme:['poilabel']},
+  'place-label':{label:'지명 라벨',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'dong-label':{label:'동 라벨',color:'text-color',opacity:'text-opacity',theme:['donglabel']},
+  'admin-sido-label':{label:'시도 라벨(국가)',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'admin-sigungu-label':{label:'시군구 라벨(국가)',color:'text-color',opacity:'text-opacity',theme:['placelabel']},
+  'admin-sido-line':{label:'시도 경계(국가)',color:'line-color',opacity:'line-opacity'},
+  'admin-sigungu-line':{label:'시군구 경계(국가)',color:'line-color',opacity:'line-opacity'}};
+ const OVRCLS={path:'보행로·소길',service:'이면·진입로',minor:'동네길',track:'농로',tertiary:'3차로',secondary:'2차로',primary:'1차로',trunk:'간선',motorway:'고속',rail:'철도',grass:'초지',wood:'숲',farmland:'농지',river:'강',lake:'호수',pond:'연못',stream:'개천',canal:'수로'};
+ const ovrKo=v=>OVRCLS[v]||v;
+ let ovrBaseF={}, ovrCur=null, ovrOpts=[], ovrHits=[], ovrEdit=null;
+ function ovrHex(v){ // paint 색값(#hex·hsl·rgb…) → #rrggbb (식이면 null)
+   if(typeof v!=='string')return null;
+   const ctx=ovrHex._c||(ovrHex._c=document.createElement('canvas').getContext('2d'));
+   ctx.fillStyle='#000'; ctx.fillStyle=v; const r=ctx.fillStyle;
+   return /^#[0-9a-f]{6}$/i.test(r)?r:null;}
+ function ovrCondExpr(c){const g=['get',c.key];
+   if(c.op==='any')return ['==',1,1];
+   if(c.op==='prefix')return ['==',['slice',['coalesce',g,''],0,c.value.length],c.value];
+   if(c.op==='>='||c.op==='<')return [c.op,['coalesce',g,-1],c.value];
+   return ['==',['coalesce',g,typeof c.value==='string'?'':-1],c.value];}
+ function ovrUnwrap(){ // 서빙 스타일에 '구워진' 오버라이드 제거 → 원본 베이스 복원.
+   // ★ OVR 목록에서 기대되는 제외식만 정밀 매칭해 벗긴다 — 원본 필터가 우연히
+   //   ['all',X,['!',…]] 꼴이어도 건드리지 않는다(무차별 언랩 금지).
+   const negs=new Set(OVR.map(o=>{const cs=o.conds.map(ovrCondExpr);
+     const c=cs.length===1?cs[0]:['all'].concat(cs);return JSON.stringify(['!',c]);}));
+   (map.getStyle().layers||[]).filter(l=>/^ovr-\d+$/.test(l.id)).forEach(l=>map.removeLayer(l.id));
+   for(const lid of Object.keys(OVRMETA)){ if(!map.getLayer(lid))continue;
+     let f=map.getFilter(lid);
+     while(Array.isArray(f)&&f[0]==='all'&&f.length===3&&negs.has(JSON.stringify(f[2]))) f=f[1];
+     ovrBaseF[lid]=f||null; map.setFilter(lid,f||null);}}
+ function ovrRebuild(){ // OVR 전체를 미리보기에 재적용(서버와 같은 순서·의미)
+   (map.getStyle().layers||[]).filter(l=>/^ovr-preview-/.test(l.id)).forEach(l=>map.removeLayer(l.id));
+   for(const lid of Object.keys(ovrBaseF)) if(map.getLayer(lid)) map.setFilter(lid, ovrBaseF[lid]);
+   const clones={};
+   OVR.forEach((o,i)=>{ const lid=o.layer, mm=OVRMETA[lid]; if(!mm||!map.getLayer(lid))return;
+     const conds=o.conds.map(ovrCondExpr); const cond=conds.length===1?conds[0]:['all',...conds];
+     const base=map.getStyle().layers.find(l=>l.id===lid);
+     const cloneDef=JSON.parse(JSON.stringify(base)); // 제외 전 상태
+     const neg=['!',cond];
+     const wrap=f=>f?['all',f,neg]:neg;
+     map.setFilter(lid, wrap(map.getFilter(lid)));
+     (clones[lid]||[]).forEach(cid=>map.setFilter(cid, wrap(map.getFilter(cid))));
+     if(o.hide)return;
+     cloneDef.id='ovr-preview-'+i;
+     cloneDef.filter=cloneDef.filter?['all',cloneDef.filter,cond]:cond;
+     const idx=map.getStyle().layers.findIndex(l=>l.id===lid);
+     map.addLayer(cloneDef, map.getStyle().layers[idx+1] && map.getStyle().layers[idx+1].id);
+     if(o.color) map.setPaintProperty(cloneDef.id,mm.color,o.color);
+     if(o.opacity!=null) map.setPaintProperty(cloneDef.id,mm.opacity,o.opacity);
+     if(o.width!=null&&mm.width) map.setPaintProperty(cloneDef.id,mm.width,o.width);
+     (clones[lid]=clones[lid]||[]).push(cloneDef.id); });
+ }
+ // 범위 옵션 — 완전개별 → 객체그룹 → 유형그룹 → 전체(테마 연동)
+ function ovrScopeOptions(f){const lid=f.layer.id,p=f.properties,mm=OVRMETA[lid],o=[];
+   const push=(label,conds,tag)=>o.push({label,conds,tag});
+   if(lid==='Building 3D'||lid==='building-2d'){
+     if(p.id!=null)push('이 동만 — 완전 개별',[{key:'id',value:p.id}],'개별');
+     if(p.name)push('같은 단지 «'+String(p.name).slice(0,14)+'»',[{key:'name',value:String(p.name)}],'객체그룹');
+     const lv=p.levels||0;
+     if(lv>=15)push('같은 층수대 — 고층(15층↑)',[{key:'levels',op:'>=',value:15}],'유형그룹');
+     else if(lv>=5)push('같은 층수대 — 중층(5~14층)',[{key:'levels',op:'>=',value:5},{key:'levels',op:'<',value:15}],'유형그룹');
+     else push('같은 층수대 — 저층(4층↓)',[{key:'levels',op:'<',value:5}],'유형그룹');
+   } else if(/^road-/.test(lid)){
+     if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
+     push('이 등급 전체 — '+mm.label,[{key:'class',op:'any'}],'유형그룹');
+   } else if(lid==='railway'){
+     push('철도 전체',[{key:'class',op:'any'}],'유형그룹');
+   } else if(lid==='landcover'||lid==='park'||lid==='water'||lid==='waterway'){
+     if(p.class)push('같은 종류 — '+ovrKo(p.class),[{key:'class',value:String(p.class)}],'객체그룹');
+   } else if(lid==='parcel-line'){
+     if(p.pnu){push('이 필지만 — '+p.pnu,[{key:'pnu',value:String(p.pnu)}],'개별');
+       push('같은 법정동 — '+String(p.pnu).slice(0,10),[{key:'pnu',op:'prefix',value:String(p.pnu).slice(0,10)}],'객체그룹');}
+     push('필지 전체',[{key:'pnu',op:'any'}],'유형그룹');
+   } else if(lid==='poi-label'){
+     if(p.name)push('이 POI만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
+     if(p.cat1)push('같은 카테고리 — '+p.cat1,[{key:'cat1',value:String(p.cat1)}],'객체그룹');
+   } else if(lid==='place-label'||lid==='dong-label'){
+     if(p.name)push('이 라벨만 — «'+String(p.name).slice(0,12)+'»',[{key:'name',value:String(p.name)}],'개별');
+   }
+   if(mm.theme) o.push({label:(mm.theme[0]==='road'?'도로 전체(4등급)':mm.theme[0]==='greenery'?'산·녹지·공원 전체':mm.theme[0]==='water'?'물 전체(면+물길)':mm.theme.length>1?'건물 전체(2D+3D)':OVRMETA[lid].label+' 전체')+' — 테마 색',theme:mm.theme,tag:'전체'});
+   return o;}
+ // ── 선택 하이라이트 — 모달 열려 있는 동안 노란 테두리(범위 바꾸면 따라감) ──
+ function ovrHLClear(){['ovr-hl','ovr-hl-pt'].forEach(id=>{if(map.getLayer(id))map.removeLayer(id);});}
+ function ovrHLShow(){ ovrHLClear(); if(!ovrCur)return;
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
+   const op=ovrOpts[+sel.value]; if(!op)return;
+   const lid=ovrCur.layer.id;
+   const base=map.getStyle().layers.find(l=>l.id===lid); if(!base)return;
+   let cond=null;
+   if(op.conds){const cs=op.conds.map(ovrCondExpr);cond=cs.length===1?cs[0]:['all',...cs];}
+   const bf=ovrBaseF[lid]!==undefined?ovrBaseF[lid]:base.filter;
+   const filt=cond?(bf?['all',bf,cond]:cond):(bf||null);
+   if(base.type==='symbol'||base.type==='circle'){
+     const def={id:'ovr-hl-pt',type:'circle',source:base.source,paint:{'circle-color':'rgba(0,0,0,0)','circle-radius':13,'circle-stroke-color':'#ffd60a','circle-stroke-width':2.5}};
+     if(base['source-layer'])def['source-layer']=base['source-layer'];
+     if(filt)def.filter=filt; map.addLayer(def);
+   } else {
+     const def={id:'ovr-hl',type:'line',source:base.source,paint:{'line-color':'#ffd60a','line-width':3}};
+     if(base['source-layer'])def['source-layer']=base['source-layer'];
+     if(filt)def.filter=filt; map.addLayer(def);
+   }}
+ function renderOvrList(){const el=$('#ovrlist'); if(!el)return;
+   if(!OVR.length){el.innerHTML='<p class=hint>등록된 오버라이드가 없습니다 — 지도를 클릭해 추가하세요.</p>';return;}
+   el.innerHTML=OVR.map((o,i)=>{const mm=OVRMETA[o.layer]||{label:o.layer};
+     const what=[o.hide?'숨김':null,o.color?'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+o.color+'"></span> '+o.color:null,
+       o.opacity!=null?Math.round(o.opacity*100)+'%':null,o.width!=null?'굵기 '+o.width:null].filter(Boolean).join(' · ');
+     return '<div class=row style="gap:8px"><label style="flex:1;font-size:12px">'+mm.label+' — '+(o.label||'')+'<br><span style="color:#5f6b80;font-size:11px">'+what+'</span></label>'+
+       '<button class="mini g" onclick="ovrDel('+i+')">'+(o.hide?'해제':'삭제')+'</button></div>';}).join('');}
+ window.renderOvrList=renderOvrList;
+ window.ovrDel=i=>{OVR.splice(i,1);OVRdirty=true;renderOvrList();ovrRebuild();};
+ // ── 모달 ──
+ const ovrModal=document.createElement('div');
+ ovrModal.id='ovrmodal';
+ ovrModal.style.cssText='position:absolute;z-index:9;display:none;width:300px;background:#121826;color:#e8edf5;border:1px solid #26304a;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.55);font-size:13px';
+ ovrModal.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #26304a;font-weight:700"><span id=ovrTitle style="color:#5b9bd5">객체</span><span style="cursor:pointer;color:#8d9bb5" id=ovrX>✕</span></div>'+
+  '<div style="padding:12px 14px;display:flex;flex-direction:column;gap:9px;max-height:64vh;overflow:auto">'+
+  '<div id=ovrTabs style="display:flex;gap:6px;flex-wrap:wrap"></div>'+
+  '<div id=ovrInfo style="background:#0d1320;border-radius:8px;padding:7px 10px;color:#8d9bb5;font-size:11.5px;line-height:1.5;max-height:60px;overflow:auto"></div>'+
+  '<div id=ovrScopes style="display:flex;flex-direction:column;gap:5px"></div>'+
+  '<div class=row><label style="flex:0 0 52px">색상</label><input type=color id=ovrColor value="#808080"></div>'+
+  '<div class=row><label style="flex:0 0 52px">투명도</label><input type=range id=ovrOp min=0 max=100 value=100 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrOpv>100%</span></div>'+
+  '<div class=row id=ovrWrow style="display:none"><label style="flex:0 0 52px">굵기</label><input type=range id=ovrW min=1 max=120 value=10 style="flex:1;accent-color:#5b9bd5"><span class=opv id=ovrWv>1.0</span></div>'+
+  '<div style="display:flex;gap:8px"><button id=ovrApply style="flex:1">적용</button><button id=ovrHide class=g style="flex:1">숨기기</button></div>'+
+  '<p class=hint id=ovrNote style="margin:0">값을 바꾸면 미리보기에 즉시 반영 — [적용]=확정, ✕/다른 곳 클릭=원복. ‘저장 &amp; 적용’ 시 영구 반영.</p></div>';
+ document.body.appendChild(ovrModal);
+ // ── 편집 세션 — 현재값 표시 → 라이브 미리보기 → 적용(확정)/닫기(원복) ──
+ function ovrCurVals(op){ const lid=ovrCur.layer.id, mm=OVRMETA[lid];
+   if(op.theme){ const k=op.theme[0]; const c=$('#c_'+k), o2=$('#o_'+k);
+     return {color:(c&&c.value)||'#808080', opacity:o2?+o2.value:100, width:null, existing:null}; }
+   const ex=OVR.find(e=>e.layer===lid&&!e.hide&&JSON.stringify(e.conds)===JSON.stringify(op.conds));
+   const bc=ovrHex(map.getPaintProperty(lid,mm.color))||'#808080';
+   const bo=map.getPaintProperty(lid,mm.opacity); const bw=mm.width?map.getPaintProperty(lid,mm.width):null;
+   return {color:(ex&&ex.color)||bc,
+           opacity:ex&&ex.opacity!=null?Math.round(ex.opacity*100):(typeof bo==='number'?Math.round(bo*100):100),
+           width:mm.width?((ex&&ex.width!=null)?ex.width*10:(typeof bw==='number'?Math.max(1,Math.round(bw*10)):10)):null,
+           existing:ex||null}; }
+ function ovrBeginEdit(){ ovrCancelEdit();
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel){ovrEdit=null;return;}
+   const op=ovrOpts[+sel.value], v=ovrCurVals(op);
+   $('#ovrColor').value=v.color; $('#ovrOp').value=v.opacity; $('#ovrOpv').textContent=v.opacity+'%';
+   if(v.width!=null){$('#ovrW').value=v.width; $('#ovrWv').textContent=(v.width/10).toFixed(1);}
+   ovrEdit={op, lid:ovrCur.layer.id, touched:false,
+            entry:v.existing, isNew:!v.existing,
+            backup:v.existing?JSON.parse(JSON.stringify(v.existing)):null,
+            themeBackup:op.theme?op.theme.map(k=>({k, c:($('#c_'+k)||{}).value, o:($('#o_'+k)||{}).value})):null}; }
+ function ovrLive(){ if(!ovrEdit)return; ovrEdit.touched=true;
+   const e=ovrEdit, mm=OVRMETA[e.lid];
+   if(e.op.theme){ e.op.theme.forEach(k=>{const c=$('#c_'+k); if(c){c.value=$('#ovrColor').value; c.dispatchEvent(new Event('input'));}
+       const o2=$('#o_'+k); if(o2){o2.value=$('#ovrOp').value; o2.dispatchEvent(new Event('input'));}}); return;}
+   if(!e.entry){ e.entry={layer:e.lid,conds:e.op.conds,label:e.op.label}; OVR.push(e.entry); }
+   e.entry.color=$('#ovrColor').value; e.entry.opacity=+$('#ovrOp').value/100;
+   if(mm.width)e.entry.width=+$('#ovrW').value/10;
+   ovrRebuild(); }
+ function ovrCancelEdit(){ const e=ovrEdit; if(!e){return;} ovrEdit=null;
+   if(!e.touched)return;
+   if(e.op.theme){ (e.themeBackup||[]).forEach(b=>{const c=$('#c_'+b.k); if(c&&b.c!=null){c.value=b.c; c.dispatchEvent(new Event('input'));}
+       const o2=$('#o_'+b.k); if(o2&&b.o!=null){o2.value=b.o; o2.dispatchEvent(new Event('input'));}}); return;}
+   if(e.isNew&&e.entry){ const i=OVR.indexOf(e.entry); if(i>=0)OVR.splice(i,1); ovrRebuild(); }
+   else if(e.entry&&e.backup){ Object.keys(e.entry).forEach(k=>delete e.entry[k]); Object.assign(e.entry,e.backup); ovrRebuild(); } }
+ function ovrCommit(){ const e=ovrEdit; if(!e)return;
+   if(!e.touched){ $('#status').textContent='변경 없음'; ovrEdit=null; ovrCloseModal(); return; }
+   if(e.op.theme){ $('#status').textContent='전체 범위 — 테마('+e.op.theme.join('·')+') 변경, 저장 & 적용 시 영구 반영'; }
+   else { OVRdirty=true; renderOvrList();
+     $('#status').textContent='오버라이드 '+OVR.length+'건 — 저장 & 적용을 눌러야 영구 반영'; }
+   ovrEdit=null;   // 확정 — 원복 없이 세션 종료
+   ovrCloseModal(); }
+ function ovrCloseModal(){ ovrCancelEdit(); ovrModal.style.display='none'; ovrHLClear(); }
+ $('#ovrX').onclick=ovrCloseModal;
+ $('#ovrOp').oninput=e=>{$('#ovrOpv').textContent=e.target.value+'%'; ovrLive();};
+ $('#ovrW').oninput=e=>{$('#ovrWv').textContent=(e.target.value/10).toFixed(1); ovrLive();};
+ $('#ovrColor').oninput=ovrLive;
+ function ovrOpenModal(f,pt){ ovrCancelEdit(); ovrCur=f; const mm=OVRMETA[f.layer.id];
+   $('#ovrTitle').textContent=mm.label;
+   $('#ovrTabs').innerHTML='';
+   ovrHits.forEach(h=>{const b=document.createElement('button');b.className='mini'+(h.layer.id===f.layer.id?'':' g');
+     b.textContent=OVRMETA[h.layer.id].label;b.onclick=()=>ovrOpenModal(h,pt);$('#ovrTabs').appendChild(b);});
+   const p=f.properties,ks=Object.keys(p).slice(0,6);
+   $('#ovrInfo').innerHTML=ks.length?ks.map(k=>'<b style="color:#5b9bd5">'+k+'</b>: '+String(p[k]).slice(0,36)).join('<br>'):'(속성 없음)';
+   ovrOpts=ovrScopeOptions(f);
+   $('#ovrScopes').innerHTML=ovrOpts.map((o,i)=>'<label style="display:flex;gap:8px;align-items:center;background:#0d1320;border:1px solid #26304a;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px"><input type=radio name=ovrscope value='+i+' '+(i===0?'checked':'')+'>'+o.label+'<small style="color:#5f6b80;margin-left:auto">'+o.tag+'</small></label>').join('');
+   document.querySelectorAll('input[name=ovrscope]').forEach(r=>r.onchange=()=>{ovrBeginEdit();ovrHLShow();});
+   $('#ovrWrow').style.display=mm.width?'flex':'none';
+   ovrModal.style.display='block';
+   ovrModal.style.left=Math.min(pt.x+14,innerWidth-320)+'px';
+   ovrModal.style.top=Math.min(pt.y+60,innerHeight-460)+'px';
+   ovrBeginEdit(); ovrHLShow();}
+ function ovrPushHide(){ if(!ovrCur||!ovrOpts.length)return;
+   const sel=document.querySelector('input[name=ovrscope]:checked'); if(!sel)return;
+   const op=ovrOpts[+sel.value];
+   ovrCancelEdit();   // 진행 중이던 라이브 편집 원복 후 숨김 확정
+   if(op.theme){ op.theme.forEach(k=>{const v=$('#v_'+k); if(v){v.checked=false; v.dispatchEvent(new Event('change'));}});
+     $('#status').textContent='전체 범위 — 표시 해제(데이터 탭과 동일), 저장 & 적용 시 영구 반영';
+     ovrCloseModal(); return;}
+   OVR.push({layer:ovrCur.layer.id,conds:op.conds,label:op.label,hide:true});
+   OVRdirty=true;renderOvrList();ovrRebuild();
+   $('#status').textContent='숨김 적용 — 원복은 옆 목록의 [해제], 저장 & 적용 시 영구 반영';
+   const ovrTab=document.querySelector('[data-t=ovr]'); if(ovrTab)ovrTab.click();
+   ovrCloseModal();}
+ $('#ovrApply').onclick=ovrCommit;
+ $('#ovrHide').onclick=ovrPushHide;
+ // 전역 '되돌리기' 확장 — 원래 핸들러(스타일 전체 리로드) 후 오버라이드를 서버 저장
+ // 상태로 재초기화한다. 이게 없으면 리로드된 구운 스타일과 로컬 OVR 상태기계가 어긋나
+ // 숨김·미저장 편집을 원복할 길이 없다(사용자 실측 불편).
+ (function(){const orig=$('#reset').onclick;
+   $('#reset').onclick=()=>{ if(orig)orig();
+     // idle 은 콜드 타일 로딩으로 수십 초 지연될 수 있다 — 레이어 파싱 완료를 폴링(0.5s×60).
+     let tries=0; const t=setInterval(()=>{
+       if(++tries>60){clearInterval(t);return;}
+       if(!map.getStyle()||!map.getLayer('Building 3D'))return;
+       clearInterval(t);
+       fetch('/api/style/objects').then(r=>r.json()).then(d=>{
+         OVR=d.overrides||[]; OVRdirty=false; ovrBaseF={};
+         try{ovrUnwrap();ovrRebuild();}catch(e){console.warn('ovr reset',e);}
+         renderOvrList();
+         $('#status').textContent='되돌림 — 저장된 상태로 복원(오버라이드 '+OVR.length+'건)';});
+     },500);};})();
+ // map 준비되면 부착(메인 fetch 콜백에서 map 생성됨)
+ const ovrBoot=setInterval(()=>{ if(!map)return; clearInterval(ovrBoot);
+   // 순서 중요: OVR 목록을 먼저 받아야 정밀 언랩이 가능하다(제외식 매칭 기반).
+   const init=()=>fetch('/api/style/objects').then(r=>r.json()).then(d=>{
+     OVR=d.overrides||[]; try{ovrUnwrap();ovrRebuild();}catch(e){console.warn('ovr init',e);} renderOvrList();});
+   map.isStyleLoaded()?init():map.once('idle',init);
+   map.on('click',e=>{
+     const fs=map.queryRenderedFeatures(e.point).filter(x=>OVRMETA[x.layer.id]&&!/^ovr-(preview-|hl)/.test(x.layer.id));
+     if(!fs.length){ovrCloseModal();return;}
+     const seen=new Set();ovrHits=[];
+     for(const x of fs){if(!seen.has(x.layer.id)){seen.add(x.layer.id);ovrHits.push(x);}if(ovrHits.length>=5)break;}
+     ovrOpenModal(ovrHits[0],e.point);});
+ },300);
+
 </script></html>"""
 
 

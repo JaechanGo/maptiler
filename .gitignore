@@ -1,6 +1,10 @@
 # 대용량 원본/생성 데이터 (빌드 시 생성, 저장소에 넣지 않음)
 data/
+# 예외: demo/data 는 데모의 정적 자산(수백 KB). 패키징이 demo/ 를 통째로 담으므로
+# 저장소에 없으면 폐쇄망 번들에서 기능이 조용히 죽는다(역 출구 안내 등).
+!demo/data/
 tiles/
+route/
 *.mbtiles
 *.osm.pbf
 *.tif
@@ -35,3 +39,29 @@ style/style.json
 .claude/
 .idea/
 *.bak
+
+# 원천 202607 (행안부 주소DB·내비게이션용DB) — T039 판정 B: 리포 미커밋
+# 사유는 개인정보가 아니라 재배포 제한 미해소. 보존은 ~/maptiler-rescue/source-202607/
+# 상세: docs/원천-202607-취급방침.md
+# 경고: 아래 패턴은 이름만 보고 막는다. 향후 같은 명명규칙을 따르는 정상 산출물
+#      (예: 파이프라인이 만든 주소_*.txt)이 조용히 무시될 수 있다. 새 파일이
+#      커밋에 안 잡히면 `git check-ignore -v <파일>` 로 여기 걸린 건지 먼저 확인하라.
+202607_*.7z
+202607_*.zip
+match_build_*.txt
+match_jibun_*.txt
+match_rs_entrc*.txt
+주소_*.txt
+지번_*.txt
+부가정보_*.txt
+개선_도로명코드_*.txt
+\[자료건수\]주소DB*.txt
+
+# T046 VWorld 외부기준 측정 산출물 — 표본·판정결과·진단·VWorld 응답은 리포에 넣지 않는다.
+# 정상 경로는 리포 밖 ~/geocode-build/t046/ 이고, 아래는 그 규약이 깨졌을 때를 막는 2차 방어선이다.
+# 확장자가 아니라 디렉터리 단위로 막는다 — .jsonl/.json 을 통째로 막으면 향후 정상 설정 파일까지
+# 조용히 사라진다. 산출물은 항상 out/ 아래에 쓰도록 measure.py 가 강제한다.
+scripts/t046/out/
+scripts/t046/**/out/
+/t046-*
+

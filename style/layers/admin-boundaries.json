@@ -1,0 +1,176 @@
+{
+  "_comment": "행정구역(국가 원천: 법정동 경계+법정동코드) — tiles/admin.mbtiles. OSM boundary(admin_level 4)·place city 를 대체한다(ADR-011).",
+  "sources": {
+    "admin": {
+      "type": "vector",
+      "url": "mbtiles://{admin}",
+      "attribution": "© 행정안전부 법정동코드 · VWorld 법정동 경계"
+    }
+  },
+  "layers": [
+    {
+      "id": "admin-emd-line",
+      "type": "line",
+      "source": "admin",
+      "source-layer": "emd",
+      "minzoom": 11,
+      "layout": {
+        "visibility": "none",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#8a94a6",
+        "line-width": 0.6,
+        "line-opacity": 0.5,
+        "line-dasharray": [
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "id": "admin-sigungu-line",
+      "type": "line",
+      "source": "admin",
+      "source-layer": "sigungu",
+      "minzoom": 6,
+      "layout": {
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#8a94a6",
+        "line-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          6,
+          0.6,
+          12,
+          1.4
+        ],
+        "line-opacity": 0.7,
+        "line-dasharray": [
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "id": "admin-sido-line",
+      "type": "line",
+      "source": "admin",
+      "source-layer": "sido",
+      "minzoom": 3,
+      "layout": {
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#8a94a6",
+        "line-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          3,
+          0.8,
+          10,
+          2.2
+        ],
+        "line-opacity": 0.9
+      }
+    },
+    {
+      "id": "admin-sigungu-label",
+      "type": "symbol",
+      "source": "admin",
+      "source-layer": "sigungu_label",
+      "minzoom": 7,
+      "maxzoom": 14,
+      "layout": {
+        "text-field": [
+          "get",
+          "name"
+        ],
+        "text-font": [
+          "KlokanTech Noto Sans Regular"
+        ],
+        "text-size": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          7,
+          11,
+          12,
+          15
+        ],
+        "text-max-width": 8,
+        "text-padding": 4
+      },
+      "paint": {
+        "text-color": "hsl(0, 0%, 88%)",
+        "text-halo-color": "hsl(214, 62%, 12%)",
+        "text-halo-width": 1.2
+      }
+    },
+    {
+      "id": "admin-sido-label",
+      "type": "symbol",
+      "source": "admin",
+      "source-layer": "sido_label",
+      "minzoom": 3,
+      "maxzoom": 10,
+      "layout": {
+        "text-field": [
+          "step",
+          [
+            "zoom"
+          ],
+          [
+            "get",
+            "name_short"
+          ],
+          7,
+          [
+            "get",
+            "name"
+          ]
+        ],
+        "text-font": [
+          "KlokanTech Noto Sans Regular"
+        ],
+        "text-size": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          3,
+          12,
+          8,
+          17
+        ],
+        "text-max-width": 7,
+        "text-padding": 6,
+        "text-letter-spacing": 0.05
+      },
+      "paint": {
+        "text-color": "hsl(0, 0%, 88%)",
+        "text-halo-color": "hsl(214, 62%, 12%)",
+        "text-halo-width": 1.5
+      }
+    }
+  ]
+}

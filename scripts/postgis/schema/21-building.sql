@@ -1,6 +1,6 @@
 -- CUVIA PostGIS 백본 — 건물통합정보 building (Phase 0)
 -- ≈6.66M 동. parcel 과 동일 시도 LIST 파티션(수급·갱신 단위 일치).
--- 기존 buildings.mbtiles(10-gen-buildings.sh) 대체. render_height/levels = 3D fill-extrusion.
+-- 기존 buildings.mbtiles 방식 대체(생성 스크립트는 T028 에서 폐기). render_height/levels = 3D fill-extrusion.
 -- building 은 z13+ 표출이라 parcel(z16+)보다 일반화(geom_genN)가 먼저 필요할 후보 — 단 측정 후 추가.
 
 CREATE TABLE IF NOT EXISTS building (
@@ -23,11 +23,16 @@ DECLARE
     rec record;
 BEGIN
     FOR rec IN
+        -- 12 = 전남광주통합특별시(2026 개편). AL_D010 원천이 광주(29)·전남(46)을 더 이상
+        -- 따로 내지 않고 12 로만 낸다(20260809 실측 — 29/46 파일 자체가 없음). 구 29/46
+        -- 파티션 정의는 제거했다: 남겨두면 낡은 적재분이 그 파티션에 잔존한 채 원천 갱신을
+        -- 영영 못 받는 함정이 된다(2026-08 실측 — 광주·전남만 구 체계로 남았던 원인).
+        -- 기존 DB 를 이 스키마로 올릴 때는 building_29/46 데이터 이전 후 DROP 이 별도 필요.
         SELECT * FROM (VALUES
-            ('11', ARRAY['11']), ('26', ARRAY['26']), ('27', ARRAY['27']),
-            ('28', ARRAY['28']), ('29', ARRAY['29']), ('30', ARRAY['30']),
+            ('11', ARRAY['11']), ('12', ARRAY['12']), ('26', ARRAY['26']),
+            ('27', ARRAY['27']), ('28', ARRAY['28']), ('30', ARRAY['30']),
             ('31', ARRAY['31']), ('36', ARRAY['36']), ('41', ARRAY['41']),
-            ('43', ARRAY['43']), ('44', ARRAY['44']), ('46', ARRAY['46']),
+            ('43', ARRAY['43']), ('44', ARRAY['44']),
             ('47', ARRAY['47']), ('48', ARRAY['48']), ('50', ARRAY['50']),
             ('51', ARRAY['51','42']), ('52', ARRAY['52','45'])
         ) AS t(suffix, codes)

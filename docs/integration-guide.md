@@ -53,9 +53,12 @@ circle/symbol 레이어로 그린다. 갱신은 `map.getSource('id').setData(new
 | 벡터 타일 TileJSON | `http://<서버>:8080/data/korea.json` |
 | 지형 타일 TileJSON | `http://<서버>:8080/data/terrain.json` |
 | 동 라벨 TileJSON | `http://<서버>:8080/data/dong.json` |
+| 행정구역 TileJSON | `http://<서버>:8080/data/admin.json` (레이어 sido/sigungu/emd + *_label, 법정동코드 원천) |
 | 글리프 | `http://<서버>:8080/fonts/{fontstack}/{range}.pbf` |
 | **지오코딩** | `http://<서버>:8082/geocode?q=증미역` |
 | **역지오코딩** | `http://<서버>:8082/reverse?lon=126.86&lat=37.55` |
+| **길찾기(차량)** | `http://<서버>/route/v1/driving/{lon},{lat};{lon},{lat}` (게이트웨이 경유) |
+| **길찾기(도보)** | `http://<서버>/route/v1/walking/{lon},{lat};{lon},{lat}` (게이트웨이 경유) |
 | 데모 | `http://<서버>:8081/demo/` |
 | Maputnik(스타일 편집) | `http://<서버>:8081/vendor/maputnik/dist/` |
 
@@ -77,11 +80,45 @@ const rev = await fetch(`http://<서버>:8082/reverse?lon=126.8618&lat=37.5575`)
 - 검색 대상: 역(전국 ~1,400) · 지명 · 아파트 동 · 도로명 · POI 등 약 67만 건(OSM 기반). 국가 상가정보 CSV(`--poi-csv`)·행정경계 GeoJSON(`--areas-geojson`)로 확장.
 - 데모 상단 검색창(`demo/js/search.js`) 참고. CORS 허용(`Access-Control-Allow-Origin: *`).
 
+## 4.3 길찾기 (차량·도보·자전거)
+
+OSRM 자체 호스팅(`osrm-car`·`osrm-foot`)을 게이트웨이가 프로필로 분기한다
+(`/route|/table|/trip|/nearest` 의 `v1/driving`→차량, `v1/walking`→도보, `v1/cycling`→자전거 —
+OSRM/Mapbox Directions 표준 URL. `car`·`foot`·`bike`/`bicycle` 별칭도 받는다).
+대안 경로는 `alternatives=true`, 회피는 `exclude=` — 차량 `toll`(무료우선)·`motorway`, 도보 `steps`(계단회피).
+★ exclude 는 한 번에 한 클래스만 — 조합은 400 `InvalidValue`(프로필 excludable 이 단일 집합만 선언).
+도보 길찾기에서 역을 지점으로 지정하면 데모가 최적 출구로 좌표를 스냅한다
+(`demo/data/station-exits.json` — `scripts/08-gen-station-exits.py` 가 OSM `railway=subway_entrance` +
+출구번호 `ref` 를 추출, 전국 4,555개). 이웃 지점에 가장 가까운 출구를 골라 "상동역 8번 출구"로 안내한다.
+차량은 스냅하지 않는다(역 앞 도로 대표점이 관례).
+
+폐쇄망 전용 — 실시간 교통은 미반영. 소요시간은 한국 도심 보정 프로필(`scripts/route-profiles/{car,foot}.lua` — 차량: 등급별 실효속도·신호등 40s·회전/유턴 지연, 도보: 4.5km/h·신호 횡단 30s·계단 감속, 자전거: 15km/h·신호 25s)로 상용 내비의 "평상시" 추정에 근사시킨 값이다.
+
+```js
+// 경로: 출발;경유지;도착 (lon,lat 순서 주의) — steps=턴바이턴, geometries=geojson 권장
+const r = await fetch(`/route/v1/driving/126.9877,37.4292;126.9769,37.4009;126.9169,37.4017` +
+                      `?steps=true&overview=full&geometries=geojson`).then(r=>r.json());
+// r.code === 'Ok'
+// r.routes[0].distance(m) · duration(s) · geometry(GeoJSON LineString — 지도에 그대로 addSource)
+// r.routes[0].legs[i]     — 경유지 구간별 distance/duration/steps
+// legs[i].steps[j]        — { maneuver:{type,modifier}, name:'과천대로', distance, duration } 턴바이턴
+// r.waypoints             — 입력좌표의 도로 스냅 결과 { name, location, distance(스냅거리 m) }
+
+// 매트릭스(N×N 소요시간/거리): 가까운 지점 찾기 등
+const t = await fetch(`/table/v1/driving/${coords}?annotations=duration,distance`).then(r=>r.json());
+// 다중지점 방문 순서 최적화: /trip/v1/driving/{coords}?roundtrip=true
+```
+
+- 데모 우상단 '길찾기' 패널(`demo/js/routing.js`) 참고 — geocode 검색 연동·지도 클릭 지정·경유지 포함 예제.
+- 그래프는 `scripts/07-gen-route-graph.sh` 산출물(`route/{car,foot}`) — OSM 갱신 시 재생성(프로필당 약 3분).
+
 ## 4.1 스타일 내장 라벨 레이어 (토글용 id)
 
 | 레이어 id | 내용 | 표시 줌 |
 |---|---|---|
 | `dong-dot` / `dong-label` | 아파트 동(棟) 점/번호 — OSM 추출 92,004개 (K-apt 144,706동 대비 ~64%) | z14+ / z16+ |
+| `admin-sido-line` / `admin-sigungu-line` / `admin-emd-line`(기본 숨김) | 시도·시군구·읍면동 경계 — 법정동 경계 병합(국가 원천) | z3+ / z6+ / z11+ |
+| `admin-sido-label` / `admin-sigungu-label` | 시도(저줌 약칭→정식명)·시군구 라벨 — 법정동코드 현행 명칭(`전남광주통합특별시` 등). OSM `place` city 라벨은 제외됨 | z3–10 / z7–14 |
 | `poi-station-dot` / `poi-station-label` | 철도·지하철역 (전국 1,383개) | z12+ (단, 데이터가 z12·z13에 부분 존재 — 완전 표시는 z14+) |
 | `poi-civic-label` | 병원·학교·관공서·박물관 등 주요 시설 | z15+ |
 | `peak-label` | 산봉우리 (전국 2만, 이름 보유) | z12+ |
