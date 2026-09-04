@@ -888,6 +888,15 @@ def _ensure_postgis(emit, wait_s=180):
     while time.time() - t0 < wait_s:
         if _pg_port_open() and _pg_ready(compose):
             emit(f"[postgis] 기동 확인({time.time() - t0:.0f}s) — 계속")
+            # 스튜디오가 PostGIS 를 올린 경우, 이미 떠 있던 martin·geocode-pg 는 끊긴 커넥션을 물고 있어 검색·동적 타일이
+            # 5xx 를 낸다([실측 2026-09-04 seq 10 리허설] 수동 재시작 후에야 200). 의존 서비스를 함께 재시작한다(실패는 안내만).
+            try:
+                r = subprocess.run(["docker", "compose", "-f", str(compose), "restart", "martin", "geocode-pg"],
+                                   capture_output=True, text=True, timeout=180, env=env)
+                emit("[postgis] 의존 서비스 martin·geocode-pg 재시작 — 끊긴 커넥션 정리" if r.returncode == 0
+                     else f"[postgis] 의존 서비스 재시작 실패(수동 docker compose restart martin geocode-pg): {(r.stderr or r.stdout).strip()[-200:]}")
+            except Exception as e:
+                emit(f"[postgis] 의존 서비스 재시작 실패(수동 재시작 필요): {e}")
             return True
         time.sleep(4)
     emit(f"[postgis] {wait_s}s 내 접속 불가 — 실행하지 않음(docker logs server-postgis-1 확인)")

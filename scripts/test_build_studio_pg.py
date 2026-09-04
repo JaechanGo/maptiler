@@ -38,6 +38,10 @@ class EnsurePostgis(unittest.TestCase):
             self.assertEqual(args[:5], ["docker", "compose", "-f", str(bs.ROOT / "server" / "docker-compose.yml"), "start"])
             self.assertEqual(run.call_args_list[0].kwargs["env"]["COMPOSE_PROFILES"], "postgis")
             self.assertTrue(any("기동 확인" in m for m in self.msgs))
+            # 기동 뒤 의존 서비스(martin·geocode-pg) 재시작 — 끊긴 커넥션 정리(seq 10 리허설 실측)
+            restart = [c for c in run.call_args_list if c.args[0][4:5] == ["restart"]]
+            self.assertEqual(len(restart), 1); self.assertEqual(restart[0].args[0][5:], ["martin", "geocode-pg"])
+            self.assertTrue(any("의존 서비스" in m for m in self.msgs))
 
     def test_start_fails_then_up_d(self):
         calls = iter([mock.Mock(returncode=1, stdout="", stderr="no such container"),
