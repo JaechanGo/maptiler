@@ -13,6 +13,7 @@ MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리�
 - 행정구역 라벨·경계(시도·시군구·읍면동): **국가 원천**(VWorld 법정동 경계 + 법정동코드 신구대응) → admin.mbtiles. OSM 지명 대신 법정동코드가 진실원이라 행정개편은 법정동코드 재수집만으로 지도·검색·역지오코딩에 함께 반영(ADR-011)
 - 폐쇄망 번들은 PostGIS(필지·건물·POI·주소·행정경계) 덤프까지 **전체 포함**이 기본(package WITH_POSTGIS=1). deploy.sh 가 덤프를 감지해 --profile postgis 로 기동·복원
 - QC 는 정적 검사(13-qc-check) 뒤 라이브 검사(scripts/13j-search-qc.sh: 골든셋·검색 오류/중복/속도·역방향 정답·왕복·정답셋·길찾기)까지 통과해야 함
+- 빌드 스튜디오는 PostGIS 를 쓰는 타깃(load_postgis·qc·package) 실행 전 접속을 선점검하고, 컨테이너가 내려가 있으면 `compose start postgis` 후 pg_isready 를 기다린다(원격 PG 는 안내만). load-all.sh 도 접속 불가 시 즉시 종료코드 2
 - 역·공항·산봉우리·주요시설 라벨 (OpenMapTiles poi/place 레이어 활용)
 - 통합 지오코더: 전국 도로명주소(내비DB) + OSM 이름 + 소상공인 상가 + LOCALDATA 인허가
   → FTS5+R-tree 단일 인덱스. 결과에 전체주소·지번·우편번호·전화·업종대분류(cat1) 동반
