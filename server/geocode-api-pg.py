@@ -1701,7 +1701,10 @@ def geocode(cur, q, limit, meta=None):
         cur.execute(sql, args)
         for r in cur.fetchall():
             disp = addr_str(r) if r["kind"] == "addr" else r["name"]
-            s = base.get(r["kind"], 100) + (30 if (r.get("name") or "") == nq else 0)
+            _nm = norm(r.get("name") or "")
+            # 정확일치 +30, 접두일치 +12 — '세종시청' 이 '이차돌 세종시청점'(부분 문자열)보다 '세종시청.교육청.시의회' 를
+            # 앞세우도록(2026-09-03 QC). 사용자가 접두를 입력하는 습관과 일치하고 정확일치 우선은 그대로다.
+            s = base.get(r["kind"], 100) + (30 if _nm == nq else (12 if nq and _nm.startswith(nq) else 0))
             item = {"name": disp, "kind": r["kind"], "subtype": _g(r, "subtype"),
                     "lon": r["lon"], "lat": r["lat"]}
             if r["kind"] != "addr":

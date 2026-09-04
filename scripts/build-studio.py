@@ -637,9 +637,11 @@ def TARGETS():
         # dep=load_postgis: PostGIS 적재 후 실행 보장 + 적재 실패 시 qc 스킵(거짓 PASS 차단). qc 는 always=True 라
         #   적재가 최신이면 자동 재사용(강제 재적재 없음). --pg 로 parcel/building 적재 완전성·인덱스까지 검증.
         "qc": dict(label="QC 검증", dep="load_postgis",
-            cmd=[py, str(ROOT/"scripts/13-qc-check.py"), "--db", str(BUILD_HOME/"geocode.sqlite"),
-                 "--tiles", str(BUILD_HOME/"tiles"), "--style", str(ROOT/"style/style.json"),
-                 "--config", str(ROOT/"server/tileserver-config.json"), "--api", "http://localhost:8082", "--pg"]),
+            # 13-qc-check(정적·PostGIS) 뒤 13j-search-qc(라이브 검색·역지오·왕복·길찾기 QC, 게이트웨이 경유) — 둘 다 통과해야 done.
+            cmd=["bash", "-c",
+                 f'python3 "{ROOT/"scripts/13-qc-check.py"}" --db "{BUILD_HOME/"geocode.sqlite"}" --tiles "{BUILD_HOME/"tiles"}" '
+                 f'--style "{ROOT/"style/style.json"}" --config "{ROOT/"server/tileserver-config.json"}" --api http://localhost:8082 --pg'
+                 f' && bash "{ROOT/"scripts/13j-search-qc.sh"}" --api "${{GATEWAY_URL:-http://localhost:18080}}"']),
         # [T043 검수 M-3] dep=None → dep="geocode".
         #   package.sh:240 은 `cp -c "$BUILD_HOME/geocode.sqlite"` 로 지오코딩 DB 를 번들에 담는다.
         #   dep 이 없으면 geocode 가 G0(전국 재빌드 차단)로 정지해도 package 는 그대로 돌아
@@ -809,6 +811,33 @@ def target_freshness(kind, ver=None, state=None):
 def all_freshness():
     ver = load_versions(); state = load_build_state()
     return {k: target_freshness(k, ver, state) for k in TARGETS()}
+
+
+MBTILES_TARGETS = ("osm_vector", "dong", "terrain", "admin_tiles")
+
+
+def _restart_tileserver():
+    """빌드 호스트에서 서빙 중인 tileserver-gl 컨테이너를 재시작(mbtiles 교체 반영). 없으면 안내만."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--filter", "name=tileserver", "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=20)
+        names = [n for n in r.stdout.split() if n]
+        if not names:
+            return "[tileserver] 컨테이너 없음 — 폐쇄망 배포 시 deploy.sh 가 기동"
+        subprocess.run(["docker", "restart", *names], capture_output=True, text=True, timeout=120)
+        return f"[tileserver] 재시작 {', '.join(names)} — 새 mbtiles 반영"
+    except Exception as e:
+        return f"[tileserver] 재시작 실패(수동 docker restart 필요): {e}"
+
+
+def mark_fresh(kind, reason):
+    """타깃 서명만 현재값으로 기록 — 산출물이 실제로 최신인데 스크립트 로그/주석 변경 등으로 stale 판정된 경우의 우회.
+    사유를 상태에 남긴다(무근거 우회 방지: UI 가 사유를 필수로 받는다)."""
+    st = load_build_state()
+    st[kind] = {"sig": _target_sig(kind), "built_at": time.strftime("%Y-%m-%d %H:%M"),
+                "note": f"서명만 갱신: {reason}"}
+    save_build_state(st)
+    return st[kind]
 
 
 def record_build_sig(kind):
@@ -1028,10 +1057,30 @@ class Manager:
             # TTY 에 붙으면 라인 버퍼링 → 즉시 출력. \r 진행표시도 라인으로 surface.
             # (PYTHONUNBUFFERED 는 파이썬 자식 보조.) PTY 불가 환경은 파이프로 폴백.
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if kind == "package":
+                # 폐쇄망 번들은 PostGIS(동적 레이어·geocode-pg 검색 백엔드)까지 **전체 포함**이 기본이다.
+                # [2026-09-03] WITH_POSTGIS 가 선택 옵션이라 스튜디오 번들에 PostGIS 덤프가 빠진 채 나갔다 —
+                # 게이트웨이 /geocode 는 geocode-pg 로 가므로 폐쇄망에서 검색·건물·필지가 동작하지 않는 번들이었다.
+                env.setdefault("WITH_POSTGIS", "1")
+            if kind == "geocode":
+                # geocode 의 dedup_er 는 상가 전량을 메모리에 올려 약 14.5GB 를 쓴다(15GB 호스트 실측). 부족하면 HDD 스왑 쓰레싱으로
+                # CPU 10% 에 수 시간 정체된다 — 실행 전에 크게 경고한다(서빙·jenkins 정지 권장). 차단은 하지 않는다.
+                try:
+                    mem = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if ":" in l}
+                    avail_gb = mem.get("MemAvailable", 0) / 1048576
+                    if avail_gb < 14:
+                        self._emit(kind, f"⚠ 메모리 경고: 가용 {avail_gb:.1f}GB < 14GB — dedup_er(≈14.5GB)가 스왑 쓰레싱으로 수 시간 정체될 수 있다. "
+                                         "서빙 컨테이너·jenkins 를 잠시 내리고 돌리는 편이 빠르다(완료 후 재기동).")
+                except Exception:
+                    pass
             rc = self._stream(kind, cmd, env)
             if rc != 0: raise RuntimeError(f"종료코드 {rc}")
             j["status"] = "done"; j["progress"] = 1.0
             record_build_sig(kind)   # 성공 시그니처 기록 → 다음 빌드에서 변경없으면 자동 건너뜀
+            if kind in MBTILES_TARGETS:
+                # tileserver-gl 은 기동 시 연 mbtiles 핸들을 붙들고 있어 파일을 교체(새 inode)해도 옛 타일을 낸다
+                # ([실측 2026-09-03] admin.mbtiles 재생성 후 수동 재시작 전까지 라벨 미반영). 산출 직후 재시작한다.
+                self._emit(kind, _restart_tileserver())
             if kind in ("geocode", "areas"):   # geocode.sqlite 산출 직후 스냅샷 보존(재적재·재수집 teardown 전에)
                 try:
                     b = backup_geocode_artifact()
@@ -2279,6 +2328,18 @@ class H(BaseHTTPRequestHandler):
             prep = prepare_sources(emit=_pemit)   # 업로드 데이터 적재(미업로드는 직전 재사용)
             res = MGR.enqueue(targets)   # {queued, fresh}
             return self._json({"queued": res["queued"], "fresh": res["fresh"], "prepared": prep})
+        if self.path == "/api/targets/mark-fresh":   # 서명만 갱신(산출물 동일 확인 시) — 사유 필수
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or b"{}")
+            kind = b.get("kind"); reason = (b.get("reason") or "").strip()
+            if kind not in TARGETS(): return self._json({"error": "잘못된 kind"}, 400)
+            if len(reason) < 4: return self._json({"error": "사유(4자 이상)가 필요합니다"}, 400)
+            if (MGR.jobs.get(kind) or {}).get("status") in ("running", "queued"):
+                return self._json({"error": "실행 중/대기 중인 타깃은 갱신할 수 없습니다"}, 409)
+            rec = mark_fresh(kind, reason)
+            MGR.publish({"kind": kind, "status": "fresh", "progress": 1.0, "line": f"[서명 갱신] {kind}: {reason}"})
+            return self._json({"ok": True, "kind": kind, "state": rec, "fresh": target_freshness(kind)})
         if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -2579,6 +2640,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <script>
 const $=s=>document.querySelector(s), cards={}, bars={}, sts={};
 let TARGETS=[];
+function markFresh(kind){const r=prompt('서명만 갱신할 사유(산출물이 동일하다는 근거, 4자 이상):'); if(!r)return;
+  fetch('/api/targets/mark-fresh',{method:'POST',body:JSON.stringify({kind,reason:r})}).then(x=>x.json()).then(d=>{if(d.error)return alert(d.error);logln('  [서명 갱신] '+kind+': '+r);loadTargets&&loadTargets();}).catch(e=>alert('실패: '+e));}
 function tbadge(f){return f==='fresh'?'<span class="tb fresh">↻ 최신</span>'
   :f==='stale'?'<span class="tb stale">⟳ 변경됨</span>'
   :f==='missing'?'<span class="tb miss">⊘ 산출물 없음</span>'
@@ -2586,7 +2649,7 @@ function tbadge(f){return f==='fresh'?'<span class="tb fresh">↻ 최신</span>'
 // 최신(fresh)인 타겟은 기본 체크해제 — 그대로 두면 빌드 시 건너뜀. 다시 체크하면 강제 재빌드.
 function loadTargets(){return fetch('/api/targets').then(r=>r.json()).then(d=>{
   TARGETS=d.targets.filter(t=>t.kind[0]!=='_');
-  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${t.fresh==='fresh'?'':'checked'}> ${t.label} ${tbadge(t.fresh)}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}</label>`).join('');
+  $('#checks').innerHTML=TARGETS.map(t=>`<label class=row><input type=checkbox value="${t.kind}" ${t.fresh==='fresh'?'':'checked'}> ${t.label} ${tbadge(t.fresh)}${t.dep?`<span class=chip>← ${t.dep}</span>`:''}${t.fresh==='stale'?` <a class=mut title="산출물이 실제로 최신인데 스크립트 로그·주석 변경으로 stale 로 잡힌 경우만. 사유를 기록합니다." onclick="markFresh('${t.kind}')">서명갱신</a>`:''}</label>`).join('');
 });}
 let _tt; function refreshTargetsSoon(){clearTimeout(_tt);_tt=setTimeout(loadTargets,800);}   // 빌드 종료 후 배지·체크 갱신(디바운스)
 loadTargets();
