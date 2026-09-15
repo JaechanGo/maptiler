@@ -408,6 +408,22 @@ def apply_poi_tiers(style, tiers, cat_tier):
     return 1
 
 
+def apply_poi_source_minzoom(style, theme):
+    """가져온(imported) 스타일에도 poi **소스** minzoom 을 테마 티어 최소(기본 15)로 맞춘다 — 레이어(시각)는 손대지 않는다.
+    [실측 2026-09-15] package 가 STYLE_IMPORT(9/2 스튜디오 반출본, poi minzoom 11)를 그대로 써 z11~14 poi 요청(전부 404)이
+    되살아났고, 9/12 호스트 재부팅 후 tileserver 가 그 style.json 을 읽어 라이브·번들 모두 FEAT-004 T3 계약(z15 미만 미페치)에서
+    벗어났다. 조립 경로는 apply_theme→apply_poi_tiers 가 맞추지만 가져오기 경로는 건너뛰었던 갭. 반환: 바뀐 minzoom 또는 None."""
+    tiers = sanitize_poi_tiers((theme or {}).get("poi_tiers")) or POI_TIERS_DEFAULT
+    mz = min(int(t.get("minzoom", 15)) for t in tiers)
+    L = _index(style).get(POI_ICON_LAYER)
+    src_name = (L or {}).get("source") or "poi"
+    src = (style.get("sources") or {}).get(src_name)
+    if isinstance(src, dict) and src.get("minzoom") != mz:
+        src["minzoom"] = mz
+        return mz
+    return None
+
+
 def sanitize_poi_tiers(tiers):
     if not isinstance(tiers, list):
         return None

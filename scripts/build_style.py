@@ -77,6 +77,12 @@ if imported and pathlib.Path(imported).is_file():
         sys.exit(f"가져온 스타일 형식 오류 ({imported}): layers 배열이 없습니다")
     _version_dyn(style)
     _ensure_admin(style)
+    # 소스 계약은 가져온 스타일에도 강제 — poi 소스 minzoom 을 테마 티어(기본 15)로(FEAT-004 T3, 시각 레이어는 무변경).
+    import style_objects
+    theme_path = root / "theme.json"
+    mz = style_objects.apply_poi_source_minzoom(style, load_json(theme_path) if theme_path.exists() else None)
+    if mz is not None:
+        print(f"poi 소스 minzoom → {mz} (가져온 스타일 값을 테마 티어 계약으로 정렬)")
     out.write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"OK: {out} (가져온 스타일 사용 ← {imported} · layers={len(style['layers'])})")
 else:
