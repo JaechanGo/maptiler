@@ -604,6 +604,17 @@
   btn.textContent = 'PCD 내보내기';
   controls.appendChild(btn);
 
+  // 로딩 스피너(미리보기·내보내기 진행 중) — CSS 1회 주입
+  const css = document.createElement('style');
+  css.textContent = '@keyframes pcd-spin{to{transform:rotate(360deg)}}' +
+    '.pcd-spinner{display:inline-block;width:12px;height:12px;border:2px solid #3a4656;border-top-color:#e8b84a;' +
+    'border-radius:50%;animation:pcd-spin .8s linear infinite;vertical-align:-2px;margin-right:6px;flex:none}' +
+    '.pcd-spinner.big{width:34px;height:34px;border-width:4px;margin:0 0 10px 0}' +
+    '#pcd-pv-busy{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;' +
+    'background:rgba(11,15,20,.72);color:#e8eef7;font-size:12px;border-radius:8px}' +
+    '.ctl[disabled]{opacity:.45;cursor:default}';
+  document.head.appendChild(css);
+
   const panel = document.createElement('div');
   panel.style.cssText = 'position:fixed;top:52px;left:10px;z-index:12;width:268px;display:none;' +
     'background:#141a22;border:1px solid #2c3542;border-radius:8px;padding:12px;' +
@@ -631,7 +642,9 @@
     '<div style="display:flex;gap:6px;margin-top:8px">' +
     '<button id="pcd-preview" class="ctl" style="flex:1">미리보기</button>' +
     '<button id="pcd-go" class="ctl" style="flex:1">내보내기</button></div>' +
-    '<div id="pcd-status" style="margin-top:6px;color:#7d8aa0;min-height:1.7em"></div>' +
+    '<div style="display:flex;align-items:flex-start;margin-top:6px;min-height:1.7em">' +
+    '<span id="pcd-spin" class="pcd-spinner" style="display:none;margin-top:4px"></span>' +
+    '<div id="pcd-status" style="color:#7d8aa0;flex:1"></div></div>' +
     '<div style="margin-top:6px;color:#5d6a80;font-size:11px">미리보기는 지형 ' + PREVIEW_TSTEP + 'm·건물 ' + PREVIEW_BSTEP +
     'm 로 성기게 만든 것(점 수 ≈ 1/16)이고, 내보낸 뒤엔 실제 점군을 그립니다. DEM 원본 30m · 도로는 중심선뿐이라 ' +
     'class 별 대표 실폭으로 폅니다 · 건물 폴리곤은 타일 경계에서 잘려 내부에 가짜 벽면이 생길 수 있습니다(서버 내보내기에서 해소).</div>';
@@ -640,7 +653,7 @@
   // 미리보기 창 — 패널 오른쪽. 평면도(정사각) + 등각 투영.
   const pv = document.createElement('div');
   pv.style.cssText = 'position:fixed;top:52px;left:290px;z-index:12;display:none;background:#0b0f14;' +
-    'border:1px solid #2c3542;border-radius:8px;padding:8px;color:#cdd6e3;font-size:11px;line-height:1.5;font-family:inherit';
+    'border:1px solid #2c3542;border-radius:8px;padding:8px;color:#cdd6e3;font-size:11px;line-height:1.5;font-family:inherit;overflow:hidden';
   const PV_S = 300, PV_W = 360;
   pv.innerHTML =
     '<div id="pcd-pv-title" style="color:#e8eef7;font-weight:600;margin-bottom:6px"></div>' +
@@ -649,7 +662,8 @@
     '<div style="color:#7d8aa0;margin-top:3px">평면도(위에서, 북쪽이 위)</div></div>' +
     '<div><canvas id="pcd-pv-iso" width="' + PV_W + '" height="' + PV_S + '" style="display:block;background:#000"></canvas>' +
     '<div style="color:#7d8aa0;margin-top:3px">등각 투영(남서 → 북동)</div></div></div>' +
-    '<div style="color:#5d6a80;margin-top:4px">지표=하이프소메트릭 · 수역=청 · 녹지=녹 · 건물=난색(높을수록 밝음) · 도로=주황/노랑/회색 · 철도=보라</div>';
+    '<div style="color:#5d6a80;margin-top:4px">지표=하이프소메트릭 · 수역=청 · 녹지=녹 · 건물=난색(높을수록 밝음) · 도로=주황/노랑/회색 · 철도=보라</div>' +
+    '<div id="pcd-pv-busy"><span class="pcd-spinner big"></span><span id="pcd-pv-busy-text">생성 중…</span></div>';
   document.body.appendChild(pv);
 
   const el = (id) => panel.querySelector('#' + id);
@@ -737,7 +751,18 @@
   map.on('moveend', () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 200); });
 
   let busy = false;
-  const setBusy = (v) => { busy = v; el('pcd-go').disabled = v; el('pcd-preview').disabled = v; };
+  const setBusy = (v, label) => {
+    busy = v; el('pcd-go').disabled = v; el('pcd-preview').disabled = v;
+    el('pcd-spin').style.display = v ? 'inline-block' : 'none';
+    // 미리보기 창이 이미 열려 있으면 그 위에 큰 스피너로 덮는다(이전 그림이 최신인 줄 오해하지 않게)
+    const ov = pv.querySelector('#pcd-pv-busy');
+    ov.style.display = v && pv.style.display !== 'none' ? 'flex' : 'none';
+    if (label) pv.querySelector('#pcd-pv-busy-text').textContent = label;
+  };
+  const progress = (status, prefix) => (t) => {
+    status.textContent = prefix + t;
+    pv.querySelector('#pcd-pv-busy-text').textContent = prefix + t;
+  };
 
   // 미리보기 — 같은 파이프라인을 굵은 간격으로. 색상은 항상 켜서 레이어가 구분되게 한다.
   el('pcd-preview').onclick = async () => {
@@ -745,13 +770,13 @@
     const status = el('pcd-status');
     const o = opts();
     if (!o.terrain && !o.bld && !o.road) { status.textContent = '지형·건물·도로 중 하나는 선택해야 합니다.'; return; }
-    setBusy(true);
+    setBusy(true, '미리보기 생성 중…');
     try {
       const c = map.getCenter(), origin = { lon: c.lng, lat: c.lat };
       const scale = enuScale(origin.lat), half = o.side / 2;
       const po = Object.assign({}, o, { tStep: Math.max(o.tStep, PREVIEW_TSTEP), bStep: Math.max(o.bStep, PREVIEW_BSTEP), color: true });
       const t0 = performance.now();
-      const res = await generate(po, origin, scale, half, t => { status.textContent = '미리보기 ' + t; });
+      const res = await generate(po, origin, scale, half, progress(status, '미리보기 '));
       const sec = ((performance.now() - t0) / 1000).toFixed(1);
       showPreview(res, half, '미리보기(성긴 샘플 ' + po.tStep + 'm/' + po.bStep + 'm) · ' + res.n.toLocaleString() + ' 점 · ' + sec + 's');
       status.textContent = '미리보기 완료 · ' + res.n.toLocaleString() + ' 점 · ' + sec + 's (실제 내보내기는 예상 점 수 기준)';
@@ -767,7 +792,7 @@
     const status = el('pcd-status');
     const o = opts();
     if (!o.terrain && !o.bld && !o.road) { status.textContent = '지형·건물·도로 중 하나는 선택해야 합니다.'; return; }
-    setBusy(true);
+    setBusy(true, '내보내기 생성 중…');
     try {
       const c = map.getCenter(), origin = { lon: c.lng, lat: c.lat };
       const scale = enuScale(origin.lat), half = o.side / 2;
@@ -781,11 +806,11 @@
         status.textContent = '취소했습니다.'; setBusy(false); return;
       }
       const t0 = performance.now();
-      const res = await generate(o, origin, scale, half, t => { status.textContent = t; });
+      const res = await generate(o, origin, scale, half, progress(status, ''));
       if (!res.n) throw new Error('생성된 점이 없습니다 — 범위·레이어 설정을 확인하세요.');
       const genSec = ((performance.now() - t0) / 1000).toFixed(1);
 
-      status.textContent = 'PCD 인코딩 중… (' + res.n.toLocaleString() + ' 점)';
+      progress(status, '')('PCD 인코딩 중… (' + res.n.toLocaleString() + ' 점)');
       await new Promise(r => setTimeout(r, 0));
       const blob = encodePcd(res, o.color, o.ascii, {
         lon: origin.lon, lat: origin.lat, side: o.side, tStep: o.tStep, bStep: o.bStep,
