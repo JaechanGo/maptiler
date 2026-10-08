@@ -2320,6 +2320,20 @@ def _pick_latest_osrm_tag(tags):
     return best
 
 
+def _osrm_ver_tuple(image):
+    """이미지 ref 의 태그에서 (major, minor, patch) — v5.25.0·v26.10.0-debian 모두. 못 읽으면 None."""
+    m = re.search(r":v(\d+)\.(\d+)\.(\d+)(?:-debian)?$", image or "")
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def _osrm_upgrade_available(latest_image, pinned):
+    """최신이 고정값보다 '높은' 버전일 때만 — 같은 버전의 다른 변형·하위 버전은 업그레이드로 노출하지 않는다."""
+    if not latest_image or latest_image == pinned:
+        return False
+    lv, pv = _osrm_ver_tuple(latest_image), _osrm_ver_tuple(pinned)
+    return bool(lv and (pv is None or lv > pv))
+
+
 def _osrm_running_containers():
     """osrm-car/foot/bike 컨테이너의 {이름: 이미지}. 검증용 staging 컨테이너는 제외."""
     try:
@@ -2392,7 +2406,7 @@ def _osrm_status(refresh_latest):
     return {"pinned": pinned, "pin_ok": pin_ok, "pin_check": pin_check,
             "running": _osrm_running_containers(), "stamps": stamps,
             "latest": latest, "latest_error": latest_error,
-            "upgrade_available": bool(latest and latest["image"] != pinned), "busy": busy}
+            "upgrade_available": _osrm_upgrade_available(latest and latest["image"], pinned), "busy": busy}
 
 
 # ── HTTP 핸들러 ────────────────────────────────────────────────────

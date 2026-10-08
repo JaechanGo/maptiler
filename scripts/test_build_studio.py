@@ -1898,6 +1898,16 @@ class TestOsrmEngine(IsolatedBuildHome):
         p.write_text(line, encoding="utf-8")
         return p
 
+    def test_upgrade_available_by_version(self):
+        """최신이 고정값보다 높은 버전일 때만 업그레이드 노출 — 같은 버전 변형·하위 버전·동일은 아님."""
+        v5, v26 = "osrm/osrm-backend:v5.25.0", "ghcr.io/project-osrm/osrm-backend:v26.10.0-debian"
+        self.assertTrue(M._osrm_upgrade_available(v26, v5))
+        self.assertFalse(M._osrm_upgrade_available(v26, v26))
+        self.assertFalse(M._osrm_upgrade_available("ghcr.io/project-osrm/osrm-backend:v26.9.0-debian", v26))
+        self.assertFalse(M._osrm_upgrade_available("ghcr.io/project-osrm/osrm-backend:v5.25.0-debian", v5))
+        self.assertFalse(M._osrm_upgrade_available(None, v5))
+        self.assertTrue(M._osrm_upgrade_available(v26, ""))   # 고정값을 못 읽으면 노출(상태 경고와 함께)
+
     def test_pin_extract_and_missing(self):
         """① versions.sh 실제 형식 줄에서 고정 ref 추출 — 대상 줄 없으면 ''."""
         with mock.patch.object(M, "VERSIONS_SH", self._versions(self._LINE_V5)):

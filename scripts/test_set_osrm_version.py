@@ -105,6 +105,17 @@ class SetOsrmVersionTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertRegex(r.stdout, r"불일치: versions.sh=\S+ compose=\S+\(osrm-car 줄 7\)")
 
+    def test_four_space_indent_compose(self):
+        """compose 를 4칸 들여쓰기로 다시 써도 거짓 불일치 없이 판정·치환되고, 불일치엔 서비스 이름이 나온다."""
+        four = "\n".join(("  " + ln) if ln.startswith("  ") else ln for ln in COMPOSE.split("\n"))
+        self._write(self.cf, four)
+        r = self.run_s("--check")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "OK " + OLD), r.stdout)
+        self._write(self.cf, four.replace(OLD, NEW, 1))
+        r = self.run_s("--check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("(osrm-car 줄 7)", r.stdout)
+
     def test_print(self):
         r = self.run_s("--print")
         self.assertEqual((r.returncode, r.stdout.strip()), (0, OLD))

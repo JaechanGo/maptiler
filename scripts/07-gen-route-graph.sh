@@ -89,18 +89,23 @@ rollback() {
       rm -rf "$FAILED/$p"
       [ -d "$ROOT/route/$p" ] && mv "$ROOT/route/$p" "$FAILED/$p"
       mv "$PREV/$p" "$ROOT/route/$p"
+    elif [ "$PIN_CHANGED" = "1" ]; then
+      # 고정값을 옛 이미지로 되돌리므로 새 포맷 그래프를 남기면 옛 이미지가 못 읽는다 — 함께 걷어 낸다
+      rm -rf "$FAILED/$p"; [ -d "$ROOT/route/$p" ] && mv "$ROOT/route/$p" "$FAILED/$p"
+      echo "  ⚠ [$p] 이전본 없음(첫 설치) — 그래프 없음 상태, 07 재실행 필요" >&2
     else
       echo "  ⚠ [$p] 이전본 없음(첫 설치) — 새 그래프를 그대로 둔다" >&2
     fi
   done
-  if [ "$PIN_CHANGED" = "1" ]; then "$SETVER" "$PREV_PIN" || echo "  ⚠ 고정값 복원 실패 — set-osrm-version.sh $PREV_PIN 수동 실행" >&2; fi
+  if [ "$PIN_CHANGED" = "1" ]; then bash "$SETVER" "$PREV_PIN" || echo "  ⚠ 고정값 복원 실패 — set-osrm-version.sh $PREV_PIN 수동 실행" >&2; fi
   if [ "$RECREATED" = "1" ]; then
     recreate || echo "  ⚠ 재생성 실패 — docker compose up -d --force-recreate osrm-car osrm-foot osrm-bike 수동 실행" >&2
     wait_ok "$BASELINE/route/v1/driving/$PROBE?overview=false" 180 || echo "  ⚠ 롤백 후 게이트웨이 응답 없음" >&2
   fi
 }
 
-PHASE=pre; STARTED=""; CUR_OUT=""; SWAPPED=""; PIN_CHANGED=0; RECREATED=0; PREV_PIN=""
+PHASE=pre; STARTED=""; CUR_OUT=""; SWAPPED=""; PIN_CHANGED=0; RECREATED=0; PREV_PIN=""; LOCKED=0
+LOCK="$ROOT/route/.07.lock"
 on_exit() {
   local rc=$? n
   set +e
@@ -115,9 +120,11 @@ on_exit() {
         restart_serving ;;
       swap|post)
         rollback
-        echo "오류: 교체 후 실패 — 이전 그래프·이미지로 롤백함(실패본: route/.failed)" >&2 ;;
+        rm -rf "$STG"   # 교체 도중 실패 시 아직 안 옮긴 프로필의 스테이징(GB 단위) 정리
+        echo "오류: 교체 후 실패 — 이전 그래프·이미지로 롤백함(실패본: route/.failed — 다음 실행 시작 시 삭제)" >&2 ;;
     esac
   fi
+  [ "$LOCKED" = "1" ] && rm -rf "$LOCK"
   exit "$rc"
 }
 trap on_exit EXIT
@@ -128,6 +135,8 @@ for p in $PROFILES; do
   [ -n "$(svc_of "$p")" ] || { echo "오류: 알 수 없는 프로필 '$p' (car·foot·bicycle)" >&2; exit 1; }
 done
 if [ -n "${OSRM_IMAGE_NEXT:-}" ]; then
+  [[ "$OSRM_IMAGE_NEXT" =~ ^[a-z0-9][a-z0-9._/-]*/osrm-backend:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || { echo "오류: OSRM_IMAGE_NEXT 형식이 아님: '$OSRM_IMAGE_NEXT' (예: ghcr.io/project-osrm/osrm-backend:v26.10.0-debian)" >&2; exit 1; }
   for need in car foot bicycle; do
     case " $PROFILES " in *" $need "*) ;;
       *) echo "오류: OSRM_IMAGE_NEXT 는 car·foot·bicycle 을 함께 빌드해야 한다(PROFILES=$PROFILES) — 일부만 새 이미지면 나머지 그래프가 새 이미지에서 기동 실패" >&2; exit 1 ;;
@@ -135,16 +144,38 @@ if [ -n "${OSRM_IMAGE_NEXT:-}" ]; then
   done
   [ "$AUTO_RESTART" = "1" ] || { echo "오류: OSRM_IMAGE_NEXT 와 OSRM_AUTO_RESTART=0 은 함께 쓸 수 없다 — 고정값만 바뀌고 컨테이너는 옛 이미지로 남는다" >&2; exit 1; }
 fi
-[ -x "$SETVER" ] || { echo "오류: $SETVER 없음" >&2; exit 1; }
-PREV_PIN="$("$SETVER" --print)"
+[ -f "$SETVER" ] || { echo "오류: $SETVER 없음" >&2; exit 1; }
+PREV_PIN="$(bash "$SETVER" --print)"
 if [ -f "$COMPOSE_YML" ]; then
-  if ! _chk="$("$SETVER" --check 2>&1)"; then
+  if ! _chk="$(bash "$SETVER" --check 2>&1)"; then
     echo "$_chk" >&2
     echo "오류: versions.sh 와 compose 의 OSRM 이미지가 이미 어긋나 있다 — set-osrm-version.sh <ref> 로 먼저 맞출 것" >&2; exit 1
   fi
 fi
-rm -rf "$STG"   # 이전 실패 잔재(빈 공간 계산 전에 비운다)
 mkdir -p "$ROOT/route"
+# 동시 실행 차단(스튜디오 job 과 수동 실행이 겹치면 서로의 .staging 을 지운다) — mkdir 원자성, bash 3.2/4.2 공용.
+# 주인 프로세스가 죽은 잠금(강제 종료 등)은 회수한다.
+if ! mkdir "$LOCK" 2>/dev/null; then
+  _owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then
+    echo "오류: 07 이 이미 실행 중(pid $_owner) — 끝난 뒤 다시 실행" >&2; exit 1
+  fi
+  echo "  (주인 없는 잠금 회수: pid ${_owner:-?})"
+  rm -rf "$LOCK"; mkdir "$LOCK"
+fi
+echo "$$" > "$LOCK/pid"; LOCKED=1
+# 이전 실행 잔재 — 빈 공간 계산 전에 비운다. .failed(롤백 실패본)·.prev(교체 뒤 중단)는 한 벌(수 GB)이라
+# 남겨 두면 다음 빌드가 매번 디스크 부족으로 막힌다. 진단이 필요하면 다음 실행 전에 옮겨 둘 것.
+for _d in "$STG" "$FAILED" "$PREV"; do
+  [ -e "$_d" ] && { echo "  이전 잔재 삭제: ${_d#$ROOT/}"; rm -rf "$_d"; }
+done
+# 서빙 중 그래프의 빌드 이미지 ≠ 고정값이면 이미 어긋난 상태(저장소 반영 누락 등) — 이번 빌드가 바로잡는다
+for p in $PROFILES; do
+  _st="$(cat "$ROOT/route/$p/.osrm-image" 2>/dev/null || true)"
+  if [ -n "$_st" ] && [ "$_st" != "$PREV_PIN" ]; then
+    echo "  ⚠ route/$p 는 $_st 로 빌드됐는데 고정값은 $PREV_PIN — 이번 빌드로 교체된다"
+  fi
+done
 if [ "${ROUTE_DISK_CHECK:-1}" != "0" ]; then
   # 새 그래프를 옆에 먼저 빌드하므로 한 벌이 더 필요하다: 프로필별 기존 크기×1.15(없으면 4GiB) + 여유 2GiB
   need_kb=$((2 * 1024 * 1024))
@@ -236,7 +267,7 @@ done
 rmdir "$STG" 2>/dev/null || true
 if [ -n "${OSRM_IMAGE_NEXT:-}" ] && [ "$OSRM_IMAGE_NEXT" != "$PREV_PIN" ]; then
   PIN_CHANGED=1
-  "$SETVER" "$OSRM_IMAGE_NEXT"
+  bash "$SETVER" "$OSRM_IMAGE_NEXT"
 fi
 echo "✓ 그래프 교체 완료: route/{$(echo $PROFILES | tr ' ' ',')} (이전본 route/.prev)"
 
@@ -262,5 +293,9 @@ fi
 
 PHASE=done
 rm -rf "$PREV" "$FAILED"
+if [ "$PIN_CHANGED" = "1" ]; then
+  echo "⚠ 버전 고정값이 바뀌었다($PREV_PIN → $OSRM_IMAGE_NEXT): scripts/versions.sh·server/docker-compose.yml 변경을"
+  echo "  저장소에 반영(커밋)할 것 — 반영 전 코드 재배포로 옛 값이 덮이면 compose 가 옛 이미지로 새 그래프를 읽는다."
+fi
 echo "길찾기 그래프 생성·교체 완료 — 이미지 $IMG, $(( $(date +%s) - T0 ))초"
 for p in $PROFILES; do echo "    $p: $(du -sh "$ROOT/route/$p" | cut -f1)"; done

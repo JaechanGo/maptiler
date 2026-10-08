@@ -69,26 +69,28 @@ else
   done
   # 버전 게이트 — 그래프 파일 포맷이 OSRM 버전에 결합돼 있어, 번들 이미지(compose 태그)와 다른 버전으로 빌드된
   # 그래프를 실으면 폐쇄망에서 osrm 이 기동 실패한다. 고정값 정합(versions.sh=compose) + 그래프 스탬프(07 이 기록) 대조.
-  "$ROOT/scripts/set-osrm-version.sh" --check >/dev/null 2>&1 || {
-    "$ROOT/scripts/set-osrm-version.sh" --check >&2 || true
+  bash "$ROOT/scripts/set-osrm-version.sh" --check >/dev/null 2>&1 || {
+    bash "$ROOT/scripts/set-osrm-version.sh" --check >&2 || true
     echo "오류: versions.sh 와 docker-compose.yml 의 OSRM 이미지 불일치 — scripts/set-osrm-version.sh <ref> 로 맞춘 뒤 재패키징" >&2
     exit 1; }
+  # 대조 기준은 파일 고정값(--print) — env OSRM_IMAGE 로 덮인 값이 아니라 번들 이미지(compose 태그)와 같은 값
+  _pin="$(bash "$ROOT/scripts/set-osrm-version.sh" --print)"
   for rp in car foot bicycle; do
     _stamp="$ROUTE_DIR/$rp/.osrm-image"
     if [ ! -s "$_stamp" ]; then
       if [ -n "${ALLOW_UNSTAMPED_ROUTE:-}" ]; then
-        echo "  ⚠ route/$rp 빌드 이미지 스탬프 없음 — ALLOW_UNSTAMPED_ROUTE=1 로 통과(번들 이미지 $OSRM_IMAGE 와 같은 버전인지 직접 확인할 것)" >&2
+        echo "  ⚠ route/$rp 빌드 이미지 스탬프 없음 — ALLOW_UNSTAMPED_ROUTE=1 로 통과(번들 이미지 $_pin 와 같은 버전인지 직접 확인할 것)" >&2
         continue
       fi
       echo "오류: route/$rp 그래프에 빌드 이미지 스탬프(.osrm-image)가 없음 — 07 재실행 필요(ALLOW_UNSTAMPED_ROUTE=1 로 우회)" >&2
       exit 1
     fi
     _built="$(head -n1 "$_stamp")"
-    [ "$_built" = "$OSRM_IMAGE" ] || {
-      echo "오류: route/$rp 그래프는 $_built 로 빌드됐는데 번들 이미지는 $OSRM_IMAGE — 폐쇄망에서 osrm 기동 실패. 07 재실행 필요" >&2
+    [ "$_built" = "$_pin" ] || {
+      echo "오류: route/$rp 그래프는 $_built 로 빌드됐는데 번들 이미지는 $_pin — 폐쇄망에서 osrm 기동 실패. 07 재실행 필요" >&2
       exit 1; }
   done
-  ROUTE_BUNDLE="route"
+  ROUTE_BUNDLE="route/car route/foot route/bicycle"   # 프로필만 — 07 의 .staging/.prev/.failed/.07.lock 은 번들 제외
 fi
 
 # Build Studio 로 가져온 style.json(staged/style) 이 있으면 그대로 사용, 없으면 기본 조립.

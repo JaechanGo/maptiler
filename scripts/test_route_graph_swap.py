@@ -278,6 +278,62 @@ class RouteGraphSwapTest(unittest.TestCase):
         for p in PROFILES:
             self.assertEqual(self.graph(p), "new")
 
+    def test_lock_held_by_live_process_rejected(self):
+        _w(os.path.join(self.root, "route/.07.lock/pid"), "%d\n" % os.getpid())   # 살아 있는 pid
+        r = self.run07()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("이미 실행 중", r.stderr)
+        self.assertEqual(self.docker_runs(), [])
+        self.assertTrue(self.exists("route/.07.lock"))   # 남의 잠금은 건드리지 않는다
+        self.assert_untouched()
+
+    def test_stale_lock_reclaimed_and_released(self):
+        _w(os.path.join(self.root, "route/.07.lock/pid"), "999999\n")   # 주인 없는 잠금
+        r = self.run07()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.exists("route/.07.lock"))
+
+    def test_lock_released_after_failure(self):
+        r = self.run07(STUB_13I_STG_RC="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(self.exists("route/.07.lock"))
+
+    def test_leftovers_from_previous_run_cleaned(self):
+        for rel in ("route/.failed/car/x", "route/.prev/foot/x", "route/.staging/bicycle/x"):
+            _w(os.path.join(self.root, rel), "junk")
+        r = self.run07()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for d in ("route/.failed", "route/.prev", "route/.staging"):
+            self.assertFalse(self.exists(d), d)
+
+    def test_invalid_next_rejected_before_build(self):
+        for bad in ("nginx:latest", "-v/etc:/x"):
+            r = self.run07(OSRM_IMAGE_NEXT=bad)
+            self.assertNotEqual(r.returncode, 0, bad)
+        self.assertEqual(self.docker_runs(), [])
+        self.assert_untouched()
+
+    def test_first_install_rollback_with_pin_revert(self):
+        shutil.rmtree(os.path.join(self.root, "route/bicycle"))   # bicycle 은 첫 설치
+        r = self.run07(OSRM_IMAGE_NEXT=NEW, STUB_13I_POST_RC="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.pinned(), OLD)
+        self.assertFalse(self.exists("route/bicycle"))   # 옛 이미지가 새 포맷을 읽지 않게 걷어 냄
+        self.assertEqual(self.graph("bicycle", "route/.failed"), "new")
+        for p in ("car", "foot"):
+            self.assertEqual(self.graph(p), "old-" + p)
+
+    def test_stamp_pin_mismatch_warned(self):
+        _w(os.path.join(self.root, "route/car/.osrm-image"), NEW + "\n")
+        r = self.run07()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("route/car 는 %s 로 빌드됐는데 고정값은 %s" % (NEW, OLD), r.stdout)
+
+    def test_pin_change_prints_commit_reminder(self):
+        r = self.run07(OSRM_IMAGE_NEXT=NEW)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("저장소에 반영(커밋)", r.stdout)
+
     def test_staging_profile_ports_and_qc_profiles(self):
         r = self.run07()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

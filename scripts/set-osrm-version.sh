@@ -30,10 +30,14 @@ pinned() {
 # compose 의 osrm-backend image 줄 — "줄번호<TAB>서비스<TAB>값" (서비스 = 직전 2칸 들여쓰기 키)
 compose_tags() {
   [ -f "$COMPOSE_FILE" ] || return 0
-  awk '/^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc) }
+  # 서비스 키 = services: 아래 첫 들여쓰기 폭과 같은 키(2칸·4칸 들여쓰기 모두) — 안쪽 volumes: 등은 제외
+  awk '/^services:/ { ind = -1 }
+       /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ { k = match($0, /[^[:space:]]/) - 1
+         if (ind < 0) ind = k
+         if (k == ind) { svc = $1; sub(/:$/, "", svc) } }
        /^[[:space:]]+image:[[:space:]]+[^[:space:]]*osrm-backend:[^[:space:]]+/ {
          v = $0; sub(/^[[:space:]]+image:[[:space:]]+/, "", v); sub(/[[:space:]].*$/, "", v)
-         print NR "\t" svc "\t" v }' "$COMPOSE_FILE"
+         print NR "\t" (svc == "" ? "?" : svc) "\t" v }' "$COMPOSE_FILE"
 }
 
 # 두 파일의 대상 줄을 모두 확인 — 하나라도 없으면 아무것도 쓰지 않고 1

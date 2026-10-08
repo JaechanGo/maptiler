@@ -163,6 +163,25 @@ class TestMainExit3(unittest.TestCase):
                           "--profile", "driving"])
         self.assertEqual(cm.exception.code, 3)
 
+    def _http_error(self, code):
+        return urllib.error.HTTPError("http://gw/route", code, "err", {}, None)
+
+    def test_probe_5xx_means_baseline_down(self):
+        """게이트웨이 502 = 뒤의 osrm 다운 → 기준 사용 불가(재빌드로 복구해야 할 때 교체를 막지 않게)."""
+        for code in (502, 503, 504):
+            with mock.patch("urllib.request.urlopen", side_effect=self._http_error(code)):
+                self.assertFalse(MOD.probe_a("http://gw", "driving", 5), code)
+
+    def test_probe_4xx_means_baseline_alive(self):
+        with mock.patch("urllib.request.urlopen", side_effect=self._http_error(400)):
+            self.assertTrue(MOD.probe_a("http://gw", "driving", 5))
+
+    def test_exit3_when_gateway_502(self):
+        with mock.patch("urllib.request.urlopen", side_effect=self._http_error(502)):
+            with self.assertRaises(SystemExit) as cm:
+                MOD.main(["--a", "http://gw", "--b", "http://127.0.0.1:9", "--profile", "driving"])
+        self.assertEqual(cm.exception.code, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

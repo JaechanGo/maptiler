@@ -106,8 +106,10 @@ def pct(xs, p):
 def probe_a(base, profile, timeout):
     """기준(A) 사용 불가 판정 — 골든 첫 쌍을 A 에 1회 질의해 '연결 자체'만 확인.
 
-    응답이 오면(HTTP 400 NoSegment 포함) 연결 가능 → True.
-    URLError·ConnectionRefused·timeout 처럼 응답 자체가 안 오면 → False.
+    4xx 응답(HTTP 400 NoSegment 등)이 오면 연결 가능 → True.
+    URLError·ConnectionRefused·timeout 처럼 응답 자체가 안 오거나, 5xx(게이트웨이 502 = 뒤의 osrm 이
+    죽은 상태)면 → False. 서빙이 깨진 때가 바로 재빌드로 복구해야 하는 때라, 기준선 없음(exit 3)으로
+    넘겨 07 이 교체를 막지 않게 한다.
     B 쪽 연결 실패는 SKIP 사유가 아니라 게이트 FAIL 대상이다(검증 후보니까).
     """
     a, b = GOLDEN[0][1], GOLDEN[0][3]
@@ -115,8 +117,8 @@ def probe_a(base, profile, timeout):
         with urllib.request.urlopen(route_url(base, profile, a, b), timeout=timeout) as r:
             json.load(r)
         return True
-    except urllib.error.HTTPError:
-        return True   # 오류 응답이라도 '응답'이 왔다 = 기준 API 가 살아 있다
+    except urllib.error.HTTPError as e:
+        return e.code < 500   # 4xx = 기준 API 는 살아 있다 / 5xx = 기준 osrm 다운
     except Exception:
         return False
 
