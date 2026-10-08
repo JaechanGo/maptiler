@@ -31,6 +31,7 @@ DATA_VERSIONS = BUILD_HOME / "data-versions.json"  # (구) 출처 버전 JSON �
 DB_PATH = BUILD_HOME / "build-studio.db"         # 업로드 이력·버전·검증 상태 통합 sqlite
 LOG_DIR = BUILD_HOME / "logs"                     # 단계별 실행 로그(SSE 는 흐르는 스트림이라 사후 추적 불가 → 파일 병행)
 SOURCES_FILE = ROOT / "scripts" / "data-sources.json"  # 데이터 출처 레지스트리
+VERSIONS_SH = ROOT / "scripts" / "versions.sh"   # 빌드 도구 버전 고정값 원천(OSRM_IMAGE) — ROOT 기준, BUILD_HOME 아님
 SOURCES_DIR = BUILD_HOME / "sources"             # 출처별 업로드 파일 저장(sources/<key>/)
 
 
@@ -665,12 +666,27 @@ def _deps(t):
     return [d] if isinstance(d, str) else list(d)
 
 
+def _pinned_osrm_image():
+    """versions.sh 의 OSRM_IMAGE 기본값(고정 이미지 ref) 추출 — 대상 줄 없으면 ''."""
+    try:
+        txt = VERSIONS_SH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.search(r'export OSRM_IMAGE="\$\{OSRM_IMAGE:-([^}]+)\}"', txt)
+    return m.group(1) if m else ""
+
+
+# pins 이름 → 값 해석기. 시그니처에 넣을 외부 고정값이 늘면 여기만 추가한다.
+PIN_SOURCES = {"OSRM_IMAGE": _pinned_osrm_image}
+
+
 # ── 타겟 최신성(freshness) — 자동 재빌드 판정 ────────────────────────
 # 각 타겟의 "최신"=(입력 소스 SHA + 빌드 스크립트 해시 + 상위 타겟 시그니처)가 직전 성공빌드와
 # 동일 AND 산출물 파일 존재. 동일하면 자동 건너뜀('fresh'). 사용자가 명시 체크한 타겟은 항상 빌드.
 #   src     : 직접 읽는 원천 소스키(sources_state.staged_sig 로 변경 추적; 자식 <key>:* 포함)
 #   dep_art : 산출물을 입력으로 받는 상위 타겟(그 타겟 시그니처를 재귀 포함 → 연쇄 변경 전파)
 #   scripts : 빌드 로직 스크립트(내용 해시 — 코드 수정 시 재빌드)
+#   pins    : TFRESH 밖 파일에 고정된 외부 값(예 OSRM_IMAGE) — 'pin:<이름>=<값>' 으로 시그니처 포함
 #   out     : 산출물 경로(전부 존재해야 '최신'); always=True 면 항상 빌드(qc·package)
 TFRESH = {
     "osm_vector": {"src": ["osm"], "scripts": ["scripts/02-gen-vector.sh"],
@@ -681,11 +697,12 @@ TFRESH = {
              "out": [ROOT / "tiles/dong.mbtiles"]},
     "terrain": {"out_only": True, "scripts": ["scripts/03-gen-terrain.sh"],
                 "out": [ROOT / "tiles/terrain.mbtiles"]},   # 정적 SRTM 산출물 — 파일 존재=최신(반입본 보존·재다운로드 방지)
-    "route_graph": {"src": ["osm"], "scripts": ["scripts/07-gen-route-graph.sh",
-                                                "scripts/08-gen-station-exits.py",
-                                                "scripts/route-profiles/car.lua",      # 계수만 바꿔도 그래프 재생성 필요
-                                                "scripts/route-profiles/foot.lua",
-                                                "scripts/route-profiles/bicycle.lua"],
+    "route_graph": {"src": ["osm"], "pins": ["OSRM_IMAGE"],   # 그래프 포맷이 이미지 버전에 결합 — 고정값만 바꿔도 stale
+                    "scripts": ["scripts/07-gen-route-graph.sh",
+                                "scripts/08-gen-station-exits.py",
+                                "scripts/route-profiles/car.lua",      # 계수만 바꿔도 그래프 재생성 필요
+                                "scripts/route-profiles/foot.lua",
+                                "scripts/route-profiles/bicycle.lua"],
                     "out": [ROOT / "route/car/south-korea.osrm.mldgr",
                             ROOT / "route/foot/south-korea.osrm.mldgr",
                             ROOT / "route/bicycle/south-korea.osrm.mldgr",   # 하나라도 없으면 stale
@@ -785,6 +802,8 @@ def _target_sig(kind, ver=None, _seen=None):
         parts.append(s + "=" + _script_hash(s))
     for d in m.get("dep_art", []):
         parts.append("dep:" + d + "=" + _target_sig(d, ver, _seen))
+    for pk in m.get("pins", []):   # 외부 고정값 — pins 를 안 쓰는 타겟의 시그니처는 그대로다
+        parts.append("pin:" + pk + "=" + (PIN_SOURCES.get(pk, lambda: "")()))
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:24]
 
 
@@ -1040,10 +1059,11 @@ class Manager:
         with self.lock:
             if q in self.subs: self.subs.remove(q)
 
-    def enqueue(self, kinds):
+    def enqueue(self, kinds, env_overrides=None):
         # 전이(transitive) 의존성까지 worklist로 해소 → dep의 dep도 모두 포함.
         # 명시 선택(kinds)은 항상 빌드. 의존성으로 끌려온 타겟은 '최신(fresh)'이면 자동 건너뜀
         # (산출물 그대로 재사용). 단일 워커 FIFO + CANON 정렬이라 상위는 하위보다 먼저 처리됨.
+        # env_overrides: {kind: {환경변수: 값}} — 업그레이드 등 요청별 환경 주입(없으면 기존 동작 그대로).
         T = TARGETS(); explicit = set(k for k in kinds if k in T)
         plan = set(); stack = list(explicit)
         while stack:
@@ -1065,7 +1085,8 @@ class Manager:
                 if k not in explicit and fresh_map.get(k) == "fresh":   # 의존성+최신 → 건너뜀(재사용)
                     self.jobs[k] = {"status": "fresh", "progress": 1.0, "log": [], "st": {}}
                     fresh.append(k); continue
-                self.jobs[k] = {"status": "queued", "progress": 0.0, "log": [], "st": {}}
+                self.jobs[k] = {"status": "queued", "progress": 0.0, "log": [], "st": {},
+                                "env": (env_overrides or {}).get(k, {})}
                 started.append(k)
         for k in fresh:
             self.publish({"kind": k, "status": "fresh", "progress": 1.0})
@@ -1124,12 +1145,16 @@ class Manager:
         self.publish({"kind": kind, "status": "running", "progress": j["progress"]})
         try:
             cmd = TARGETS()[kind]["cmd"]
+            _nx = (j.get("env") or {}).get("OSRM_IMAGE_NEXT")
+            if _nx:
+                self._emit(kind, "OSRM_IMAGE_NEXT=" + _nx)   # 업그레이드 job 식별 — 고정값 갱신은 07 이 검증 통과 후 수행
             self._emit(kind, "$ " + " ".join(cmd))
             # 자식 출력을 PTY 로 받아 실시간 스트리밍. 외부 도구(tippecanoe·ogr2ogr·planetiler 등)는
             # stdout 이 파이프면 블록버퍼링되어 로그가 종료 직전까지 안 나온다(진행 여부 알 수 없음).
             # TTY 에 붙으면 라인 버퍼링 → 즉시 출력. \r 진행표시도 라인으로 surface.
             # (PYTHONUNBUFFERED 는 파이썬 자식 보조.) PTY 불가 환경은 파이프로 폴백.
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            env.update(j.get("env") or {})   # 요청별 환경(OSRM 업그레이드 → 07 의 OSRM_IMAGE_NEXT) 주입
             if kind == "package":
                 # 폐쇄망 번들은 PostGIS(동적 레이어·geocode-pg 검색 백엔드)까지 **전체 포함**이 기본이다.
                 # [2026-09-03] WITH_POSTGIS 가 선택 옵션이라 스튜디오 번들에 PostGIS 덤프가 빠진 채 나갔다 —
@@ -2265,6 +2290,111 @@ def delete_manifest(mid):
     return gc_store()   # 삭제 후 미참조 SHA 파일 정리
 
 
+# ── 길찾기 엔진(OSRM) 상태 — 현재/최신/업그레이드 ────────────────────
+# 고정값 판정은 C1(set-osrm-version.sh --check)에, 재빌드·검증·교체는 C4(07 의 OSRM_IMAGE_NEXT)에
+# 위임한다. 이 스튜디오는 상태 조회와 큐잉만 하고, 고정값(versions.sh·compose)은 07 이 검증을
+# 통과한 뒤에만 갱신하므로 여기서는 절대 쓰지 않는다.
+OSRM_STAMP_PROFILES = ("car", "foot", "bicycle")   # route/<profile>/.osrm-image 스탬프(C2)
+_OSRM_LATEST_TTL = 3600                            # 최신 태그 캐시 수명 1시간
+_OSRM_LATEST_CACHE = {}                            # {"image","tag","checked_at","error","_ts"} — 락 보호
+_OSRM_LATEST_LOCK = threading.Lock()
+_OSRM_UPGRADE_RE = re.compile(
+    r"^(?:ghcr\.io/project-osrm/osrm-backend:v\d+\.\d+\.\d+-debian|osrm/osrm-backend:v\d+\.\d+\.\d+)$")
+
+
+def _osrm_upgrade_image_ok(image):
+    """업그레이드 허용 이미지 — ghcr.io project-osrm vX.Y.Z-debian 또는 osrm/osrm-backend vX.Y.Z."""
+    return bool(_OSRM_UPGRADE_RE.match(image or ""))
+
+
+def _pick_latest_osrm_tag(tags):
+    """`^v(\\d+)\\.(\\d+)\\.(\\d+)-debian$` 중 최대 버전 태그(순수함수 — 네트워크 없음). 없으면 None."""
+    best, best_key = None, None
+    for t in tags or []:
+        m = re.match(r"^v(\d+)\.(\d+)\.(\d+)-debian$", t or "")
+        if not m:
+            continue
+        key = tuple(int(g) for g in m.groups())
+        if best_key is None or key > best_key:
+            best, best_key = t, key
+    return best
+
+
+def _osrm_running_containers():
+    """osrm-car/foot/bike 컨테이너의 {이름: 이미지}. 검증용 staging 컨테이너는 제외."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}} {{.Image}}"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {}   # docker 없음(로컬 Mac 등) — 상태를 알 수 없으니 빈 값
+    if r.returncode != 0:
+        return {}
+    out = {}
+    for ln in (r.stdout or "").splitlines():
+        name_img = ln.split(None, 1)
+        if len(name_img) != 2:
+            continue
+        name, image = name_img[0], name_img[1].strip()
+        if "osrm-staging-" in name:
+            continue
+        if re.search(r"osrm-(car|foot|bike)", name):
+            out[name] = image
+    return out
+
+
+def _fetch_latest_osrm():
+    """ghcr.io 익명 토큰 → 태그 목록 → 최신 태그. 성공 dict 또는 {"error": 사유}."""
+    ctx = ssl._create_unverified_context()
+    try:
+        tok_url = "https://ghcr.io/token?scope=repository:project-osrm/osrm-backend:pull"
+        with urllib.request.urlopen(tok_url, timeout=10, context=ctx) as r:
+            tok = json.loads(r.read().decode("utf-8", "replace")).get("token", "")
+        req = urllib.request.Request("https://ghcr.io/v2/project-osrm/osrm-backend/tags/list?n=2000",
+                                     headers={"Authorization": "Bearer " + tok})
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            tags = json.loads(r.read().decode("utf-8", "replace")).get("tags") or []
+    except Exception as e:
+        return {"error": f"ghcr.io 조회 실패: {e}"}
+    tag = _pick_latest_osrm_tag(tags)
+    if not tag:
+        return {"error": "ghcr.io 에 사용 가능한 v*.*.*-debian 태그가 없음"}
+    return {"image": "ghcr.io/project-osrm/osrm-backend:" + tag, "tag": tag}
+
+
+def _osrm_status(refresh_latest):
+    """GET /api/osrm 본문 — 고정값·compose 정합(pin_ok)·실행 중·그래프 스탬프·최신(캐시 1시간)."""
+    pinned = _pinned_osrm_image()
+    try:   # C1 위임 — versions.sh 기본값 == compose 의 osrm-backend image 줄 전부인지
+        r = subprocess.run(["bash", str(ROOT / "scripts" / "set-osrm-version.sh"), "--check"],
+                           capture_output=True, text=True, timeout=10)
+        pin_ok, pin_check = r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        pin_ok, pin_check = False, f"set-osrm-version.sh --check 실행 실패: {e}"
+    stamps = {}
+    for p in OSRM_STAMP_PROFILES:   # C2 — 그 그래프를 빌드한 이미지 ref
+        try:
+            stamps[p] = (ROOT / "route" / p / ".osrm-image").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            stamps[p] = None
+    if refresh_latest:   # ?latest=1 — '최신 확인' 버튼을 눌렀을 때만 실제 조회
+        with _OSRM_LATEST_LOCK:
+            _OSRM_LATEST_CACHE.clear()
+            _OSRM_LATEST_CACHE.update(_fetch_latest_osrm(),
+                                      checked_at=time.strftime("%Y-%m-%d %H:%M"), _ts=time.time())
+    latest = latest_error = None
+    with _OSRM_LATEST_LOCK:
+        c = dict(_OSRM_LATEST_CACHE)
+    if c.get("_ts") and time.time() - c["_ts"] <= _OSRM_LATEST_TTL:
+        if c.get("image"):
+            latest = {"image": c["image"], "tag": c["tag"], "checked_at": c["checked_at"]}
+        latest_error = c.get("error")
+    busy = (MGR.jobs.get("route_graph") or {}).get("status") in ("queued", "running")
+    return {"pinned": pinned, "pin_ok": pin_ok, "pin_check": pin_check,
+            "running": _osrm_running_containers(), "stamps": stamps,
+            "latest": latest, "latest_error": latest_error,
+            "upgrade_available": bool(latest and latest["image"] != pinned), "busy": busy}
+
+
 # ── HTTP 핸들러 ────────────────────────────────────────────────────
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -2306,6 +2436,9 @@ class H(BaseHTTPRequestHandler):
             fr = all_freshness()   # 타겟별 최신성(fresh/stale/missing/always) — 프론트 배지·자동 체크해제용
             return self._json({"targets": [{"kind": k, "label": v["label"], "dep": v["dep"], "fresh": fr.get(k)}
                                             for k, v in TARGETS().items()]})
+        if self.path == "/api/osrm" or self.path.startswith("/api/osrm?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._json(_osrm_status((q.get("latest") or [""])[0] == "1"))
         if self.path == "/api/builds":
             p = DIST / "cuvia-map-bundle.tgz"
             cur = {"exists": p.is_file(), "size": (p.stat().st_size if p.is_file() else 0)}
@@ -2416,6 +2549,18 @@ class H(BaseHTTPRequestHandler):
             rec = mark_fresh(kind, reason)
             MGR.publish({"kind": kind, "status": "fresh", "progress": 1.0, "line": f"[서명 갱신] {kind}: {reason}"})
             return self._json({"ok": True, "kind": kind, "state": rec, "fresh": target_freshness(kind)})
+        if self.path == "/api/osrm/upgrade":   # 원클릭 업그레이드 — 07 을 OSRM_IMAGE_NEXT 로 재빌드·검증 큐잉만
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or b"{}")
+            image = (b.get("image") or "").strip()
+            if not _osrm_upgrade_image_ok(image):
+                return self._json({"error": "허용되지 않은 이미지 — ghcr.io/project-osrm/osrm-backend:vX.Y.Z-debian "
+                                           "또는 osrm/osrm-backend:vX.Y.Z 형식만 가능"}, 400)
+            if (MGR.jobs.get("route_graph") or {}).get("status") in ("queued", "running"):
+                return self._json({"error": "길찾기 그래프 빌드가 이미 대기/진행 중입니다"}, 409)
+            res = MGR.enqueue(["route_graph"], env_overrides={"route_graph": {"OSRM_IMAGE_NEXT": image}})
+            return self._json({"queued": res["queued"], "image": image})
         if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -2709,6 +2854,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
    <div style="display:flex;gap:8px;margin-top:12px">
      <button id=run>빌드 시작</button>
      <button class=ghost id=forceAll title="모든 타겟 체크(최신 무시하고 전체 재빌드)">강제 재빌드(전체)</button></div></div>
+  <div class="panel" style="margin-top:14px"><h2>길찾기 엔진 (OSRM)</h2>
+   <div id=osrm class=ds></div>
+   <div style="display:flex;gap:8px;margin-top:10px">
+     <button class=ghost id=osrmCheck>최신 확인</button>
+     <button id=osrmUp style="display:none"></button></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
  </div>
@@ -2944,7 +3094,9 @@ function loadProfile(id){if(!confirm('이 프로필의 파일집합으로 복원
 function delProfile(id){if(!confirm('프로필을 삭제할까요? (보관 번들 + 미참조 store 파일 정리)'))return;fetch('/api/profiles/delete',{method:'POST',body:JSON.stringify({id})}).then(r=>r.json()).then(d=>{if(d.gc_removed)logln('🗑 store 정리: '+d.gc_removed+'개 ('+gb(d.gc_freed||0)+' 회수)');loadBuilds();});}
 function loadVw(){fetch('/api/secrets/vworld').then(r=>r.json()).then(d=>{const s=$('#vwState');if(s)s.textContent=d.set?'· 설정됨 ✓':'· 미설정';});}
 function saveVw(){const j=$('#vwPjsess'),b=$('#vwVworld');fetch('/api/secrets/vworld',{method:'POST',body:JSON.stringify({pjsessionid:j.value,vworld:b.value})}).then(r=>r.json()).then(d=>{j.value='';b.value='';loadVw();logln(d.set?'🔑 VWorld 쿠키 저장됨':'🔑 VWorld 쿠키 삭제됨');}).catch(e=>alert('실패: '+e));}
-loadCollect(); loadBuilds(); loadVw();
+loadCollect(); loadBuilds(); loadVw(); loadOsrm();
+$('#osrmCheck').onclick=()=>{const b=$('#osrmCheck');b.disabled=true;
+  loadOsrm(true).catch(()=>{}).finally(()=>{b.disabled=false;});};
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정'); $('#vwSave').onclick=saveVw;
 $('#forceAll').onclick=()=>{document.querySelectorAll('#checks input').forEach(c=>c.checked=true);logln('⟳ 전체 체크 — 최신 무시하고 강제 재빌드');};
 function runBuild(t){
@@ -2975,6 +3127,38 @@ $('#run').onclick=()=>{const t=[...document.querySelectorAll('#checks input:chec
  triggerBuild(t);};
 // 단일 단계 재시도 — 그 단계만 명시 빌드(의존성은 fresh면 자동 건너뜀). 오류/건너뜀 카드의 [↻ 재시도] 버튼.
 function retry(kind){if(anyBusy())return;logln('↻ 재시도: '+lbl(kind)+' (완료 단계는 재사용)');triggerBuild([kind]);}
+// ── 길찾기 엔진(OSRM) 패널 — 고정/실행/스탬프/최신 + 원클릭 업그레이드 ──
+function osrmWarns(d){const w=[];
+  if(d.pin_ok===false)w.push('versions.sh 와 compose 의 OSRM 이미지가 불일치 — set-osrm-version.sh 로 맞춰야 함');
+  const bs=Object.entries(d.stamps||{}).filter(([k,v])=>v&&v!==d.pinned).map(([k])=>k);
+  if(bs.length)w.push('그래프와 이미지 버전 불일치 — '+bs.join(', ')+' 그래프는 다른 이미지로 빌드됨');
+  const br=Object.entries(d.running||{}).filter(([k,v])=>v!==d.pinned).map(([k])=>k);
+  if(br.length)w.push('실행 중 이미지가 고정값과 다름 — '+br.join(', '));
+  return w;}
+function renderOsrm(d){
+  const st=Object.entries(d.stamps||{}).map(([k,v])=>k+': <b>'+(v?esc(v):'—')+'</b>').join(' · ');
+  const run=Object.keys(d.running||{}).length?Object.entries(d.running).map(([k,v])=>esc(k)+': <b>'+esc(v)+'</b>').join('<br>'):'<span class=mut>실행 중 컨테이너 없음</span>';
+  const latest=d.latest?'<b>'+esc(d.latest.image)+'</b> <span class=mut>'+esc(d.latest.checked_at||'')+'</span>'
+    :(d.latest_error?'<span class=mut>조회 실패: '+esc(d.latest_error)+'</span>':'<span class=mut>확인 안 함</span>');
+  const warns=osrmWarns(d).map(x=>'<div style="color:#d9c07a">⚠ '+esc(x)+'</div>').join('');
+  $('#osrm').innerHTML='<div class=pdrow><span>고정 버전 (versions.sh)</span><span><b>'+esc(d.pinned||'—')+'</b>'
+    +(d.pin_ok===false?' <span style="color:#ff8585">✗ compose 불일치</span>':'')+'</span></div>'
+   +'<div class=pdrow><span>그래프 스탬프</span><span>'+st+'</span></div>'
+   +'<div class=pdrow><span>실행 중</span><span>'+run+'</span></div>'
+   +'<div class=pdrow><span>최신 버전</span><span>'+latest+'</span></div>'
+   +(warns?'<div style="margin-top:7px">'+warns+'</div>':'');
+  const up=$('#osrmUp'); if(!up)return;
+  if(d.latest&&d.upgrade_available){up.style.display='';up.textContent='업그레이드 → '+d.latest.tag;
+    up.disabled=!!d.busy;up.onclick=()=>osrmUpgrade(d.latest.image);}
+  else up.style.display='none';}
+function loadOsrm(latest){return fetch('/api/osrm'+(latest?'?latest=1':'')).then(r=>r.json()).then(d=>{
+  if(d.error)return alert(d.error);renderOsrm(d);});}
+function osrmUpgrade(image){
+  if(!confirm('OSRM 을 '+image+' 로 업그레이드합니다. 새 그래프 3종을 빌드·검증(약 15분)한 뒤 통과하면 교체합니다. 진행할까요?'))return;
+  fetch('/api/osrm/upgrade',{method:'POST',body:JSON.stringify({image})}).then(r=>r.json()).then(d=>{
+    if(d.error)return alert(d.error);
+    logln('⬆ OSRM 업그레이드 큐: '+d.image+' ('+(d.queued||[]).join(', ')+') — 검증 통과 시 교체·고정 갱신, 실패 시 롤백');
+    loadOsrm();}).catch(e=>alert('실패: '+e));}
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){
  const items=dt&&dt.items;

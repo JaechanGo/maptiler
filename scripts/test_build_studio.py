@@ -1882,5 +1882,85 @@ class TestBoundaryRiWiring(IsolatedBuildHome):
         self.assertNotEqual(r.returncode, 0, "06 실패가 삼켜졌다")
 
 
+# ════════════════════════════════════════════════════════════════
+# T4 — OSRM 버전 최신성 판정 + 엔진 상태(현재/최신/업그레이드)
+#
+# VERSIONS_SH 는 ROOT 기준 읽기 전용 상수라 _REPOINT_ATTRS 에 넣지 않는다 —
+# 케이스마다 mock.patch.object 로 임시 파일을 물린다. ghcr.io·docker·
+# set-osrm-version.sh 실호출은 전부 mock 한다.
+# ════════════════════════════════════════════════════════════════
+class TestOsrmEngine(IsolatedBuildHome):
+    _LINE_V5 = ('export OSRM_IMAGE="${OSRM_IMAGE:-osrm/osrm-backend:v5.25.0}" '
+                '# 길찾기 그래프 빌드(07)·서빙 공용\n')
+
+    def _versions(self, line):
+        p = self.home / "versions.sh"
+        p.write_text(line, encoding="utf-8")
+        return p
+
+    def test_pin_extract_and_missing(self):
+        """① versions.sh 실제 형식 줄에서 고정 ref 추출 — 대상 줄 없으면 ''."""
+        with mock.patch.object(M, "VERSIONS_SH", self._versions(self._LINE_V5)):
+            self.assertEqual(M._pinned_osrm_image(), "osrm/osrm-backend:v5.25.0")
+        with mock.patch.object(M, "VERSIONS_SH", self._versions("export OTHER=1\n")):
+            self.assertEqual(M._pinned_osrm_image(), "")
+
+    def test_route_graph_sig_tracks_pinned_image(self):
+        """② pins — 고정 이미지만 바꿔도 route_graph 시그니처가 달라지고,
+        pins 를 안 쓰는 타깃(osm_vector) 시그니처는 불변이다."""
+        with mock.patch.object(M, "VERSIONS_SH", self._versions(self._LINE_V5)):
+            rg1, ov1 = M._target_sig("route_graph"), M._target_sig("osm_vector")
+        line26 = 'export OSRM_IMAGE="${OSRM_IMAGE:-ghcr.io/project-osrm/osrm-backend:v26.10.0-debian}"\n'
+        with mock.patch.object(M, "VERSIONS_SH", self._versions(line26)):
+            rg2, ov2 = M._target_sig("route_graph"), M._target_sig("osm_vector")
+        self.assertNotEqual(rg1, rg2, "고정 이미지 변경이 route_graph 시그니처에 반영돼야 한다")
+        self.assertEqual(ov1, ov2, "pins 없는 타깃(osm_vector) 시그니처는 불변이어야 한다")
+
+    def test_pick_latest_osrm_tag(self):
+        """③ vX.Y.Z-debian 정규식 중 최대 버전 — debug·arm64 변형·latest 늀 제외, 빈 목록은 None."""
+        tags = ["v5.25.0", "v26.9.0-debian", "v26.10.0-debian", "v26.10.0-debug-debian",
+                "latest", "v6.0.0-debian", "v26.10.0-arm64-debian"]
+        self.assertEqual(M._pick_latest_osrm_tag(tags), "v26.10.0-debian")
+        self.assertIsNone(M._pick_latest_osrm_tag([]))
+
+    def test_upgrade_image_validation(self):
+        """④ 업그레이드 허용 이미지 2종만 통과 — 타 이미지·latest·주입 시도는 거부."""
+        for ok in ("ghcr.io/project-osrm/osrm-backend:v26.10.0-debian",
+                   "osrm/osrm-backend:v5.25.0"):
+            self.assertTrue(M._osrm_upgrade_image_ok(ok), ok)
+        for bad in ("nginx:latest", "ghcr.io/x/osrm-backend:v1;rm",
+                    "ghcr.io/project-osrm/osrm-backend:latest"):
+            self.assertFalse(M._osrm_upgrade_image_ok(bad), bad)
+
+    def test_enqueue_env_overrides_stored_on_job(self):
+        """⑤ enqueue(kinds, env_overrides) — 새로 queued 되는 job 의 env 에 OSRM_IMAGE_NEXT 저장.
+        하네스가 M.MGR.enqueue 를 막았으므로 클래스 함수를 직접 호출하고, 워커 실행은
+        work.put mock 으로 차단한다."""
+        self.addCleanup(M.MGR.jobs.pop, "route_graph", None)
+        put = []
+        with mock.patch.object(M.MGR.work, "put", lambda item: put.append(item)):
+            res0 = M.Manager.enqueue(M.MGR, ["route_graph"])   # 기존 호출부 호환 — env 는 빈 dict
+            self.assertIn("route_graph", res0["queued"])
+            self.assertEqual(M.MGR.jobs["route_graph"]["env"], {})
+            M.MGR.jobs.pop("route_graph")
+            res = M.Manager.enqueue(
+                M.MGR, ["route_graph"],
+                env_overrides={"route_graph": {"OSRM_IMAGE_NEXT": "ghcr.io/project-osrm/osrm-backend:v26.10.0-debian"}})
+        self.assertIn("route_graph", res["queued"])
+        self.assertEqual(M.MGR.jobs["route_graph"]["env"],
+                         {"OSRM_IMAGE_NEXT": "ghcr.io/project-osrm/osrm-backend:v26.10.0-debian"})
+        self.assertEqual(put, ["route_graph", "route_graph"])
+
+    def test_osrm_running_filter(self):
+        """⑥ docker ps 파싱 — osrm-car/foot/bike 컨테이너만 남고 staging·무관 컨테이너는 제외."""
+        out = ("server-osrm-car-1 ghcr.io/project-osrm/osrm-backend:v5.25.0\n"
+               "osrm-staging-car ghcr.io/project-osrm/osrm-backend:v26.10.0-debian\n"
+               "server-nginx-1 nginx\n")
+        fake = subprocess.CompletedProcess(args=[], returncode=0, stdout=out, stderr="")
+        with mock.patch.object(M.subprocess, "run", mock.Mock(return_value=fake)):
+            running = M._osrm_running_containers()
+        self.assertEqual(running, {"server-osrm-car-1": "ghcr.io/project-osrm/osrm-backend:v5.25.0"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
