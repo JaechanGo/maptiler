@@ -71,10 +71,11 @@ services:
   # route/{car,foot} 그래프(07-gen-route-graph.sh 산출)를 MLD 로 서빙. 프로필당 인스턴스 1개
   # (osrm-routed 는 단일 그래프만 로드 — URL 의 profile 문자열은 무시되므로 분기는 게이트웨이가 담당).
   # 호스트 포트 비노출 — 외부는 게이트웨이 /route|/table|/trip|/nearest 경유만.
-  # 이미지 태그는 scripts/versions.sh OSRM_IMAGE 와 반드시 일치(그래프 파일 포맷이 버전 결합).
+  # 이미지 태그는 scripts/versions.sh OSRM_IMAGE 와 반드시 일치(그래프 파일 포맷이 버전 결합) — 손편집 말고
+  # scripts/set-osrm-version.sh <ref> 로만 바꾼다(빌드 스튜디오 '업그레이드'는 07 이 검증 통과 후 자동 갱신).
   # healthcheck 없음 — 이미지에 curl/wget/node 부재(martin 과 동일 취급). 그래프 파일 없으면 기동 실패가 신호.
   osrm-car:
-    image: osrm/osrm-backend:v5.25.0
+    image: ghcr.io/project-osrm/osrm-backend:v26.10.0-debian
     platform: linux/amd64
     restart: unless-stopped
     volumes:
@@ -84,7 +85,7 @@ services:
       - cuvia
 
   osrm-foot:
-    image: osrm/osrm-backend:v5.25.0
+    image: ghcr.io/project-osrm/osrm-backend:v26.10.0-debian
     platform: linux/amd64
     restart: unless-stopped
     volumes:
@@ -94,7 +95,7 @@ services:
       - cuvia
 
   osrm-bike:
-    image: osrm/osrm-backend:v5.25.0
+    image: ghcr.io/project-osrm/osrm-backend:v26.10.0-debian
     platform: linux/amd64
     restart: unless-stopped
     volumes:
