@@ -1,9 +1,14 @@
--- 한국 도심 보정 도보 프로필 — 이미지 내장 foot.lua(v5.25.0, BSD-2)를 감싸 계수만 교정. FEAT-007/ADR-009.
+-- 한국 도심 보정 도보 프로필 — 이미지 내장 foot.lua(v26 기준, BSD-2)를 감싸 계수만 교정. FEAT-007/ADR-009.
 -- 기본 프로필은 전 구간 5km/h 균일·신호등 2초라 실보행 대비 20~25% 낙관(상용 내비는 4km/h대 + 횡단 대기).
 -- 교정 3축: ① 보행속도 5→4.5km/h(신호 대기 별도 계상 전제의 순보행 속도)
 --          ② 신호 횡단 대기 2→30s(보행 신호 주기 기대 대기)  ③ 계단 3.5km/h(층계 감속)
 -- car.lua 와 동일한 wrapper 방식 — 07-gen-route-graph.sh 가 /opt/kr-foot.lua 로 마운트(내장 덮어쓰기 금지).
 -- 계수 수정 시 그래프 재생성(osrm-extract) + osrm-foot 재시작 필수.
+
+-- 버전 호환: v6 부터 내장 프로필은 신호 지연을 traffic_signal_penalty 로 읽는다(v5 Lua 는 traffic_light_penalty).
+--   v6+ 키를 빠뜨리면 오류 없이 기본값 2초로 돌아가 도심 ETA 가 낙관으로 회귀한다(v26 실측: 도심 합계 -8%) → 두 키를 함께 둔다.
+--   계수는 v26 기준으로 검증했다(v5.25 보정 대비 중앙값 차 ≤1%). v5 C++ 도 traffic_signal_penalty 를 읽어 압축 구간 신호를
+--   계상하므로 v5 계열로 다시 빌드하면 옛 그래프와 결과가 달라진다(미검증) — 롤백은 재빌드가 아니라 이전 그래프 복원으로 한다.
 
 local foot = require('foot')        -- 이미지 내장 /opt/foot.lua
 
@@ -13,6 +18,7 @@ local KR_STEPS_SPEED   = 3.5        -- 계단
 function setup()
   local profile = foot.setup()
   profile.properties.traffic_light_penalty = 30
+  profile.properties.traffic_signal_penalty = 30   -- v6+ 키
   -- 계단회피 옵션(exclude=steps) — 휠체어·유모차·캐리어. 내장 foot 프로필은 classes 를
   -- 아예 선언하지 않아(핸들러 목록에도 WayHandlers.classes 없음) 여기서 클래스를 신설하고
   -- process_way 에서 직접 부여한다. excludable 은 그래프 빌드 시점에 구워진다.
@@ -46,4 +52,5 @@ return {
   process_way = process_way,
   process_node = foot.process_node,
   process_turn = foot.process_turn,
+  process_relation = foot.process_relation,   -- v26+ 보행 광장 meshing(기본 꺼짐). v5 에선 nil 이라 무해
 }

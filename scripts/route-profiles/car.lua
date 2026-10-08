@@ -1,4 +1,4 @@
--- 한국 도심 보정 차량 프로필 — 이미지 내장 car.lua(v5.25.0, BSD-2)를 감싸 계수만 교정. FEAT-007/ADR-009.
+-- 한국 도심 보정 차량 프로필 — 이미지 내장 car.lua(v26 기준, BSD-2)를 감싸 계수만 교정. FEAT-007/ADR-009.
 -- 근거: 폐쇄망은 실시간 교통을 못 쓴다 → 상용 내비의 "평상시" 추정처럼 정적 비용모델을 현실화한다.
 --   기본 프로필은 자유주행 가정(신호 2초·secondary 55km/h·maxspeed 그대로)이라 도심에서 실측 대비
 --   약 2배 낙관(실측: 부천 춘의역→상동역 경유 4.8km 를 8.5분으로 계산, 네이버 17분).
@@ -9,6 +9,11 @@
 -- 산출물 호환: osrm-extract 시점에 그래프로 구워짐 — 그래프 재생성(07-gen-route-graph.sh) 필수.
 -- 사용법: 07-gen-route-graph.sh 가 이 파일을 /opt/kr-car.lua 로 마운트해 -p 지정(내장 car.lua 를 require 하므로
 --         /opt/car.lua 를 덮어쓰면 안 됨 — 자기 자신을 require 하는 무한루프).
+
+-- 버전 호환: v6 부터 내장 프로필은 신호 지연을 traffic_signal_penalty 로 읽는다(v5 Lua 는 traffic_light_penalty).
+--   v6+ 키를 빠뜨리면 오류 없이 기본값 2초로 돌아가 도심 ETA 가 낙관으로 회귀한다(v26 실측: 도심 합계 -8%) → 두 키를 함께 둔다.
+--   계수는 v26 기준으로 검증했다(v5.25 보정 대비 중앙값 차 ≤1%). v5 C++ 도 traffic_signal_penalty 를 읽어 압축 구간 신호를
+--   계상하므로 v5 계열로 다시 빌드하면 옛 그래프와 결과가 달라진다(미검증) — 롤백은 재빌드가 아니라 이전 그래프 복원으로 한다.
 
 local car = require('car')          -- 이미지 내장 /opt/car.lua (require 경로는 프로필 디렉토리 기준)
 
@@ -34,6 +39,7 @@ local KR_SPEEDS = {
 function setup()
   local profile = car.setup()
   profile.properties.traffic_light_penalty = 40   -- 신호등 1개당 기대 지연(s) — OSM 신호 태깅 누락 보상 포함(실측 보정)
+  profile.properties.traffic_signal_penalty = 40  -- v6+ 키(lib/obstacles.lua)
   profile.properties.u_turn_penalty        = 45   -- 국내 유턴은 대부분 신호 연동
   profile.turn_penalty                     = 15   -- 교차로 회전 지연 상한(시그모이드 최대치, s)
   profile.turn_bias                        = 1.15 -- 좌회전(진행방향 역측) 가중 — 보호좌회전 대기 반영

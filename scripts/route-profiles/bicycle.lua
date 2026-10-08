@@ -1,4 +1,4 @@
--- 한국 도심 보정 자전거 프로필 — 이미지 내장 bicycle.lua(v5.25.0, BSD-2)를 감싸 계수만 교정.
+-- 한국 도심 보정 자전거 프로필 — 이미지 내장 bicycle.lua(v26 기준, BSD-2)를 감싸 계수만 교정.
 -- FEAT-007/ADR-009. car.lua·foot.lua 와 동일한 wrapper 방식.
 -- 기본 프로필의 주행속도(15km/h)는 국내 도심 자전거 실측 평균(13~16km/h)과 맞아 그대로 두고,
 -- 비현실적인 지연 계수만 교정한다:
@@ -7,11 +7,17 @@
 -- 계단(steps)은 내장 프로필이 이미 밀기(push) 속도로 처리하므로 건드리지 않는다.
 -- 계수 수정 시 그래프 재생성(osrm-extract) + osrm-bike 재시작 필수.
 
+-- 버전 호환: v6 부터 내장 프로필은 신호 지연을 traffic_signal_penalty 로 읽는다(v5 Lua 는 traffic_light_penalty).
+--   v6+ 키를 빠뜨리면 오류 없이 기본값 2초로 돌아가 도심 ETA 가 낙관으로 회귀한다(v26 실측: 도심 합계 -8%) → 두 키를 함께 둔다.
+--   계수는 v26 기준으로 검증했다(v5.25 보정 대비 중앙값 차 ≤1%). v5 C++ 도 traffic_signal_penalty 를 읽어 압축 구간 신호를
+--   계상하므로 v5 계열로 다시 빌드하면 옛 그래프와 결과가 달라진다(미검증) — 롤백은 재빌드가 아니라 이전 그래프 복원으로 한다.
+
 local bicycle = require('bicycle')   -- 이미지 내장 /opt/bicycle.lua
 
 function setup()
   local profile = bicycle.setup()
   profile.properties.traffic_light_penalty = 25
+  profile.properties.traffic_signal_penalty = 25   -- v6+ 키
   profile.properties.u_turn_penalty        = 25
   profile.turn_penalty                     = 9
   return profile
