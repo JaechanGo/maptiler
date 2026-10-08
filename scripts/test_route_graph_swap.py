@@ -298,6 +298,38 @@ class RouteGraphSwapTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(self.exists("route/.07.lock"))
 
+    def test_reclaim_lock_held_by_other_reclaimer_rejected(self):
+        """주인 없는 잠금이라도 다른 쪽이 회수 중(.07.lock.reclaim)이면 들어가지 않는다 — 동시 회수 시 한쪽만."""
+        _w(os.path.join(self.root, "route/.07.lock/pid"), "999999\n")
+        os.makedirs(os.path.join(self.root, "route/.07.lock.reclaim"))
+        r = self.run07()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("회수 중", r.stderr)
+        self.assertEqual(self.docker_runs(), [])
+
+    def test_lock_with_reused_pid_reclaimed(self):
+        """pid 는 살아 있어도 시작시각이 다르면 pid 재사용 — 주인 없는 잠금으로 회수."""
+        _w(os.path.join(self.root, "route/.07.lock/pid"), "%d\n" % os.getpid())
+        _w(os.path.join(self.root, "route/.07.lock/start"), "Thu Jan  1 00:00:00 1970\n")
+        r = self.run07()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.exists("route/.07.lock"))
+
+    def test_empty_pid_lock_treated_as_acquiring(self):
+        os.makedirs(os.path.join(self.root, "route/.07.lock"))   # mkdir 직후 pid 기록 전 상태
+        r = self.run07()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.docker_runs(), [])
+
+    def test_lone_prev_copy_protected(self):
+        """직전 롤백 복원이 실패해 route/<p> 가 없고 .prev/<p> 만 있으면 지우지 않고 멈춘다."""
+        shutil.move(os.path.join(self.root, "route/foot"), os.path.join(self.root, "route/.prev/foot"))
+        r = self.run07()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("유일한 정상본", r.stderr)
+        self.assertEqual(self.graph("foot", "route/.prev"), "old-foot")
+        self.assertEqual(self.docker_runs(), [])
+
     def test_leftovers_from_previous_run_cleaned(self):
         for rel in ("route/.failed/car/x", "route/.prev/foot/x", "route/.staging/bicycle/x"):
             _w(os.path.join(self.root, rel), "junk")

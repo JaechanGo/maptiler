@@ -63,6 +63,44 @@ wait_ok() {   # $1=URL $2=최대초 — HTTP 200 이 될 때까지 2초 간격
   return 1
 }
 
+# 잠금 — route/.07.lock/{pid,start}. 주인 생존은 pid + 시작시각으로 판정(pid 재사용 오판 방지, build-studio 의
+# _proc_start_key 와 같은 기준). 주인 없는 잠금 회수는 보조 잠금(.07.lock.reclaim) 안에서 소유자를 다시 확인해
+# 동시에 회수하려는 둘 중 하나만 통과시킨다. pid 가 빈 잠금은 '획득 중'으로 보고 회수하지 않는다.
+lock_alive() {   # $1=잠금 디렉토리 — 주인이 살아 있거나 획득 중이면 0
+  local pid start now
+  pid="$(cat "$1/pid" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 1
+  start="$(cat "$1/start" 2>/dev/null || true)"
+  [ -n "$start" ] || return 0
+  now="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+  [ "$now" = "$start" ]
+}
+take_lock() {   # mkdir 성공 직후 — 표시를 먼저 세워 중단돼도 EXIT 에서 정리되게
+  LOCKED=1
+  echo "$$" > "$LOCK/pid"
+  ps -o lstart= -p "$$" > "$LOCK/start" 2>/dev/null || true
+}
+acquire_lock() {
+  if mkdir "$LOCK" 2>/dev/null; then take_lock; return 0; fi
+  if lock_alive "$LOCK"; then
+    echo "오류: 07 이 이미 실행 중(pid $(cat "$LOCK/pid" 2>/dev/null || echo '획득 중')) — 끝난 뒤 다시 실행." \
+         "확실히 멈춘 잔재면 rm -rf route/.07.lock" >&2
+    exit 1
+  fi
+  mkdir "$LOCK.reclaim" 2>/dev/null || { echo "오류: 다른 07 이 잠금을 회수 중 — 잠시 뒤 다시 실행" >&2; exit 1; }
+  if lock_alive "$LOCK"; then   # 보조 잠금을 잡는 사이 다른 쪽이 정상 획득
+    rmdir "$LOCK.reclaim"; echo "오류: 07 이 이미 실행 중 — 끝난 뒤 다시 실행" >&2; exit 1
+  fi
+  echo "  (주인 없는 잠금 회수: pid $(cat "$LOCK/pid" 2>/dev/null || echo '?'))"
+  rm -rf "$LOCK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    rmdir "$LOCK.reclaim"; echo "오류: 잠금 경합 — 다른 07 이 먼저 잡았다" >&2; exit 1
+  fi
+  take_lock
+  rmdir "$LOCK.reclaim"
+}
+
 # ★ 실행 중인 osrm-routed 는 그래프를 mmap 으로 붙들고 있다. 이 스크립트의 대용량 I/O 는
 #   빌드 대상이 아닌 프로필의 컨테이너까지 그 뷰를 깨뜨린 사례가 있다(2026-09-01 실측:
 #   foot 빌드 중 실행 중이던 osrm-car 가 부천 좌표를 서울 '망우로'로 스냅, 3.2km→65km 오답.
@@ -154,18 +192,21 @@ if [ -f "$COMPOSE_YML" ]; then
 fi
 mkdir -p "$ROOT/route"
 # 동시 실행 차단(스튜디오 job 과 수동 실행이 겹치면 서로의 .staging 을 지운다) — mkdir 원자성, bash 3.2/4.2 공용.
-# 주인 프로세스가 죽은 잠금(강제 종료 등)은 회수한다.
-if ! mkdir "$LOCK" 2>/dev/null; then
-  _owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then
-    echo "오류: 07 이 이미 실행 중(pid $_owner) — 끝난 뒤 다시 실행" >&2; exit 1
-  fi
-  echo "  (주인 없는 잠금 회수: pid ${_owner:-?})"
-  rm -rf "$LOCK"; mkdir "$LOCK"
-fi
-echo "$$" > "$LOCK/pid"; LOCKED=1
+acquire_lock
 # 이전 실행 잔재 — 빈 공간 계산 전에 비운다. .failed(롤백 실패본)·.prev(교체 뒤 중단)는 한 벌(수 GB)이라
 # 남겨 두면 다음 빌드가 매번 디스크 부족으로 막힌다. 진단이 필요하면 다음 실행 전에 옮겨 둘 것.
+# 단, .prev/<p> 가 있는데 route/<p> 그래프가 없으면 직전 롤백의 복원이 실패한 것 — 그 .prev 가 유일한 정상본일 수 있다.
+if [ -d "$PREV" ]; then
+  for _d in "$PREV"/*; do
+    [ -d "$_d" ] || continue
+    _p="$(basename "$_d")"
+    if [ ! -s "$ROOT/route/$_p/$OSRM_BASE.mldgr" ]; then
+      echo "오류: route/.prev/$_p 가 남아 있는데 route/$_p 그래프가 없다 — 직전 롤백 복원 실패로 .prev 가 유일한 정상본일 수 있다." >&2
+      echo "  확인 후 복원(mv route/.prev/$_p route/$_p) 또는 삭제하고 다시 실행" >&2
+      exit 1
+    fi
+  done
+fi
 for _d in "$STG" "$FAILED" "$PREV"; do
   [ -e "$_d" ] && { echo "  이전 잔재 삭제: ${_d#$ROOT/}"; rm -rf "$_d"; }
 done

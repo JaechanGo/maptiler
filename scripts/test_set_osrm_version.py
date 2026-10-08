@@ -116,6 +116,15 @@ class SetOsrmVersionTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("(osrm-car 줄 7)", r.stdout)
 
+    def test_keys_outside_services_ignored(self):
+        """services 블록 밖(networks:/volumes:)의 같은 폭 키·image 줄은 서비스로 보지도 치환하지도 않는다."""
+        extra = COMPOSE + "networks:\n  cuvia:\n    driver: bridge\nvolumes:\n  pgdata:\n    image: osrm/osrm-backend:v9.99.0\n"
+        self._write(self.cf, extra)
+        r = self.run_s("--check")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "OK " + OLD), r.stdout)
+        self.assertEqual(self.run_s(NEW).returncode, 0)
+        self.assertIn("image: osrm/osrm-backend:v9.99.0", self._read(self.cf))   # 블록 밖은 그대로
+
     def test_print(self):
         r = self.run_s("--print")
         self.assertEqual((r.returncode, r.stdout.strip()), (0, OLD))

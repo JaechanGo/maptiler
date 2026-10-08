@@ -27,15 +27,16 @@ pinned() {
       if (i > 1) { print substr(rest, 1, i - 1); exit } }' "$VERSIONS_FILE"
 }
 
-# compose 의 osrm-backend image 줄 — "줄번호<TAB>서비스<TAB>값" (서비스 = 직전 2칸 들여쓰기 키)
+# compose 의 osrm-backend image 줄 — "줄번호<TAB>서비스<TAB>값".
+# services 블록(다음 최상위 키 전까지) 안만 본다 — networks:/volumes: 아래 키를 서비스로 오인하지 않게.
+# 서비스 키 = services: 아래 첫 들여쓰기 폭과 같은 키(2칸·4칸 모두) — 서비스 안쪽 volumes: 등은 제외.
 compose_tags() {
   [ -f "$COMPOSE_FILE" ] || return 0
-  # 서비스 키 = services: 아래 첫 들여쓰기 폭과 같은 키(2칸·4칸 들여쓰기 모두) — 안쪽 volumes: 등은 제외
-  awk '/^services:/ { ind = -1 }
-       /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ { k = match($0, /[^[:space:]]/) - 1
+  awk '/^[^[:space:]#]/ { in_svc = ($0 ~ /^services:/); ind = -1; svc = "" }
+       in_svc && /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ { k = match($0, /[^[:space:]]/) - 1
          if (ind < 0) ind = k
          if (k == ind) { svc = $1; sub(/:$/, "", svc) } }
-       /^[[:space:]]+image:[[:space:]]+[^[:space:]]*osrm-backend:[^[:space:]]+/ {
+       in_svc && /^[[:space:]]+image:[[:space:]]+[^[:space:]]*osrm-backend:[^[:space:]]+/ {
          v = $0; sub(/^[[:space:]]+image:[[:space:]]+/, "", v); sub(/[[:space:]].*$/, "", v)
          print NR "\t" (svc == "" ? "?" : svc) "\t" v }' "$COMPOSE_FILE"
 }
@@ -78,7 +79,8 @@ do_write() {
       rest = substr($0, length(pre) + 1); i = index(rest, "}")
       if (i > 1) { $0 = pre new substr(rest, i); done = 1 } }
     { print }' "$new"
-  rewrite "$COMPOSE_FILE" '/^[[:space:]]+image:[[:space:]]+[^[:space:]]*osrm-backend:[^[:space:]]+/ {
+  rewrite "$COMPOSE_FILE" '/^[^[:space:]#]/ { in_svc = ($0 ~ /^services:/) }
+    in_svc && /^[[:space:]]+image:[[:space:]]+[^[:space:]]*osrm-backend:[^[:space:]]+/ {
       match($0, /^[[:space:]]+image:[[:space:]]+/); head = substr($0, 1, RLENGTH); rest = substr($0, RLENGTH + 1)
       j = match(rest, /[[:space:]]/); tail = (j ? substr(rest, j) : "")
       $0 = head new tail }
