@@ -1148,6 +1148,10 @@ class Manager:
             _nx = (j.get("env") or {}).get("OSRM_IMAGE_NEXT")
             if _nx:
                 self._emit(kind, "OSRM_IMAGE_NEXT=" + _nx)   # 업그레이드 job 식별 — 고정값 갱신은 07 이 검증 통과 후 수행
+            _drift = (j.get("env") or {}).get("ROUTE_DRIFT_SKIP")
+            if _drift:   # 소요시간 변화 게이트(13k) 생략 job — 사유를 로그 파일에 영구 기록
+                self._emit(kind, "⚠ 소요시간 변화 검사 생략(ROUTE_DRIFT_SKIP=1) — 사유: "
+                           + (j.get("env") or {}).get("ROUTE_DRIFT_SKIP_REASON", ""))
             self._emit(kind, "$ " + " ".join(cmd))
             # 자식 출력을 PTY 로 받아 실시간 스트리밍. 외부 도구(tippecanoe·ogr2ogr·planetiler 등)는
             # stdout 이 파이프면 블록버퍼링되어 로그가 종료 직전까지 안 나온다(진행 여부 알 수 없음).
@@ -2334,6 +2338,29 @@ def _osrm_upgrade_available(latest_image, pinned):
     return bool(lv and (pv is None or lv > pv))
 
 
+def _osrm_job_env(image=None, drift_skip=False, reason=""):
+    """OSRM 빌드 job env 조립(순수함수) → (env, error).
+
+    - image: 있으면 _osrm_upgrade_image_ok 통과 필수 → env["OSRM_IMAGE_NEXT"]
+    - drift_skip: 참이면 reason.strip() 1~200자 필수 → env["ROUTE_DRIFT_SKIP"]="1" +
+      env["ROUTE_DRIFT_SKIP_REASON"]=사유(로그 기록용 — 워커가 남긴다). 07-gen-route-graph.sh 는
+      ROUTE_DRIFT_SKIP=1 이면 소요시간 변화 게이트(13k)를 건너뛴다 — OSM 대규모 갱신 등
+      의도된 변화가 있을 때만. drift_skip 이 거짓이면 reason 은 무시한다."""
+    env = {}
+    if image:
+        if not _osrm_upgrade_image_ok(image):
+            return {}, ("허용되지 않은 이미지 — ghcr.io/project-osrm/osrm-backend:vX.Y.Z-debian "
+                        "또는 osrm/osrm-backend:vX.Y.Z 형식만 가능")
+        env["OSRM_IMAGE_NEXT"] = image
+    if drift_skip:
+        r = (reason or "").strip()
+        if not (1 <= len(r) <= 200):
+            return {}, "소요시간 검사 생략에는 사유(1~200자)가 필요합니다"
+        env["ROUTE_DRIFT_SKIP"] = "1"
+        env["ROUTE_DRIFT_SKIP_REASON"] = r
+    return env, None
+
+
 def _osrm_running_containers():
     """osrm-car/foot/bike 컨테이너의 {이름: 이미지}. 검증용 staging 컨테이너는 제외."""
     try:
@@ -2570,11 +2597,23 @@ class H(BaseHTTPRequestHandler):
             image = (b.get("image") or "").strip()
             if not _osrm_upgrade_image_ok(image):
                 return self._json({"error": "허용되지 않은 이미지 — ghcr.io/project-osrm/osrm-backend:vX.Y.Z-debian "
-                                           "또는 osrm/osrm-backend:vX.Y.Z 형식만 가능"}, 400)
+                                            "또는 osrm/osrm-backend:vX.Y.Z 형식만 가능"}, 400)
+            env, err = _osrm_job_env(image, bool(b.get("drift_skip")), b.get("reason") or "")
+            if err: return self._json({"error": err}, 400)
             if (MGR.jobs.get("route_graph") or {}).get("status") in ("queued", "running"):
                 return self._json({"error": "길찾기 그래프 빌드가 이미 대기/진행 중입니다"}, 409)
-            res = MGR.enqueue(["route_graph"], env_overrides={"route_graph": {"OSRM_IMAGE_NEXT": image}})
+            res = MGR.enqueue(["route_graph"], env_overrides={"route_graph": env})
             return self._json({"queued": res["queued"], "image": image})
+        if self.path == "/api/osrm/rebuild":   # 그래프만 재빌드(이미지 변경 없음) — drift_skip 시 13k 소요시간 게이트 생략
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
+            b = json.loads(self.rfile.read(n) or b"{}")
+            env, err = _osrm_job_env(None, bool(b.get("drift_skip")), b.get("reason") or "")
+            if err: return self._json({"error": err}, 400)
+            if (MGR.jobs.get("route_graph") or {}).get("status") in ("queued", "running"):
+                return self._json({"error": "길찾기 그래프 빌드가 이미 대기/진행 중입니다"}, 409)
+            res = MGR.enqueue(["route_graph"], env_overrides={"route_graph": env})   # env 가 비어도({}) 큐잉
+            return self._json({"queued": res["queued"], "drift_skip": bool(b.get("drift_skip"))})
         if self.path == "/api/build/check":   # 빌드 전 사전점검 — 선택 타겟이 필요로 하는 소스 누락/검증실패 목록
             n = int(self.headers.get("Content-Length", "0"))
             if n > MAX_CTRL: return self._json({"error": "본문 과대"}, 413)
@@ -2870,9 +2909,11 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
      <button class=ghost id=forceAll title="모든 타겟 체크(최신 무시하고 전체 재빌드)">강제 재빌드(전체)</button></div></div>
   <div class="panel" style="margin-top:14px"><h2>길찾기 엔진 (OSRM)</h2>
    <div id=osrm class=ds></div>
-   <div style="display:flex;gap:8px;margin-top:10px">
-     <button class=ghost id=osrmCheck>최신 확인</button>
-     <button id=osrmUp style="display:none"></button></div></div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+      <button class=ghost id=osrmCheck>최신 확인</button>
+      <button id=osrmUp style="display:none"></button>
+      <button class=ghost id=osrmRebuild title="이미지 변경 없이 길찾기 그래프 3종(car·foot·bike)을 다시 빌드·검증합니다">⟳ 그래프 재빌드</button>
+      <label title="OSM 대규모 갱신 등 의도된 소요시간 변화가 있을 때만 — 사유(1~200자)가 로그에 기록됩니다" style="font-size:12px;display:flex;gap:5px;align-items:center;cursor:pointer"><input type=checkbox id=osrmSkip> 소요시간 변화 검사 생략</label></div></div>
   <div class=panel style="margin-top:14px"><h2>빌드 진행률</h2><div id=cards></div>
    <h2 style="margin-top:14px">실시간 로그</h2><pre id=log></pre></div>
  </div>
@@ -3111,6 +3152,7 @@ function saveVw(){const j=$('#vwPjsess'),b=$('#vwVworld');fetch('/api/secrets/vw
 loadCollect(); loadBuilds(); loadVw(); loadOsrm();
 $('#osrmCheck').onclick=()=>{const b=$('#osrmCheck');b.disabled=true;
   loadOsrm(true).catch(()=>{}).finally(()=>{b.disabled=false;});};
+$('#osrmRebuild').onclick=osrmRebuild;
 $('#collectBtn').onclick=startCollect; $('#dlSelBtn').onclick=()=>alert('선택 항목 내 PC 다운로드 — 다음 단계 연결 예정'); $('#vwSave').onclick=saveVw;
 $('#forceAll').onclick=()=>{document.querySelectorAll('#checks input').forEach(c=>c.checked=true);logln('⟳ 전체 체크 — 최신 무시하고 강제 재빌드');};
 function runBuild(t){
@@ -3161,17 +3203,33 @@ function renderOsrm(d){
    +'<div class=pdrow><span>실행 중</span><span>'+run+'</span></div>'
    +'<div class=pdrow><span>최신 버전</span><span>'+latest+'</span></div>'
    +(warns?'<div style="margin-top:7px">'+warns+'</div>':'');
-  const up=$('#osrmUp'); if(!up)return;
+   const up=$('#osrmUp'); if(!up)return;
+   const rb=$('#osrmRebuild'); if(rb)rb.disabled=!!d.busy;   // 진행 중엔 재빌드 비활성(업그레이드 버튼과 동일 게이트)
   if(d.latest&&d.upgrade_available){up.style.display='';up.textContent='업그레이드 → '+d.latest.tag;
     up.disabled=!!d.busy;up.onclick=()=>osrmUpgrade(d.latest.image);}
   else up.style.display='none';}
 function loadOsrm(latest){return fetch('/api/osrm'+(latest?'?latest=1':'')).then(r=>r.json()).then(d=>{
   if(d.error)return alert(d.error);renderOsrm(d);});}
+// '소요시간 변화 검사 생략' 체크 시 업그레이드·재빌드에 실을 옵션 — 사유 필수, 취소·빈값이면 null(중단)
+function osrmSkipOpt(){
+  const cb=$('#osrmSkip'); if(!cb||!cb.checked)return {drift_skip:false};
+  const r=prompt('소요시간 변화 검사를 생략하는 사유(예: OSM 대규모 갱신)');
+  if(!r||!r.trim())return null;
+  return {drift_skip:true,reason:r};}
 function osrmUpgrade(image){
   if(!confirm('OSRM 을 '+image+' 로 업그레이드합니다. 새 그래프 3종을 빌드·검증(약 15분)한 뒤 통과하면 교체합니다. 진행할까요?'))return;
-  fetch('/api/osrm/upgrade',{method:'POST',body:JSON.stringify({image})}).then(r=>r.json()).then(d=>{
+  const opt=osrmSkipOpt(); if(opt===null)return;   // 생략 체크 시 사유 취소·빈값이면 중단
+  fetch('/api/osrm/upgrade',{method:'POST',body:JSON.stringify(Object.assign({image},opt))}).then(r=>r.json()).then(d=>{
     if(d.error)return alert(d.error);
     logln('⬆ OSRM 업그레이드 큐: '+d.image+' ('+(d.queued||[]).join(', ')+') — 검증 통과 시 교체·고정 갱신, 실패 시 롤백');
+    loadOsrm();}).catch(e=>alert('실패: '+e));}
+// 그래프만 재빌드(이미지 변경 없음) — 07 재실행 큐잉. 생략 체크면 사유와 함께 ROUTE_DRIFT_SKIP 전달
+function osrmRebuild(){
+  if(!confirm('길찾기 그래프 3종을 다시 빌드·검증(약 15분)한 뒤 통과하면 교체합니다. 진행할까요?'))return;
+  const opt=osrmSkipOpt(); if(opt===null)return;   // 생략 체크 시 사유 취소·빈값이면 중단
+  fetch('/api/osrm/rebuild',{method:'POST',body:JSON.stringify(opt)}).then(r=>r.json()).then(d=>{
+    if(d.error)return alert(d.error);
+    logln('⟳ 그래프 재빌드 큐: '+(d.queued||[]).join(', ')+' — 검증 통과 시 교체'+(d.drift_skip?' (⚠ 소요시간 변화 검사 생략)':''));
     loadOsrm();}).catch(e=>alert('실패: '+e));}
 // 드롭된 폴더를 재귀적으로 펼쳐 파일 목록으로(webkitGetAsEntry). _rel(fullPath)로 폴더구조 보존.
 function gatherFiles(dt){

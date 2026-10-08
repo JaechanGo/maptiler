@@ -1971,6 +1971,72 @@ class TestOsrmEngine(IsolatedBuildHome):
             running = M._osrm_running_containers()
         self.assertEqual(running, {"server-osrm-car-1": "ghcr.io/project-osrm/osrm-backend:v5.25.0"})
 
+    def test_osrm_job_env(self):
+        """⑦ _osrm_job_env — 이미지·소요시간 검사 생략 옵션의 env 조립(순수함수). 지정 7케이스+경계."""
+        img = "ghcr.io/project-osrm/osrm-backend:v26.10.0-debian"
+        # 이미지만 → OSRM_IMAGE_NEXT 만
+        self.assertEqual(M._osrm_job_env(image=img), ({"OSRM_IMAGE_NEXT": img}, None))
+        # 잘못된 이미지 → error
+        env, err = M._osrm_job_env(image="nginx:latest")
+        self.assertEqual(env, {}); self.assertTrue(err)
+        # skip+사유 → ROUTE_DRIFT_SKIP·REASON
+        self.assertEqual(M._osrm_job_env(drift_skip=True, reason="OSM 대규모 갱신"),
+                         ({"ROUTE_DRIFT_SKIP": "1", "ROUTE_DRIFT_SKIP_REASON": "OSM 대규모 갱신"}, None))
+        # skip+빈 사유 → error
+        env, err = M._osrm_job_env(drift_skip=True, reason="   ")
+        self.assertEqual(env, {}); self.assertIn("사유", err)
+        # skip+200자 경계 통과 / 201자 → error
+        self.assertIsNone(M._osrm_job_env(drift_skip=True, reason="가" * 200)[1])
+        env, err = M._osrm_job_env(drift_skip=True, reason="가" * 201)
+        self.assertEqual(env, {}); self.assertTrue(err)
+        # skip 거짓+사유 → 사유 무시(env 에 REASON 없음)
+        self.assertEqual(M._osrm_job_env(drift_skip=False, reason="OSM 대규모 갱신"), ({}, None))
+        # 인자 없음 → ({}, None)
+        self.assertEqual(M._osrm_job_env(), ({}, None))
+
+    def _post_rebuild(self, body):
+        """do_POST 의 /api/osrm/rebuild 분기만 실행하는 소켓 없는 핸들러 껍데기 — [(응답, code)]."""
+        h = M.H.__new__(M.H)   # __init__ 우회: rfile·headers·_json 만 갖추면 본문 분기가 돈다
+        h.path = "/api/osrm/rebuild"
+        raw = json.dumps(body).encode()
+        h.headers = {"Content-Length": str(len(raw))}
+        h.rfile = io.BytesIO(raw)
+        sent = []
+        h._json = lambda obj, code=200: sent.append((obj, code))
+        h.do_POST()
+        return sent
+
+    def test_rebuild_handler(self):
+        """⑧ POST /api/osrm/rebuild — _osrm_job_env 결과를 MGR.enqueue(env_overrides=) 에 그대로
+        넘기고 200 {queued, drift_skip} 응답. env 빈 dict 도 큐잉, 사유 누락 400, 진행 중 409."""
+        M.MGR.jobs.pop("route_graph", None)   # 선행 케이스 잔여 상태 방어
+        enq = mock.Mock(return_value={"queued": ["route_graph"]})
+        with mock.patch.object(M.MGR, "enqueue", enq):
+            # skip+사유 → env 를 통째로 enqueue 에 전달
+            sent = self._post_rebuild({"drift_skip": True, "reason": "OSM 대규모 갱신"})
+            enq.assert_called_once_with(
+                ["route_graph"],
+                env_overrides={"route_graph": {"ROUTE_DRIFT_SKIP": "1",
+                                                "ROUTE_DRIFT_SKIP_REASON": "OSM 대규모 갱신"}})
+            self.assertEqual(sent, [({"queued": ["route_graph"], "drift_skip": True}, 200)])
+            # 빈 본문 → env={} 도 큐잉
+            enq.reset_mock()
+            sent = self._post_rebuild({})
+            enq.assert_called_once_with(["route_graph"], env_overrides={"route_graph": {}})
+            self.assertEqual(sent, [({"queued": ["route_graph"], "drift_skip": False}, 200)])
+            # skip+빈 사유 → 400, enqueue 미호출
+            enq.reset_mock()
+            sent = self._post_rebuild({"drift_skip": True, "reason": ""})
+            self.assertEqual(sent[0][1], 400); self.assertIn("사유", sent[0][0]["error"])
+            enq.assert_not_called()
+            # 진행 중 → 409, enqueue 미호출
+            M.MGR.jobs["route_graph"] = {"status": "running"}
+            self.addCleanup(M.MGR.jobs.pop, "route_graph", None)
+            enq.reset_mock()
+            sent = self._post_rebuild({})
+            self.assertEqual(sent[0][1], 409)
+            enq.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
