@@ -1,4 +1,14 @@
-# maptiler — 폐쇄망 3D 지도 서비스
+# TerraDesk — 폐쇄망 3D 지도 서비스
+
+> 저장소·내부 식별자 이름은 `maptiler`·`cuvia` 를 그대로 쓴다(스타일 URL `/styles/cuvia/style.json`, PostGIS 계정 등 — 기존 배포 호환).
+
+| 서비스 | 구성 요소 |
+|---|---|
+| **Terra Map** | 타일 서버 (TileServer-GL + martin, 게이트웨이) |
+| **Terra Search** | 지오코더 (`server/geocode-api*.py`) |
+| **Terra Route** | 길찾기 (OSRM car·foot·bike) |
+| **Terra Build Studio** | 빌드 콘솔 (`scripts/build-studio.py`) |
+| **Terra Style Studio** | 스타일 디자이너 (`scripts/style-studio.py`) |
 
 OpenMapTiles 스키마 기반의 **자체 호스팅 3D 지도 서비스**. 폐쇄망(air-gapped)에서
 MapTiler Cloud를 대체하여 벡터 타일·지형 타일·스타일·글리프·스프라이트를 서빙한다.
@@ -49,10 +59,10 @@ python3 scripts/08-gen-station-exits.py   # 역 출구 (OSM subway_entrance → 
 ./scripts/package.sh             # 폐쇄망 반입 번들 (QC 게이트 통과 시 dist/, 대용량은 BUILD_HOME)
 ```
 
-> 선택: `python3 scripts/build-studio.py` → http://localhost:8090 (무의존 빌드 콘솔).
+> 선택: `python3 scripts/build-studio.py` (**Terra Build Studio**) → http://localhost:8090 (무의존 빌드 콘솔).
 > 업로드(드래그앤드롭·다중·⌘V)·체크박스 정제·종류별 진행률(SSE)·QC·패키징을 웹에서.
-> `/style` 스타일 디자인: 객체별(배경·물·녹지·도로·건물·라벨…) 색을 팔레트/색상값으로 설정,
-> MapLibre 라이브 미리보기, 저장 시 `style/theme.json` 기록 → `build_style.py` 적용. 기본 로컬 전용(외부노출은 `HOST=0.0.0.0`).
+> 헤더의 `🎨 Terra Style Studio →`(`/style`)는 별도 서비스인 **Terra Style Studio**(`STYLE_STUDIO_PORT`, 기본 18082)로 리다이렉트한다.
+> 기본 로컬 전용(외부노출은 `HOST=0.0.0.0`).
 
 폐쇄망 서버: 번들 해제 후 `./scripts/deploy.sh /path/to/images.tar`
 
@@ -62,9 +72,9 @@ python3 scripts/08-gen-station-exits.py   # 역 출구 (OSM subway_entrance → 
 ## 배포 구조 (빌드 / 운영 2환경)
 
 - **인터넷 서버 = 빌드 + 모델하우스(쇼룸)**: `build-studio.py`(또는 위 CLI)로 빌드 → `package.sh` 번들.
-  같은 호스트에 운영 스택(tileserver·demo·geocode·Style Studio)을 띄워 미리보기·스타일 디자인.
+  같은 호스트에 운영 스택(tileserver·demo·geocode·Terra Style Studio)을 띄워 미리보기·스타일 디자인.
 - **번들 물리 반입** → **폐쇄망 서버 = 운영**: `deploy.sh` 로 지도 스택 기동.
-- **Style Studio**(`scripts/style-studio.py`, 경량·무의존) — 빌드 없이 **스타일만** 담당하며 번들에 포함되어
+- **Terra Style Studio**(`scripts/style-studio.py`, 경량·무의존) — 빌드 없이 **스타일만** 담당하며 번들에 포함되어
   쇼룸·폐쇄망 어디서나 배포. 색·POI·글꼴 테마를 팔레트/색상값으로 지정 + MapLibre 라이브 미리보기,
   저장 시 `style/theme.json` → `build_style.py` → tileserver 재시작(영구 반영). import/export 로 환경 간 스타일 이동.
 

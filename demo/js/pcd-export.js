@@ -66,7 +66,7 @@
   function pcdHeader(n, color, ascii, meta) {
     const f = color ? ['x y z rgb', '4 4 4 4', 'F F F F', '1 1 1 1'] : ['x y z', '4 4 4', 'F F F', '1 1 1'];
     return '# .PCD v0.7 - Point Cloud Data file format\n' +
-      '# CUVIA 3D map export (demo/js/pcd-export.js)\n' +
+      '# TerraDesk 3D map export (demo/js/pcd-export.js)\n' +
       '# origin_lonlat ' + meta.lon.toFixed(7) + ' ' + meta.lat.toFixed(7) + '  (WGS84, ENU 원점)\n' +
       '# axes x=east(m) y=north(m) z=elevation(m, SRTM/EGM96 해발)\n' +
       '# extent ' + meta.side + 'm square · terrain_grid ' + meta.tStep + 'm (DEM 원본 ≈30m) · building_grid ' + meta.bStep + 'm\n' +

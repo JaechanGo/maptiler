@@ -17,5 +17,5 @@ if [ -z "${STUDIO_TOKEN:-}" ] && [ "$HOST" = "0.0.0.0" ]; then
   echo "⚠ STUDIO_TOKEN 미설정 + 0.0.0.0 바인드 — 신뢰망에서만 쓰거나 STUDIO_TOKEN 설정 권장." >&2
   echo "  예) STUDIO_TOKEN=\$(openssl rand -hex 12) ./scripts/start-style-studio.sh" >&2
 fi
-echo "CUVIA Style Studio → http://<서버IP>:$PORT  (?token=… 로 접속, COMPOSE_FILE=$COMPOSE_FILE)"
+echo "Terra Style Studio → http://<서버IP>:$PORT  (?token=… 로 접속, COMPOSE_FILE=$COMPOSE_FILE)"
 exec python3 "$ROOT/scripts/style-studio.py"

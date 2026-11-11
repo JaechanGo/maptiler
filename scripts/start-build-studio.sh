@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export BUILD_HOME="${BUILD_HOME:-$HOME/geocode-build}"
 export PORT="${PORT:-18081}"
 export TILE_PORT="${TILE_PORT:-8080}"               # 미리보기 tileserver 포트
-export STYLE_STUDIO_PORT="${STYLE_STUDIO_PORT:-18082}"  # '스타일 디자인' 링크 대상
+export STYLE_STUDIO_PORT="${STYLE_STUDIO_PORT:-18082}"  # 'Terra Style Studio' 링크 대상
 export HOST="${HOST:-0.0.0.0}"                      # 기본 외부(LAN) 노출 — 무인증 콘솔이므로 신뢰망에서만. 로컬 전용은 HOST=127.0.0.1
 export COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/server/docker-compose.yml}"
 mkdir -p "$BUILD_HOME"

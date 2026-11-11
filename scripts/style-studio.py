@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CUVIA Style Studio — 경량 스타일 디자이너(배포 가능, 무의존 stdlib).
+"""Terra Style Studio — 경량 스타일 디자이너(배포 가능, 무의존 stdlib).
 
 빌드 파이프라인 없이 '스타일 디자인'만 담당한다. 운영(지도) 스택 옆에 함께 배포해
 배포된 지도의 색·POI·글꼴 테마를 현장에서 지정한다(저장 → build_style → tileserver reload).
@@ -356,7 +356,7 @@ class H(BaseHTTPRequestHandler):
 
 STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>CUVIA Style Studio</title>
+<title>Terra Style Studio</title>
 <link rel=stylesheet href="/vendor/maplibre/maplibre-gl.css">
 <style>
  body{margin:0;background:#0f1420;color:#e8edf5;font:14px/1.5 -apple-system,system-ui,'Apple SD Gothic Neo',sans-serif;height:100vh;overflow:hidden}
@@ -401,7 +401,7 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .txr .noic{color:#5f6b80;width:22px;text-align:center} .txr .tup{background:#1a2233;border:1px solid #26304a;color:#cfe0ff;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer}
 </style>
 <div class=top>
- <div class=brand><span class=dot></span>CUVIA Style Studio</div>
+ <div class=brand><span class=dot></span>Terra Style Studio</div>
  <button class=g id=reset style="margin-left:auto">되돌리기</button>
  <button id=save>저장 & 적용</button>
  <span class=st id=status></span>
@@ -1107,6 +1107,6 @@ STYLE_PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 if __name__ == "__main__":
     shown = "localhost" if HOST in ("127.0.0.1", "localhost") else HOST
     warn = "" if (HOST in ("127.0.0.1", "localhost") or STUDIO_TOKEN) else "  ⚠ 외부노출+무토큰 — STUDIO_TOKEN 설정 권장"
-    print(f"CUVIA Style Studio → http://{shown}:{PORT}  (bind {HOST}"
+    print(f"Terra Style Studio → http://{shown}:{PORT}  (bind {HOST}"
           f"{', token 보호' if STUDIO_TOKEN else ''}, tileserver :{TILE_PORT}){warn}", flush=True)
     ThreadingHTTPServer((HOST, PORT), H).serve_forever()

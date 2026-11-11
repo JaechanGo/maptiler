@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CUVIA 지도 서비스 — 연동 가이드</title>
-<meta name="description" content="폐쇄망 CUVIA 지도(OpenMapTiles 스키마) 연동 가이드 — 스타일 URL, 라이브 미리보기, 드롭인 코드, 엔드포인트, 토글 레이어 id.">
+<title>TerraDesk 지도 서비스 — 연동 가이드</title>
+<meta name="description" content="폐쇄망 TerraDesk 지도(Terra Map · OpenMapTiles 스키마) 연동 가이드 — 스타일 URL, 라이브 미리보기, 드롭인 코드, 엔드포인트, 토글 레이어 id.">
 <!-- 주의: 이 파일은 tileserver-gl 의 frontPage 로 Handlebars 컴파일되어 :8080/ 에 서빙됩니다.
      이중 중괄호(mustache) 토큰을 본문에 쓰지 마세요 — 렌더가 깨집니다(JSON 예시는 들여쓰기로 분리). -->
 <!-- maplibre: tileserver paths.files(/files) 로 서빙 → :8080 직결·게이트웨이 모두 같은 상대경로로 동작 -->
@@ -103,7 +103,7 @@
     <div class="brand">
       <div class="logo" aria-hidden="true">▦</div>
       <div>
-        <div class="t1">CUVIA 지도 서비스</div>
+        <div class="t1">TerraDesk 지도 서비스</div>
         <div class="t2">폐쇄망 MapTiler 대체 · OpenMapTiles 스키마 · 전국</div>
       </div>
     </div>
@@ -542,7 +542,7 @@ await fetch('/nearest/v1/walking/126.9877,37.4292');</pre>
   <footer>
     <p class="warnline">좌표 순서 주의: MapLibre 는 모든 곳에서 <code>[경도(lng), 위도(lat)]</code> 입니다. Leaflet 의 <code>[lat, lng]</code> 와 반대입니다.</p>
     <p>폐쇄망 전환 후 기존 프론트의 MapTiler API 키 문자열은 더 이상 필요 없습니다. 공개 저장소에 노출된 키는 폐기하세요.</p>
-    <p class="faint">CUVIA 폐쇄망 지도 서비스 · TileServer-GL + Planetiler(OpenMapTiles) · 데이터 출처/라이선스는 운영팀 문서를 참고하세요.</p>
+    <p class="faint">TerraDesk 폐쇄망 지도 서비스 · Terra Map(TileServer-GL) + Planetiler(OpenMapTiles) · 데이터 출처/라이선스는 운영팀 문서를 참고하세요.</p>
   </footer>
 
 </div>

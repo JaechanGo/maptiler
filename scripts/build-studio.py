@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CUVIA Build Studio (MVP) — 무의존(파이썬 표준 라이브러리만) 빌드 콘솔.
+"""Terra Build Studio (MVP) — 무의존(파이썬 표준 라이브러리만) 빌드 콘솔.
 
 원천데이터(SHP/CSV)를 기반으로 지오코드 인덱스·타일을 빌드하고, 종류별 진행률을 SSE로
 실시간 표시하며, 체크박스로 빌드 대상을 정제하고, 완료물을 폐쇄망 번들로 패키징한다.
@@ -1786,7 +1786,7 @@ def _collect_headers(src):
     if (src.get("collect") or {}).get("method") == "vworld_session":
         ck = _vworld_cookie()
         if not ck:
-            raise RuntimeError("VWorld 세션 쿠키 없음 — Build Studio UI(🔑 PJSESSIONID·vworld) 또는 "
+            raise RuntimeError("VWorld 세션 쿠키 없음 — Terra Build Studio UI(🔑 PJSESSIONID·vworld) 또는 "
                                f"환경변수 VWORLD_COOKIE / {BUILD_HOME}/.secrets/vworld_cookie 설정")
         # Referer 는 해당 dsId 다운로드센터 페이지(src.url) — VWorld 가 Referer 검사함
         return {"Cookie": ck, "Referer": src.get("url") or "https://www.vworld.kr/dtmk/"}
@@ -1812,7 +1812,7 @@ def _vworld_list_filenos(ds, col):
             "VWorld 목록 fileNo 0개 — " + (
                 "다운로드 버튼은 있으나 level 필터 결과 0(level/페이지 구조 확인)" if has_btn else
                 "목록 HTML에 다운로드 버튼 없음 → 세션 쿠키 만료(로그인 페이지) 또는 list_url 오류. "
-                "Build Studio 에서 VWorld 쿠키(PJSESSIONID·vworld) 재입력 후 재시도")
+                "Terra Build Studio 에서 VWorld 쿠키(PJSESSIONID·vworld) 재입력 후 재시도")
             + f"  [url={url} · html={len(html)}B]")
     return nos
 
@@ -2810,7 +2810,7 @@ class H(BaseHTTPRequestHandler):
 
 PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>CUVIA Build Studio</title>
+<title>Terra Build Studio</title>
 <style>
  :root{--bg:#0f1420;--card:#161d2c;--bd:#26304a;--mut:#8d9bb5;--tx:#e8edf5;--ac:#5b9bd5}
  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);
@@ -2881,8 +2881,8 @@ PAGE = r"""<!doctype html><html lang=ko><meta charset=utf-8>
  .info{font-size:10px} .dash{color:var(--bd);width:13px;display:inline-block;text-align:center}
 </style>
 <header><div style="width:9px;height:9px;border-radius:99px;background:var(--ac)"></div>
- <div><h1>CUVIA Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
- <a href="/style" target="_blank" rel="noopener" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 스타일 디자인 →</a></header>
+ <div><h1>Terra Build Studio</h1><div class=sub id=bh>지도데이터 빌드 콘솔</div></div>
+ <a href="/style" target="_blank" rel="noopener" style="margin-left:auto;color:var(--ac);text-decoration:none;border:1px solid var(--bd);border-radius:8px;padding:7px 13px;font-size:13px">🎨 Terra Style Studio →</a></header>
 <div class=wrap>
  <div>
   <div class=panel><h2>자동 수집 목록</h2>
@@ -3249,5 +3249,5 @@ function gatherFiles(dt){
 if __name__ == "__main__":
     shown = "localhost" if HOST in ("127.0.0.1", "localhost") else HOST
     warn = "" if HOST in ("127.0.0.1", "localhost") else "  ⚠ 외부노출(무인증) — 신뢰망에서만"
-    print(f"CUVIA Build Studio → http://{shown}:{PORT}  (bind {HOST}, BUILD_HOME={BUILD_HOME}){warn}", flush=True)
+    print(f"Terra Build Studio → http://{shown}:{PORT}  (bind {HOST}, BUILD_HOME={BUILD_HOME}){warn}", flush=True)
     ThreadingHTTPServer((HOST, PORT), H).serve_forever()

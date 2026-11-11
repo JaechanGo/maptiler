@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "name": "CUVIA Base (Dark)",
+  "name": "Terra Base (Dark)",
   "glyphs": "{fontstack}/{range}.pbf",
   "sprite": "{styleJsonFolder}/sprite",
   "sources": {

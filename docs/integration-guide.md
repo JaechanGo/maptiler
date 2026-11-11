@@ -1,6 +1,6 @@
 # 소비 프론트엔드 연동 가이드
 
-본 지도 서비스는 MapTiler Cloud의 드롭인 대체다. 변경은 **style URL 한 줄**이다.
+본 지도 서비스(**TerraDesk** · 타일 서버 Terra Map)는 MapTiler Cloud의 드롭인 대체다. 변경은 **style URL 한 줄**이다.
 
 ## 1. URL 교체
 
